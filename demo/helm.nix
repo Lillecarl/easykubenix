@@ -2,9 +2,11 @@
 { helm, ... }:
 {
   config = {
-    kubernetes.resources.kube-system.Secret.hcloud.data.token = "";
+    # Since we're only setting one final subattribute this is really the entire
+    # hetzner secret
+    kubernetes.resources.kube-system.Secret.hcloud.stringData.token = "";
     helm.releases.hccm = {
-      namespace = "hccm-system";
+      namespace = "kube-system";
 
       chart = helm.fetch {
         repo = "https://charts.hetzner.cloud";
@@ -14,7 +16,6 @@
       };
 
       values = {
-        env.HCLOUD_INSTANCES_ADDRESS_FAMILY.value = "dualstack";
         additionalTolerations = [
           {
             key = "node.cilium.io/agent-not-ready";
