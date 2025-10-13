@@ -26,7 +26,6 @@ cat $(nix build --print-out-paths --file . manifestYAMLFile)
 
 ### Modules API
 ```nix
-# my-manifests.nix
 {
   kubernetes.namespace.ConfigMap.my-awesome-configmap = {
     stringData."config.json" = builtins.toJSON { key = "value"; };
@@ -35,6 +34,25 @@ cat $(nix build --print-out-paths --file . manifestYAMLFile)
   kubernetes.namespace.Deployment.my-app = {
     spec.replicas = 3;
   };
+}
+```
+How to create an easykubenix instance (probably)
+```nix
+{ pkgs ? import <nixpkgs> {}}:
+let
+  easykubenix = import (
+    builtins.fetchTree {
+      type = "github";
+      owner = "lillecarl";
+      repo = "easykubenix";
+    }
+  );
+in
+easykubenix {
+  inherit pkgs;
+  modules = [
+    ./my-modules.nix
+  ];
 }
 ```
 
