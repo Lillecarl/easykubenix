@@ -159,7 +159,7 @@ in
 
           for i in (seq ${cfg.retryCount})
             $command && begin
-              echo "Success!"
+              echo "Great success!"
               exit 0
             end
           end

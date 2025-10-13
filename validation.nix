@@ -50,7 +50,7 @@ in
       script =
         pkgs.writeScriptBin "kubeval" # fish
           ''
-            #! ${pkgs.fishMinimal}/bin/fish
+            #! ${lib.getExe pkgs.fishMinimal}
             set --prepend PATH ${cfg.etcdPackage}/bin
             set --prepend PATH ${cfg.kubernetesPackage}/bin
             set --prepend PATH ${pkgs.retry}/bin
@@ -152,8 +152,7 @@ in
 
             echo "kube-apiserver ready; applying manifest(s)"
 
-            ${lib.getExe config.kluctl.script} --yes --no-wait && echo "Great success!"
-
+            ${lib.getExe config.kluctl.script} --yes --no-wait
             exit $status
           '';
     };
