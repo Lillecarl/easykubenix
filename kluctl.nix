@@ -6,6 +6,7 @@
 }:
 let
   cfg = config.kluctl;
+  settingsFormat = pkgs.formats.json { };
 
   writeMultipleFiles =
     {
@@ -56,7 +57,7 @@ in
         default = "easykubenix";
       };
       project = lib.mkOption {
-        type = lib.types.anything;
+        type = settingsFormat.type;
         description = "Anything to be rendered into .kluctl.yaml";
         default = {
           targets = [ { name = "local"; } ];
@@ -71,7 +72,7 @@ in
         };
       };
       deployment = lib.mkOption {
-        type = lib.types.anything;
+        type = settingsFormat.type;
         description = "Anything to be rendered into deployment.yaml";
         default = { };
       };

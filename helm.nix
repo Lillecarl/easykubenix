@@ -10,6 +10,8 @@
 with lib;
 let
   cfg = config.helm;
+  settingsFormat = pkgs.formats.json { };
+  globalConfig = config;
 in
 {
   options.helm = {
@@ -39,15 +41,15 @@ in
 
               values = mkOption {
                 description = "Values to pass to chart";
-                type = lib.types.anything;
+                type = settingsFormat.type;
                 default = { };
               };
 
               kubeVersion = mkOption {
                 description = "Kubernetes version to build chart for";
                 type = types.str;
-                # default = globalConfig.kubernetes.version;
-                default = "1.34.1";
+                default = globalConfig.kubernetes.version;
+                # default = "1.34.1";
               };
 
               overrides = mkOption {

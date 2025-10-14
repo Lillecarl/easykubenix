@@ -7,6 +7,7 @@
 with lib;
 let
   cfg = config.importyaml;
+  settingsFormat = pkgs.formats.json { };
   /*
     Recursively applies a function `f` to every non-list, non-attrset value
     in a nested structure. The function `f` receives two arguments:
@@ -46,11 +47,11 @@ let
         };
         overrides = mkOption {
           description = "Overrides to apply to all resources";
-          type = types.listOf types.anything;
+          type = types.listOf settingsFormat.type;
           default = [ ];
         };
         manifests = lib.mkOption {
-          type = types.listOf types.anything;
+          type = types.listOf settingsFormat.type;
           internal = true;
         };
       };

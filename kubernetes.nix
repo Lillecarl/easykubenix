@@ -1,6 +1,12 @@
-{ config, lib, ... }:
+{
+  config,
+  pkgs,
+  lib,
+  ...
+}:
 let
   cfg = config.kubernetes;
+  settingsFormat = pkgs.formats.json { };
 
   parseApiResources =
     file:
@@ -20,7 +26,7 @@ let
   resourceBody = lib.types.submodule (
     { name, ... }:
     {
-      freeformType = lib.types.anything;
+      freeformType = settingsFormat.type;
       options = {
         apiVersion = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
@@ -34,7 +40,7 @@ let
         };
         metadata = lib.mkOption {
           type = lib.types.submodule {
-            freeformType = lib.types.anything;
+            freeformType = settingsFormat.type;
             options.name = lib.mkOption {
               type = lib.types.str;
               default = name;
@@ -84,7 +90,7 @@ in
     };
 
     generated = lib.mkOption {
-      type = lib.types.anything;
+      type = settingsFormat.type;
       internal = true;
       description = "The final, generated Kubernetes list object.";
     };

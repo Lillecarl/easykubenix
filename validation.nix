@@ -6,6 +6,7 @@
 }:
 let
   cfg = config.validation;
+  settingsFormat = pkgs.formats.json { };
   debugpipe = if (!cfg.debug) then "&>/dev/null" else "";
 in
 {
@@ -14,7 +15,7 @@ in
     etcdPackage = lib.mkPackageOption pkgs "etcd" { };
     kubernetesPackage = lib.mkPackageOption pkgs "kubernetes" { };
     kubeadmConfig = lib.mkOption {
-      type = lib.types.anything;
+      type = settingsFormat.type;
     };
     podSubnet = lib.mkOption {
       type = lib.types.str;
