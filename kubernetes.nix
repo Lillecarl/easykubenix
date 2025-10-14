@@ -55,7 +55,8 @@ let
 in
 {
   options.kubernetes = {
-    # In your options definition
+    package = lib.mkPackageOption pkgs "kubernetes" { };
+
     resources = lib.mkOption {
       type = lib.types.attrsOf (lib.types.attrsOf (lib.types.attrsOf resourceBody));
       default = { };

@@ -13,7 +13,6 @@ in
   options.validation = {
     debug = lib.mkEnableOption "validation debugging";
     etcdPackage = lib.mkPackageOption pkgs "etcd" { };
-    kubernetesPackage = lib.mkPackageOption pkgs "kubernetes" { };
     kubeadmConfig = lib.mkOption {
       type = settingsFormat.type;
     };
@@ -39,7 +38,7 @@ in
       kubeadmConfig = lib.mapAttrsRecursive (n: v: lib.mkDefault v) {
         apiVersion = "kubeadm.k8s.io/v1beta4";
         kind = "ClusterConfiguration";
-        kubernetesVersion = "v${cfg.kubernetesPackage.version}";
+        kubernetesVersion = "v${config.kubernetes.package.version}";
         controlPlaneEndpoint = "$BIND_ADDRESS:$KUBERNETES_PORT";
         certificatesDir = "$CERT_DIR";
         networking = {
@@ -53,7 +52,7 @@ in
           ''
             #! ${lib.getExe pkgs.fishMinimal}
             set --prepend PATH ${cfg.etcdPackage}/bin
-            set --prepend PATH ${cfg.kubernetesPackage}/bin
+            set --prepend PATH ${config.kubernetes.package}/bin
             set --prepend PATH ${pkgs.retry}/bin
             set TMPDIR (mktemp --directory --suffix=eknvalidation)
             ${if cfg.debug then "echo TMPDIR: $TMPDIR" else ""}

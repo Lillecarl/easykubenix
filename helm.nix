@@ -48,8 +48,7 @@ in
               kubeVersion = mkOption {
                 description = "Kubernetes version to build chart for";
                 type = types.str;
-                default = globalConfig.kubernetes.version;
-                # default = "1.34.1";
+                default = globalConfig.kubernetes.package.version;
               };
 
               overrides = mkOption {
