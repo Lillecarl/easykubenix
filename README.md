@@ -1,5 +1,6 @@
 # easykubenix
-Note that a lot of this text is AI slop, don't judge the book by it's cover though!
+Note that a lot of this text is AI slop(because i write like a toddler), don't
+judge the book by it's cover though!
 
 `easykubenix` uses the NixOS module system to generate Kubernetes manifests. It
 avoids generating Nix types for the entire Kubernetes API, resulting in faster
@@ -67,6 +68,11 @@ To generate the final YAML manifests, import your modules into the provided
   modules = [ ./my-modules.nix ];
 }).eval
 ```
+
+#### Quirks:
+The namespace "none" in ```kubernetes.resources.none.kind.name``` is reserved
+for not setting any namespace. If you create resources in the none namespace
+you must set metadata.namespace yourself.
 
 ## Features
 
