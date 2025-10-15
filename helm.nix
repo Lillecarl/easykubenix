@@ -14,6 +14,7 @@ let
 in
 {
   options.helm = {
+    package = lib.mkPackageOption pkgs "kubernetes-helm" { };
     releases = mkOption {
       description = "Attribute set of helm releases";
       type = types.attrsOf (
@@ -111,7 +112,7 @@ in
             ];
 
             config.objects = importJSON (
-              pkgs.chart2json {
+              pkgs.chart2json.override { kubernetes-helm = cfg.package; } {
                 inherit (config)
                   chart
                   name
