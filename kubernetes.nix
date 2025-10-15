@@ -98,41 +98,53 @@ in
   };
 
   config.kubernetes = {
-    # The module system merges this definition with the default and any user-provided values.
-    # Values from the file will override the defaults.
+    # Get apiMappings from apiMappingFile
     apiMappings = parseApiResources cfg.apiMappingFile;
 
-    generated =
-      let
-        cleanedResources = lib.filterAttrsRecursive (n: v: v != null) cfg.resources;
-        mappedResources = lib.mapAttrs (
-          namespace: resourcesByKind:
+    generated = lib.pipe cfg.resources [
+      # Remove all nulls
+      (lib.filterAttrsRecursive (n: v: v != null))
+      # Inject apiVersion, kind, metadata.name and metadata.namespace as appropriate
+      (lib.mapAttrs (
+        namespace: resourcesByKind:
+        lib.mapAttrs (
+          kind: resourcesByName:
           lib.mapAttrs (
-            kind: resourcesByName:
-            lib.mapAttrs (
-              name: attrs:
-              # Provide a base set of attributes. `recursiveUpdate` will merge `attrs` on top,
-              # so any user-defined values for these fields will take precedence.
-              lib.recursiveUpdate (
-                {
-                  apiVersion = cfg.apiMappings.${kind};
-                  kind = kind;
-                  metadata.name = name;
-                }
-                // lib.optionalAttrs (namespace != "none") {
-                  metadata.namespace = namespace;
-                }
-              ) attrs
-            ) resourcesByName
-          ) resourcesByKind
-        ) cleanedResources;
-
-        resourceList = lib.flatten (
-          lib.mapAttrsToList (
-            nsName: kinds: lib.mapAttrsToList (kindName: names: lib.attrValues names) kinds
-          ) mappedResources
-        );
-      in
-      resourceList;
+            name: resourceAttrs:
+            # Provide a base set of attributes. `recursiveUpdate` will merge `attrs` on top,
+            # so any user-defined values for these fields will take precedence.
+            lib.recursiveUpdate (
+              {
+                apiVersion = cfg.apiMappings.${kind};
+                kind = kind;
+                metadata.name = name;
+              }
+              # Don't add metadata.namespace if the namespace is "none"
+              // lib.optionalAttrs (namespace != "none") {
+                metadata.namespace = namespace;
+              }
+            ) resourceAttrs
+          ) resourcesByName
+        ) resourcesByKind
+      ))
+      # Convert attrsets with subattr _namedlist to list with name set
+      (lib.mapAttrsRecursiveCond (as: !(as ? "_namedlist")) (
+        path: value:
+        if value._namedlist or false == true then
+          lib.pipe value [
+            (lib.filterAttrs (n: _: n != "_namedlist"))
+            lib.attrsToList
+            (lib.map (v: v.value // { inherit (v) name; }))
+          ]
+        else
+          value
+      ))
+      # Convert kubernetes.resources.namespace.kind.name into a list of list resources
+      (lib.mapAttrsToList (
+        namespace: kinds: lib.mapAttrsToList (kind: names: lib.attrValues names) kinds
+      ))
+      # Flatten the nested lists
+      lib.flatten
+    ];
   };
 }
