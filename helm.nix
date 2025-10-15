@@ -4,7 +4,6 @@
   config,
   lib,
   pkgs,
-  helm,
   ...
 }:
 with lib;
@@ -112,7 +111,7 @@ in
             ];
 
             config.objects = importJSON (
-              helm.chart2json {
+              pkgs.chart2json {
                 inherit (config)
                   chart
                   name

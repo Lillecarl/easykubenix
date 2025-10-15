@@ -6,15 +6,12 @@
   debug ? true,
 }:
 let
-  inherit (pkgs) lib;
+  pkgs' = pkgs.extend (import ./pkgs/default.nix);
+in
+let
+  pkgs = pkgs';
+  lib = pkgs.lib;
   attrIf = condition: content: if condition then content else { };
-
-  kubenix = builtins.fetchTree {
-    type = "github";
-    owner = "hall";
-    repo = "kubenix";
-    ref = "e8577e661f3286624f79ce5ca3240a0ffcea9a7d";
-  };
 
   eval = lib.evalModules {
     modules = [
@@ -29,7 +26,6 @@ let
     specialArgs = {
       inherit pkgs;
       inherit (pkgs) lib;
-      helm = import "${kubenix}/lib/helm" { inherit pkgs; };
     }
     // specialArgs;
   };

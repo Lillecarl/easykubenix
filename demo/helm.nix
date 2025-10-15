@@ -1,5 +1,5 @@
 # Helm example
-{ helm, ... }:
+{ pkgs, ... }:
 {
   config = {
     # Since we're only setting one final subattribute this is really the entire
@@ -8,7 +8,7 @@
     helm.releases.hccm = {
       namespace = "kube-system";
 
-      chart = helm.fetch {
+      chart = pkgs.fetchHelm {
         repo = "https://charts.hetzner.cloud";
         chart = "hcloud-cloud-controller-manager";
         version = "1.27.0";
