@@ -128,6 +128,7 @@ in
         ) resourcesByKind
       ))
       # Convert attrsets with subattr _namedlist to list with name set
+      # TODO: _namedlist doesn't work within _namedlist
       (lib.mapAttrsRecursiveCond (as: !(as ? "_namedlist")) (
         path: value:
         if value._namedlist or false == true then
