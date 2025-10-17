@@ -114,8 +114,13 @@ in
               --project-dir ${cfg.projectDir} \
               $argv # --dry-run? --yes? --prune!
           echo $command
-          $command || echo "Naughty naughty!" && echo "Great success!"
-          exit $status
+          $command || begin
+            echo "Naughty naughty!"
+            exit 1
+          end && begin
+            echo "Great success!"
+            exit 0
+          end
         '';
   };
 }
