@@ -42,11 +42,6 @@ in
         description = "Attribute set where name is filename and value is string to be put into the file";
         default = { };
       };
-      retryCount = lib.mkOption {
-        type = lib.types.int;
-        default = 3;
-        apply = toString;
-      };
       projectDir = lib.mkOption {
         type = lib.types.package;
         internal = true;
@@ -60,6 +55,7 @@ in
   config = {
     kluctl.deployment = {
       deployments =
+        # Create barrier deployments for prioritized resource kinds
         (lib.pipe cfg.resourcePriority [
           lib.attrsToList
           (lib.sort (a: b: a.value < b.value))
@@ -69,6 +65,7 @@ in
           }))
         ])
         ++ [
+          # Default resource kinds go into "default"
           {
             path = "default";
           }
@@ -110,7 +107,6 @@ in
       pkgs.writeScriptBin "kubenixDeploy" # fish
         ''
           #! ${lib.getExe pkgs.fishMinimal}
-          echo "Calling kluctl with ${cfg.retryCount} retries."
           set command ${lib.getExe cfg.package} deploy \
               --no-update-check \
               --target local \
@@ -118,13 +114,7 @@ in
               --project-dir ${cfg.projectDir} \
               $argv # --dry-run? --yes? --prune!
           echo $command
-
-          for i in (seq ${cfg.retryCount})
-            $command && begin
-              echo "Great success!"
-              exit 0
-            end
-          end
+          $command || echo "Naughty naughty!" && echo "Great success!"
           exit $status
         '';
   };
