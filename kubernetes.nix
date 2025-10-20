@@ -103,7 +103,7 @@ in
 
     generated = lib.pipe cfg.resources [
       # Remove all nulls
-      (lib.filterAttrsRecursive (n: v: v != null))
+      (lib.filterAttrsRecursive (_: v: v != null))
       # Inject apiVersion, kind, metadata.name and metadata.namespace as appropriate
       (lib.mapAttrs (
         namespace: resourcesByKind:

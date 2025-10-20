@@ -1,4 +1,35 @@
 self: lib: {
+  # Takes an attribute set and marks it as a `_namedlist`.
+  # It validates that every value within the input attrset is also an attrset.
+  # This is intended for manually defining `_namedlist` structures in Nix code.
+  mkNamedList =
+    attrs:
+    if !lib.isAttrs attrs then
+      throw "mkNamedList error: Input must be an attribute set."
+    # Ensure all children are also attribute sets, as required by the `_namedlist` contract.
+    else if !(lib.all lib.isAttrs (lib.attrValues attrs)) then
+      throw "mkNamedList error: All values in the attribute set must themselves be attribute sets."
+    else
+      attrs // { _namedlist = true; };
+
+  # Takes an attribute set and marks it as a `_numberedlist`.
+  # It validates that all keys are valid integer strings (e.g., "0", "5", "100").
+  # This ensures the structure can be losslessly converted back to an ordered list by sorting the keys numerically.
+  mkNumberedList =
+    attrs:
+    if !lib.isAttrs attrs then
+      throw "mkNumberedList error: Input must be an attribute set."
+    else
+      let
+        keys = lib.attrNames attrs;
+        # Check if every key can be successfully parsed as an integer.
+        allKeysAreInts = lib.all (key: (lib.trivial.tryEval (builtins.toInt key)).success) keys;
+      in
+      if !allKeysAreInts then
+        throw "mkNumberedList error: All keys in the attribute set must be integer strings."
+      else
+        attrs // { _numberedlist = true; };
+
   # Recursively traverses a data structure, applying a transformer function to each node.
   # The traversal is pre-order (top-down), meaning a node is transformed *before* its children.
   # The transformer function receives two arguments:
