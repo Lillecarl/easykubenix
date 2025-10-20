@@ -40,23 +40,33 @@ let
           description = "Should be either a derivation or URL for builtins.fetchTree";
           type = types.either types.package types.str;
         };
-        overrideNamespace = lib.mkOption {
-          description = "Override any attribute with name namespace DEEPLY";
-          type = types.nullOr types.str;
-          default = null;
-        };
         overrides = mkOption {
           description = "Overrides to apply to all resources";
           type = types.listOf settingsFormat.type;
           default = [ ];
         };
-        manifests = lib.mkOption {
-          type = types.listOf settingsFormat.type;
-          internal = true;
+        overrideNamespace = lib.mkOption {
+          description = "Override any attribute with name namespace DEEPLY";
+          type = types.nullOr types.str;
+          default = null;
+        };
+        convertLists = mkOption {
+          description = ''
+            Converts lists where all entires have a name attribute into
+            attrsets instead. These attrsets are converted back into
+            lists before rendering Kubernetes manifests.
+          '';
+          type = types.bool;
+          default = true;
+        };
+        objects = mkOption {
+          description = "Generated kubernetes objects";
+          type = types.listOf types.attrs;
+          default = [ ];
         };
       };
       config = {
-        manifests =
+        objects =
           let
             src =
               if isDerivation config.src then
@@ -121,11 +131,16 @@ in
           map (object: {
             ${object.metadata.namespace or "none"}.${object.kind}."${object.metadata.name}" = mkMerge (
               [
-                object
+                (
+                  if yaml.convertLists then # fmt
+                    (lib.walkWithPath lib.kubeListsToAttrs) object
+                  else
+                    object
+                )
               ]
               ++ yaml.overrides
             );
-          }) yaml.manifests
+          }) yaml.objects
         ) cfg
       )
     );

@@ -127,19 +127,10 @@ in
           ) resourcesByName
         ) resourcesByKind
       ))
-      # Convert attrsets with subattr _namedlist to list with name set
-      # TODO: _namedlist doesn't work within _namedlist
-      (lib.mapAttrsRecursiveCond (as: !(as ? "_namedlist")) (
-        path: value:
-        if value._namedlist or false == true then
-          lib.pipe value [
-            (lib.filterAttrs (n: _: n != "_namedlist"))
-            lib.attrsToList
-            (lib.map (v: v.value // { inherit (v) name; }))
-          ]
-        else
-          value
-      ))
+      # Convert attrset with _namedlist attribute true to lists. This is useful
+      # when we want to override things in the Kubernetes containers list for
+      # example.
+      (lib.walkWithPath lib.kubeAttrsToLists)
       # Convert kubernetes.resources.namespace.kind.name into a list of list resources
       (lib.mapAttrsToList (
         namespace: kinds: lib.mapAttrsToList (kind: names: lib.attrValues names) kinds

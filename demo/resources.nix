@@ -31,6 +31,10 @@
               main-app = {
                 name = "main-app";
                 image = "registry.k8s.io/pause:3.9";
+                env = {
+                  _namedlist = true;
+                  ASDF.value = "fdsa";
+                };
               };
               sidecar = {
                 name = "sidecar";

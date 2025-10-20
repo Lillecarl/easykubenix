@@ -1,5 +1,5 @@
 # helm defines kubenix module with options for using helm charts with kubenix
-# Copied from hall/kubenix
+# Based on hall/kubenix
 {
   config,
   lib,
@@ -59,6 +59,16 @@ in
 
               overrideNamespace = mkOption {
                 description = "Whether to apply namespace override";
+                type = types.bool;
+                default = true;
+              };
+
+              convertLists = mkOption {
+                description = ''
+                  Converts lists where all entires have a name attribute into
+                  attrsets instead. These attrsets are converted back into
+                  lists before rendering Kubernetes manifests.
+                '';
                 type = types.bool;
                 default = true;
               };
@@ -140,7 +150,12 @@ in
           map (object: {
             ${object.metadata.namespace or "none"}.${object.kind}."${object.metadata.name}" = mkMerge (
               [
-                object
+                (
+                  if release.convertLists then # fmt
+                    (lib.walkWithPath lib.kubeListsToAttrs) object
+                  else
+                    object
+                )
               ]
               ++ release.overrides
             );
