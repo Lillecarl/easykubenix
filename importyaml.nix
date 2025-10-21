@@ -8,29 +8,7 @@ with lib;
 let
   cfg = config.importyaml;
   settingsFormat = pkgs.formats.json { };
-  /*
-    Recursively applies a function `f` to every non-list, non-attrset value
-    in a nested structure. The function `f` receives two arguments:
-    `f key value`, where `key` is the attribute name. For list elements,
-    `key` is null.
-  */
-  deepMapWithKey =
-    f:
-    let
-      # Recursive helper function
-      recurse =
-        key: value:
-        if lib.isAttrs value then
-          lib.mapAttrs (name: val: recurse name val) value
-        else if lib.isList value then
-          # List elements don't have a key, so pass null
-          lib.map (elem: recurse null elem) value
-        else
-          # At a leaf, apply the user's function with the key and value
-          f key value;
-    in
-    # Start the recursion; the top-level value has no parent key
-    value: recurse null value;
+  globalConfig = config;
 
   importyaml = types.submodule (
     { config, ... }:
@@ -41,12 +19,12 @@ let
           type = types.either types.package types.str;
         };
         overrides = mkOption {
-          description = "Overrides to apply to all resources";
+          description = "Overrides to apply to all resources, don't do namespace here";
           type = types.listOf settingsFormat.type;
           default = [ ];
         };
         overrideNamespace = lib.mkOption {
-          description = "Override any attribute with name namespace DEEPLY";
+          description = "Override namespace for all namespaced resources";
           type = types.nullOr types.str;
           default = null;
         };
@@ -95,22 +73,18 @@ let
             list = builtins.fromJSON jsonStr;
           in
           if config.overrideNamespace != null then
-            # Update attribute with name namespace through the entire manifest
-            lib.pipe list [
-              # Special case for updating namespace resources
-              (lib.map (
-                v:
-                if v.kind or null == "Namespace" then
-                  lib.recursiveUpdate v {
-                    metadata.name = config.overrideNamespace;
-                  }
-                else
-                  v
-              ))
-              # Recursively update anything called "namespace" with the new value
-              # There's no way to import a YAML with multiple namespace specs correctly.
-              (deepMapWithKey (n: v: if n == "namespace" then config.overrideNamespace else v))
-            ]
+            lib.map (
+              resource:
+              let
+                namespaced =
+                  globalConfig.kubernetes.namespacedMappings.${resource.kind} or throw
+                    "kind ${resource.kind} doesn't have a namespacedMapping";
+              in
+              if namespaced then
+                lib.recursiveUpdate resource { metadata.namespace = config.overrideNamespace; }
+              else
+                resource
+            ) list
           else
             list;
       };
