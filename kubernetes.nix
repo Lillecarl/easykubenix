@@ -8,21 +8,6 @@ let
   cfg = config.kubernetes;
   settingsFormat = pkgs.formats.json { };
 
-  parseApiResources =
-    file:
-    let
-      data = builtins.fromJSON (builtins.readFile file);
-      resourceToAttr = resource: {
-        name = resource.kind;
-        value =
-          if !(resource ? group) || resource.group == "" then
-            resource.version
-          else
-            "${resource.group}/${resource.version}";
-      };
-    in
-    lib.listToAttrs (map resourceToAttr data.resources);
-
   resourceBody = lib.types.submodule (
     { name, ... }:
     {
@@ -78,7 +63,16 @@ in
         MachineDeployment = "cluster.x-k8s.io/v1beta1";
         MachineHealthCheck = "cluster.x-k8s.io/v1beta1";
       };
-      description = "Map of Kind to apiVersion. Merged with mappings from `apiMappingFile`.";
+      description = "Map of kind to apiVersion. Merged with mappings from `apiMappingFile`.";
+    };
+
+    namespacedMappings = lib.mkOption {
+      type = lib.types.attrsOf lib.types.bool;
+      default = { };
+      example = {
+        Cluster = "cluster.x-k8s.io/v1beta1";
+      };
+      description = "If a kind is namespaced or not. Merged with values from `apiMappingFile`.";
     };
 
     apiMappingFile = lib.mkOption {
@@ -99,7 +93,29 @@ in
 
   config.kubernetes = {
     # Get apiMappings from apiMappingFile
-    apiMappings = parseApiResources cfg.apiMappingFile;
+    apiMappings =
+      let
+        data = lib.importJSON cfg.apiMappingFile;
+        resourceToAttr = resource: {
+          name = resource.kind;
+          value =
+            if !(resource ? group) || resource.group == "" then
+              resource.version
+            else
+              "${resource.group}/${resource.version}";
+        };
+      in
+      lib.listToAttrs (map resourceToAttr data.resources);
+
+    namespacedMappings =
+      let
+        data = lib.importJSON config.kubernetes.apiMappingFile;
+        resourceToAttr = resource: {
+          name = resource.kind;
+          value = resource.namespaced;
+        };
+      in
+      lib.listToAttrs (map resourceToAttr data.resources);
 
     generated = lib.pipe cfg.resources [
       # Remove all nulls
