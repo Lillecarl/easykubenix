@@ -37,6 +37,8 @@ in
     manifestJSONFile
     manifestYAML
     manifestYAMLFile
+    manifestYAMLList
+    manifestYAMLFileList
     ;
   deploymentScript = eval.config.kluctl.script;
   validationScript = eval.config.validation.script;
