@@ -49,6 +49,11 @@ in
               overrides = mkOption {
                 description = "Overrides to apply to all chart resources, don't do namespace here";
                 type = types.listOf settingsFormat.type;
+                example = [
+                  {
+                    metadata.annotations."who.is/coolest" = "lillecarl";
+                  }
+                ];
                 default = [ ];
               };
               # Do we really need this here? Doesn't Helm take care of this?

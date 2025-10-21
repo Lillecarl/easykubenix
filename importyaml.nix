@@ -21,6 +21,11 @@ let
         overrides = mkOption {
           description = "Overrides to apply to all resources, don't do namespace here";
           type = types.listOf settingsFormat.type;
+          example = [
+            {
+              metadata.annotations."who.is/coolest" = "lillecarl";
+            }
+          ];
           default = [ ];
         };
         overrideNamespace = lib.mkOption {
