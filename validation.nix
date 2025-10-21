@@ -152,8 +152,18 @@ in
 
             echo "kube-apiserver ready; applying manifest(s)"
 
-            ${lib.getExe config.kluctl.script} --yes --no-wait
-            exit $status
+            ${lib.getExe config.kluctl.script} --yes --no-wait || begin
+              echo "kluctl deploy failed"
+              exit 1
+            end
+            echo "dumping openapiv2 schema from apiserver"
+            kubectl get --raw /openapi/v2 > $TMPDIR/k8s-schema.json
+            echo "running kubeconform"
+            ${lib.getExe pkgs.kubeconform} -schema-location $TMPDIR/k8s-schema.json -summary < ${config.internal.manifestJSONFile} || begin
+              echo "kubeconform verification failed"
+              exit 1
+            end
+            echo "Your manifests are as valid as they can be against Kubernetes ${config.kubernetes.package.version}"
           '';
     };
 }
