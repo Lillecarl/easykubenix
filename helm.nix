@@ -47,14 +47,14 @@ in
                 default = globalConfig.kubernetes.package.version;
               };
               overrides = mkOption {
-                description = "Overrides to apply to all chart resources";
+                description = "Overrides to apply to all chart resources, don't do namespace here";
                 type = types.listOf settingsFormat.type;
                 default = [ ];
               };
-              overrideNamespace = mkOption {
-                description = "Whether to apply namespace override";
-                type = types.bool;
-                default = true;
+              overrideNamespace = lib.mkOption {
+                description = "Override namespace for all namespaced resources";
+                type = types.nullOr types.str;
+                default = null;
               };
               convertLists = mkOption {
                 description = ''
@@ -106,25 +106,38 @@ in
               };
             };
 
-            config.overrides = mkIf (config.overrideNamespace && config.namespace != null) [
-              {
-                metadata.namespace = config.namespace;
-              }
-            ];
-            config.objects = importJSON (
-              pkgs.chart2json.override { kubernetes-helm = cfg.package; } {
-                inherit (config)
-                  chart
-                  name
-                  namespace
-                  values
-                  kubeVersion
-                  includeCRDs
-                  noHooks
-                  apiVersions
-                  ;
-              }
-            );
+            config.objects =
+              let
+                list = importJSON (
+                  pkgs.chart2json.override { kubernetes-helm = cfg.package; } {
+                    inherit (config)
+                      chart
+                      name
+                      namespace
+                      values
+                      kubeVersion
+                      includeCRDs
+                      noHooks
+                      apiVersions
+                      ;
+                  }
+                );
+              in
+              if config.overrideNamespace != null then
+                lib.map (
+                  resource:
+                  let
+                    namespaced =
+                      globalConfig.kubernetes.namespacedMappings.${resource.kind} or throw
+                        "kind ${resource.kind} doesn't have a namespacedMapping";
+                  in
+                  if namespaced then
+                    lib.recursiveUpdate resource { metadata.namespace = config.overrideNamespace; }
+                  else
+                    resource
+                ) list
+              else
+                list;
           }
         )
       );
