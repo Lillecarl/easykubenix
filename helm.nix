@@ -51,6 +51,7 @@ in
                 type = types.listOf settingsFormat.type;
                 default = [ ];
               };
+              # Do we really need this here? Doesn't Helm take care of this?
               overrideNamespace = lib.mkOption {
                 description = "Override namespace for all namespaced resources";
                 type = types.nullOr types.str;
@@ -128,8 +129,10 @@ in
                   resource:
                   let
                     namespaced =
-                      globalConfig.kubernetes.namespacedMappings.${resource.kind} or throw
-                        "kind ${resource.kind} doesn't have a namespacedMapping";
+                      if lib.hasAttr resource.kind globalConfig.kubernetes.namespacedMappings then
+                        globalConfig.kubernetes.namespacedMappings.${resource.kind}
+                      else
+                        throw "kind ${resource.kind} doesn't have a namespacedMapping";
                   in
                   if namespaced then
                     lib.recursiveUpdate resource { metadata.namespace = config.overrideNamespace; }
