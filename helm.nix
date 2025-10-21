@@ -27,42 +27,35 @@ in
                 type = types.str;
                 default = name;
               };
-
               chart = mkOption {
                 description = "Helm chart to use";
                 type = types.package;
               };
-
               namespace = mkOption {
                 description = "Namespace to install helm chart to";
                 type = types.nullOr types.str;
                 default = null;
               };
-
               values = mkOption {
                 description = "Values to pass to chart";
                 type = settingsFormat.type;
                 default = { };
               };
-
               kubeVersion = mkOption {
                 description = "Kubernetes version to build chart for";
                 type = types.str;
                 default = globalConfig.kubernetes.package.version;
               };
-
               overrides = mkOption {
                 description = "Overrides to apply to all chart resources";
-                type = types.listOf types.unspecified;
+                type = types.listOf settingsFormat.type;
                 default = [ ];
               };
-
               overrideNamespace = mkOption {
                 description = "Whether to apply namespace override";
                 type = types.bool;
                 default = true;
               };
-
               convertLists = mkOption {
                 description = ''
                   Converts lists where all entires have a name attribute into
@@ -72,7 +65,6 @@ in
                 type = types.bool;
                 default = true;
               };
-
               includeCRDs = mkOption {
                 description = ''
                   Whether to include CRDs.
@@ -86,7 +78,6 @@ in
                 type = types.bool;
                 default = false;
               };
-
               noHooks = mkOption {
                 description = ''
                   Wether to include Helm hooks.
@@ -105,7 +96,7 @@ in
                   If you use `kubernetes.customTypes` to make kubenix aware of CRDs, it will include those as well by default.
                 '';
                 type = types.listOf types.str;
-                default = [ ];
+                default = lib.attrValues globalConfig.kubernetes.apiMappings;
               };
 
               objects = mkOption {
@@ -120,7 +111,6 @@ in
                 metadata.namespace = config.namespace;
               }
             ];
-
             config.objects = importJSON (
               pkgs.chart2json.override { kubernetes-helm = cfg.package; } {
                 inherit (config)
