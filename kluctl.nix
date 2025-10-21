@@ -27,9 +27,49 @@ in
       resourcePriority = lib.mkOption {
         type = lib.types.attrsOf lib.types.int;
         description = "Priority of which order to apply resource types in";
+        # See https://github.com/helm/helm/blob/490dffeb3458a1ad1a8e0140b33a1d1b43ce7a04/pkg/release/v1/util/kind_sorter.go#L31
+        # and cry knowing that this is what the worlds Kubernetes deployments rely on.
         default = {
+          Namespace = 10;
           CustomResourceDefinition = 10;
-          Namespace = 20;
+          # PriorityClass = 0;
+          # Namespace = 5;
+          # NetworkPolicy = 10;
+          # ResourceQuota = 15;
+          # LimitRange = 20;
+          # PodSecurityPolicy = 25;
+          # PodDisruptionBudget = 30;
+          # ServiceAccount = 35;
+          # Secret = 40;
+          # SecretList = 45;
+          # ConfigMap = 50;
+          # StorageClass = 55;
+          # PersistentVolume = 60;
+          # PersistentVolumeClaim = 65;
+          # CustomResourceDefinition = 70;
+          # ClusterRole = 75;
+          # ClusterRoleList = 80;
+          # ClusterRoleBinding = 85;
+          # ClusterRoleBindingList = 90;
+          # Role = 95;
+          # RoleList = 100;
+          # RoleBinding = 105;
+          # RoleBindingList = 110;
+          # Service = 115;
+          # DaemonSet = 120;
+          # Pod = 125;
+          # ReplicationController = 130;
+          # ReplicaSet = 135;
+          # Deployment = 140;
+          # HorizontalPodAutoscaler = 145;
+          # StatefulSet = 150;
+          # Job = 155;
+          # CronJob = 160;
+          # IngressClass = 170;
+          # Ingress = 175;
+          # APIService = 180;
+          # MutatingWebhookConfiguration = 185;
+          # ValidatingWebhookConfiguration = 190;
         };
       };
       deployment = lib.mkOption {
@@ -57,10 +97,11 @@ in
       deployments =
         # Create barrier deployments for prioritized resource kinds
         (lib.pipe cfg.resourcePriority [
-          lib.attrsToList
-          (lib.sort (a: b: a.value < b.value))
+          lib.attrValues
+          (lib.sort (a: b: a < b))
+          lib.unique
           (lib.map (v: {
-            path = v.name;
+            path = "prio-${toString v}";
             barrier = true;
           }))
         ])
@@ -86,18 +127,18 @@ in
             apiVersion = "v1";
             kind = "List";
             items = lib.filter (
-              v: !lib.elem (v.kind or null) (lib.attrNames cfg.resourcePriority)
+              v: !lib.elem v.kind (lib.attrNames cfg.resourcePriority)
             ) config.kubernetes.generated;
           };
         };
       }
       # Prioritized resources
       // (lib.mapAttrs' (n: v: {
-        name = "${n}/easykubenix.yaml";
+        name = "prio-${toString v}/${n}.yaml";
         value = builtins.toJSON {
           apiVersion = "v1";
           kind = "List";
-          items = lib.filter (v: v.kind or null == n) config.kubernetes.generated;
+          items = lib.filter (v: v.kind == n) config.kubernetes.generated;
         };
       }) cfg.resourcePriority)
       # Other user-supplied files
