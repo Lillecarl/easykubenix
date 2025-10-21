@@ -46,6 +46,7 @@ let
       config = {
         objects =
           let
+            # TODO: This is bugged if you input a fetchTree
             src =
               if isDerivation config.src then
                 config.src
@@ -56,7 +57,7 @@ let
                 };
 
             # Thanks kubenix
-            jsonFile =
+            list = lib.importJSON (
               pkgs.runCommandNoCCLocal "yaml2json" { } # bash
                 ''
                   # Remove null values
@@ -68,17 +69,18 @@ let
                     else
                       .
                     end)' ${toString src} >$out
-                '';
-            jsonStr = builtins.readFile jsonFile;
-            list = builtins.fromJSON jsonStr;
+                ''
+            );
           in
           if config.overrideNamespace != null then
             lib.map (
               resource:
               let
                 namespaced =
-                  globalConfig.kubernetes.namespacedMappings.${resource.kind} or throw
-                    "kind ${resource.kind} doesn't have a namespacedMapping";
+                  if lib.hasAttr resource.kind globalConfig.kubernetes.namespacedMappings then
+                    globalConfig.kubernetes.namespacedMappings.${resource.kind}
+                  else
+                    throw "kind ${resource.kind} doesn't have a namespacedMapping";
               in
               if namespaced then
                 lib.recursiveUpdate resource { metadata.namespace = config.overrideNamespace; }
