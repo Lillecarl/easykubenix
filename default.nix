@@ -15,6 +15,7 @@ let
 
   eval = lib.evalModules {
     modules = [
+      ./assertions.nix
       ./internal.nix
       ./kubernetes.nix
       ./helm.nix
