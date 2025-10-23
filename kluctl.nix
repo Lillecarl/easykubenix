@@ -27,6 +27,7 @@ in
           type = lib.types.str;
           description = "nix store url";
         };
+        failCachePush = lib.mkEnableOption "fail deployment if unable to push to cache";
       };
       project = lib.mkOption {
         type = settingsFormat.type;
@@ -156,26 +157,23 @@ in
       // cfg.files;
     };
     kluctl.script =
-      pkgs.writeScriptBin "kubenixDeploy" # fish
+      pkgs.writeScriptBin "kubenixDeploy" # bash
         ''
-          #! ${lib.getExe pkgs.fishMinimal}
+          #! ${pkgs.runtimeShell}
+          set -euo pipefail
+          set -x
           ${lib.optionalString cfg.pushManifest.enable ''
-            nix copy --to ${cfg.pushManifest.to} ${config.internal.manifestJSONFile}
+            nix copy --to ${cfg.pushManifest.to} ${config.internal.manifestJSONFile} || ${
+              lib.boolToString (!cfg.pushManifest.failCachePush)
+            }
           ''}
-          set command ${lib.getExe cfg.package} deploy \
+          ${lib.getExe cfg.package} \
+            deploy \
               --no-update-check \
               --target local \
               --discriminator ${cfg.discriminator} \
               --project-dir ${cfg.projectDir} \
-              $argv # --dry-run? --yes? --prune!
-          echo $command
-          $command || begin
-            echo "Naughty naughty!"
-            exit 1
-          end && begin
-            echo "Great success!"
-            exit 0
-          end
+              $@ # --dry-run? --yes? --prune!
         '';
   };
 }
