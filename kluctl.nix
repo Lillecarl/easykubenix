@@ -14,8 +14,19 @@ in
       package = lib.mkPackageOption pkgs "kluctl" { };
       discriminator = lib.mkOption {
         type = lib.types.str;
-        description = "kluctl deployment label discriminator, AKA K8s label conformant project name";
+        description = ''
+          kluctl deployment label discriminator. RFC1123 compliant string
+          This is used to prune resources that are no longer generated so make
+          sure to change this between projects
+        '';
         default = "easykubenix";
+      };
+      pushManifest = {
+        enable = lib.mkEnableOption "pushing manifest to bianry cache";
+        to = lib.mkOption {
+          type = lib.types.str;
+          description = "nix store url";
+        };
       };
       project = lib.mkOption {
         type = settingsFormat.type;
@@ -148,6 +159,9 @@ in
       pkgs.writeScriptBin "kubenixDeploy" # fish
         ''
           #! ${lib.getExe pkgs.fishMinimal}
+          ${lib.optionalString cfg.pushManifest.enable ''
+            nix copy --to ${cfg.pushManifest.to} ${config.internal.manifestJSONFile}
+          ''}
           set command ${lib.getExe cfg.package} deploy \
               --no-update-check \
               --target local \
