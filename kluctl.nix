@@ -27,7 +27,11 @@ in
           type = lib.types.str;
           description = "nix store url";
         };
-        failCachePush = lib.mkEnableOption "fail deployment if unable to push to cache";
+        failCachePush = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = "If we should fail if we can't push";
+        };
       };
       project = lib.mkOption {
         type = settingsFormat.type;
