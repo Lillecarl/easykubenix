@@ -29,7 +29,7 @@ in
               };
               chart = mkOption {
                 description = "Helm chart to use";
-                type = types.package;
+                type = types.either types.package types.path;
               };
               namespace = mkOption {
                 description = "Namespace to install helm chart to";
