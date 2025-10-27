@@ -21,17 +21,18 @@ in
         '';
         default = "easykubenix";
       };
-      pushManifest = {
-        enable = lib.mkEnableOption "pushing manifest to bianry cache";
-        to = lib.mkOption {
-          type = lib.types.str;
-          description = "nix store url";
-        };
-        failCachePush = lib.mkOption {
-          type = lib.types.bool;
-          default = true;
-          description = "If we should fail if we can't push";
-        };
+      preDeployScript = lib.mkOption {
+        type = lib.types.package;
+        description = ''
+          Script that runs just before deploying, useful to push manifests to
+          a binary cache. JSON manifest file is passed as first argument
+        '';
+        default =
+          pkgs.writeScriptBin "preDeployScript" # bash
+            ''
+              #! ${pkgs.runtimeShell}
+              true
+            '';
       };
       project = lib.mkOption {
         type = settingsFormat.type;
@@ -166,11 +167,7 @@ in
           #! ${pkgs.runtimeShell}
           set -euo pipefail
           set -x
-          ${lib.optionalString cfg.pushManifest.enable ''
-            nix copy --to ${cfg.pushManifest.to} ${config.internal.manifestJSONFile} || ${
-              lib.boolToString (!cfg.pushManifest.failCachePush)
-            }
-          ''}
+          ${lib.getExe cfg.preDeployScript} ${config.internal.manifestJSONFile}
           ${lib.getExe cfg.package} \
             deploy \
               --no-update-check \
