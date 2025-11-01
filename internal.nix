@@ -47,7 +47,7 @@
     # Beware that YAML rendering requires IFD
     manifestYAMLList = builtins.readFile manifestYAMLFile;
     manifestYAMLFileList =
-      pkgs.runCommandNoCCLocal "manifest.yaml" { } # bash
+      pkgs.runCommandLocal "manifest.yaml" { } # bash
         ''
           ${lib.getExe pkgs.yq} --yaml-output '.' ${manifestJSONFile} > $out
         '';
