@@ -131,7 +131,14 @@ in
             # so any user-defined values for these fields will take precedence.
             lib.recursiveUpdate (
               {
-                apiVersion = cfg.apiMappings.${kind};
+                apiVersion =
+                  if lib.hasAttr kind cfg.apiMappings then
+                    cfg.apiMappings.${kind}
+                  else
+                    builtins.throw ''
+                      Resource kind: ${kind} name: ${name} has no apiMappings
+                      ${builtins.toJSON resourceAttrs}
+                    '';
                 kind = kind;
                 metadata.name = name;
               }
