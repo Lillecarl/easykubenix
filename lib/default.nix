@@ -126,4 +126,7 @@ self: lib: {
       ]
     else
       value;
+
+  # md5 hash an attrset, useful to trigger rollouts by hashing ConfigMaps.
+  hashAttrs = attrs: builtins.hashString "md5" (builtins.toJSON attrs);
 }
