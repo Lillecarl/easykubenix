@@ -63,7 +63,7 @@ let
 
             # Thanks kubenix
             list = lib.importJSON (
-              pkgs.runCommandNoCCLocal "yaml2json" { } # bash
+              pkgs.runCommandLocal "yaml2json" { } # bash
                 ''
                   # Remove null values
                   ${lib.getExe pkgs.yq} -Scs 'walk(
