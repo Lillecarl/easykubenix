@@ -19,11 +19,13 @@ self: lib: {
     attrs:
     if !lib.isAttrs attrs then
       throw "mkNumberedList error: Input must be an attribute set."
+    else if !(lib.all lib.isAttrs (lib.attrValues attrs)) then
+      throw "mkNumberedList error: All values in the attribute set must themselves be attribute sets."
     else
       let
         keys = lib.attrNames attrs;
         # Check if every key can be successfully parsed as an integer.
-        allKeysAreInts = lib.all (key: (lib.trivial.tryEval (builtins.toInt key)).success) keys;
+        allKeysAreInts = lib.all (key: (builtins.tryEval (lib.toIntBase10 key)).success) keys;
       in
       if !allKeysAreInts then
         throw "mkNumberedList error: All keys in the attribute set must be integer strings."
