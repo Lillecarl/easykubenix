@@ -132,11 +132,13 @@ in
             lib.recursiveUpdate (
               {
                 apiVersion =
-                  if lib.hasAttr kind cfg.apiMappings then
+                  if lib.hasAttr "apiVersion" resourceAttrs then
+                    resourceAttrs.apiVersion
+                  else if lib.hasAttr kind cfg.apiMappings then
                     cfg.apiMappings.${kind}
                   else
                     builtins.throw ''
-                      Resource kind: ${kind} name: ${name} has no apiMappings
+                      Resource kind: ${kind} name: ${name} has no apiVersion set and not apiMappings
                       ${builtins.toJSON resourceAttrs}
                     '';
                 kind = kind;
