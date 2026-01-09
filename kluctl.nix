@@ -22,17 +22,11 @@ in
         default = "easykubenix";
       };
       preDeployScript = lib.mkOption {
-        type = lib.types.package;
         description = ''
-          Script that runs just before deploying, useful to push manifests to
+          Bash script that runs just before deploying, useful to push manifests to
           a binary cache. JSON manifest file is passed as first argument
         '';
-        default =
-          pkgs.writeScriptBin "preDeployScript" # bash
-            ''
-              #! ${pkgs.runtimeShell}
-              true
-            '';
+        default = "";
       };
       project = lib.mkOption {
         type = settingsFormat.type;
@@ -167,7 +161,7 @@ in
           #! ${pkgs.runtimeShell}
           set -euo pipefail
           set -x
-          ${lib.getExe cfg.preDeployScript} ${config.internal.manifestJSONFile}
+          ${cfg.preDeployScript}
           ${lib.getExe cfg.package} \
             deploy \
               --no-update-check \
