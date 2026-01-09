@@ -22,9 +22,17 @@ in
         default = "easykubenix";
       };
       preDeployScript = lib.mkOption {
+        type = lib.types.lines;
         description = ''
           Bash script that runs just before deploying, useful to push manifests to
           a binary cache. JSON manifest file is passed as first argument
+        '';
+        default = "";
+      };
+      postDeployScript = lib.mkOption {
+        type = lib.types.lines;
+        description = ''
+          Bash script that runs just after deploying, used by nix-csi to clean secrets from store
         '';
         default = "";
       };
@@ -169,6 +177,7 @@ in
               --discriminator ${cfg.discriminator} \
               --project-dir ${cfg.projectDir} \
               $@ # --dry-run? --yes? --prune!
+          ${cfg.postDeployScript}
         '';
   };
 }
