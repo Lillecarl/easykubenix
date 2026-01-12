@@ -48,6 +48,12 @@ in
       description = "Kubernetes resources, grouped by namespace, then kind.";
     };
 
+    transformers = lib.mkOption {
+      type = lib.types.listOf (lib.types.functionTo lib.types.attrs);
+      default = [ ];
+      description = "List of functions that transform resource attrsets";
+    };
+
     apiMappings = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = { };
@@ -129,7 +135,7 @@ in
             name: resourceAttrs:
             # Provide a base set of attributes. `recursiveUpdate` will merge `attrs` on top,
             # so any user-defined values for these fields will take precedence.
-            lib.recursiveUpdate (
+            lib.pipe (lib.recursiveUpdate (
               {
                 apiVersion =
                   if lib.hasAttr "apiVersion" resourceAttrs then
@@ -148,7 +154,7 @@ in
               // lib.optionalAttrs (namespace != "none") {
                 metadata.namespace = namespace;
               }
-            ) resourceAttrs
+            ) resourceAttrs) cfg.transformers
           ) resourcesByName
         ) resourcesByKind
       ))
