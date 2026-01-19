@@ -160,6 +160,12 @@ in
       '';
     };
 
+    filters = lib.mkOption {
+      type = lib.types.listOf (lib.types.functionTo lib.types.bool);
+      default = [ ];
+      description = "List of functions that filter resources";
+    };
+
     apiMappings = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = { };
@@ -246,6 +252,8 @@ in
       )
       # Run a transformation pass over all resources
       (map (resource: lib.pipe resource cfg.transformers))
+      # Run filter pass over all resources
+      (lib.filter (resource: lib.all (function: function resource) cfg.filters))
       # Convert attrset with _namedlist attribute true to lists. This is useful
       # when we want to override things in the Kubernetes containers list for
       # example.
