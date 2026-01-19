@@ -48,14 +48,15 @@ in
                                 type = lib.types.str;
                                 default = name;
                               };
-                              options.namespace = lib.mkOption {
-                                type = lib.types.nullOr lib.types.str;
-                                default = if namespace == "none" then null else namespace;
-                              };
                             };
                             default = { };
                           };
                         };
+                        config = lib.mkMerge [
+                          (lib.mkIf (namespace != "none") {
+                            metadata.namespace = lib.mkDefault namespace;
+                          })
+                        ];
                       }
                     )
                   );
@@ -69,6 +70,10 @@ in
       default = { };
       description = ''
         Kubernetes resources, grouped by namespace, then kind.
+        apiVersion is automatically injected (if apiMappings for the resource exists)
+        kind is automatically injected
+        metadata.name is automatically injected
+        metadata.namespace is automatically injected if namespace isn't "none"
       '';
       example = {
         kubernetes.resources.none.Namespace.easykubenix = { };
@@ -225,8 +230,8 @@ in
       lib.listToAttrs (map resourceToAttr data.resources);
 
     generated = lib.pipe cfg.resources [
-      # Remove all nulls
-      (lib.filterAttrsRecursive (_: v: v != null))
+      # Remove all nulls (TODO: is this a bad idea?)
+      (lib.filterAttrsRecursive (_: value: value != null))
       # Convert kubernetes.resources.namespace.kind.name into a list of list resources
       (lib.collect (x: x ? apiVersion && x ? kind && x ? metadata))
       # Run a generator pass to allow generating resources from other resources (VPA)
