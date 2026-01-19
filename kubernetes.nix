@@ -211,10 +211,7 @@ in
         resourceToAttr = resource: {
           name = resource.kind;
           value =
-            if !(resource ? group) || resource.group == "" then
-              resource.version
-            else
-              "${resource.group}/${resource.version}";
+            if resource.group or "" == "" then resource.version else "${resource.group}/${resource.version}";
         };
       in
       lib.listToAttrs (map resourceToAttr data.resources);
