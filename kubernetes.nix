@@ -7,43 +7,65 @@
 let
   cfg = config.kubernetes;
   settingsFormat = pkgs.formats.json { };
-
-  resourceBody = lib.types.submodule (
-    { name, ... }:
-    {
-      freeformType = settingsFormat.type;
-      options = {
-        apiVersion = lib.mkOption {
-          type = lib.types.nullOr lib.types.str;
-          default = null;
-          description = "Kubernetes API version. If null, it's inferred from `apiMappings`.";
-        };
-        kind = lib.mkOption {
-          type = lib.types.nullOr lib.types.str;
-          default = null;
-          description = "Kubernetes resource kind. If null, it's inferred from the attribute path.";
-        };
-        metadata = lib.mkOption {
-          type = lib.types.submodule {
-            freeformType = settingsFormat.type;
-            options.name = lib.mkOption {
-              type = lib.types.str;
-              default = name;
-            };
-          };
-          default = { };
-          description = "Kubernetes resource metadata.";
-        };
-      };
-    }
-  );
 in
 {
   options.kubernetes = {
     package = lib.mkPackageOption pkgs "kubernetes" { };
 
     resources = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.attrsOf (lib.types.attrsOf resourceBody));
+      type = lib.types.attrsOf (
+        lib.types.submodule (
+          { name, ... }:
+          let
+            namespace = name;
+          in
+          {
+            freeformType = lib.types.attrsOf (
+              lib.types.submodule (
+                { name, ... }:
+                let
+                  kind = name;
+                in
+                {
+                  freeformType = lib.types.attrsOf (
+                    lib.types.submodule (
+                      { name, ... }:
+                      {
+                        freeformType = settingsFormat.type;
+                        options = {
+                          apiVersion = lib.mkOption {
+                            type = lib.types.str;
+                            default = cfg.apiMappings.${kind} or (throw "No apiMapping for ${kind}");
+                          };
+                          kind = lib.mkOption {
+                            type = lib.types.str;
+                            default = kind;
+                          };
+                          metadata = lib.mkOption {
+                            type = lib.types.submodule {
+                              freeformType = settingsFormat.type;
+                              options.name = lib.mkOption {
+                                type = lib.types.str;
+                                default = name;
+                              };
+                              options.namespace = lib.mkOption {
+                                type = lib.types.nullOr lib.types.str;
+                                default = if namespace == "none" then null else namespace;
+                              };
+                            };
+                            default = { };
+                          };
+                        };
+                      }
+                    )
+                  );
+                }
+              )
+            );
+          }
+        )
+      );
+
       default = { };
       description = ''
         Kubernetes resources, grouped by namespace, then kind.
@@ -205,40 +227,6 @@ in
     generated = lib.pipe cfg.resources [
       # Remove all nulls
       (lib.filterAttrsRecursive (_: v: v != null))
-      # Inject apiVersion, kind, metadata.name and metadata.namespace as appropriate
-      (lib.mapAttrs (
-        namespace: resourcesByKind:
-        lib.mapAttrs (
-          kind: resourcesByName:
-          lib.mapAttrs (
-            name: resource:
-            # Provide a base set of attributes. `recursiveUpdate` will merge `attrs` on top,
-            # so any user-defined values for these fields will take precedence.
-            lib.recursiveUpdate (
-              {
-                # It must be possible to configure apiVersion on the resource level since "kind"
-                # can have collisions. Example: Cluster postgresql.cnpg.io/v1 or cluster.x-k8s.io/v1beta1
-                apiVersion =
-                  if lib.hasAttr "apiVersion" resource then
-                    resource.apiVersion
-                  else if lib.hasAttr kind cfg.apiMappings then
-                    cfg.apiMappings.${kind}
-                  else
-                    builtins.throw ''
-                      Resource kind: ${kind} name: ${name} has no apiVersion set and not apiMappings
-                      ${builtins.toJSON resource}
-                    '';
-                kind = kind;
-                metadata.name = name;
-              }
-              # Don't add metadata.namespace if the namespace is "none"
-              // lib.optionalAttrs (namespace != "none") {
-                metadata.namespace = namespace;
-              }
-            ) resource
-          ) resourcesByName
-        ) resourcesByKind
-      ))
       # Convert kubernetes.resources.namespace.kind.name into a list of list resources
       (lib.collect (x: x ? apiVersion && x ? kind && x ? metadata))
       # Run a generator pass to allow generating resources from other resources (VPA)
