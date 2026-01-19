@@ -200,6 +200,11 @@ in
       type = settingsFormat.type;
       internal = true;
       description = "The final, generated Kubernetes list object.";
+
+    generatedByPath = lib.mkOption {
+      type = settingsFormat.type;
+      description = "The final, generated Kubernetes resources";
+      readOnly = true;
     };
   };
 
@@ -240,5 +245,13 @@ in
       # example.
       (map (lib.walkWithPath lib.kubeAttrsToLists))
     ];
+
+    # like kubernetes.resources but with transformation and generation applied
+    generatedByPath = lib.foldl' (
+      acc: resource:
+      lib.recursiveUpdate acc {
+        ${resource.metadata.namespace or "none"}.${resource.kind}.${resource.metadata.name} = resource;
+      }
+    ) { } cfg.generated;
   };
 }
