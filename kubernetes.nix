@@ -232,8 +232,6 @@ in
       lib.listToAttrs (map resourceToAttr data.resources);
 
     generated = lib.pipe cfg.resources [
-      # Remove all nulls (TODO: is this a bad idea?)
-      (lib.filterAttrsRecursive (_: value: value != null))
       # Convert kubernetes.resources.namespace.kind.name into a list of list resources
       (lib.collect (x: x ? apiVersion && x ? kind && x ? metadata))
       # Run a generator pass to allow generating resources from other resources (VPA)
