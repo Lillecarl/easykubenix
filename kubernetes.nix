@@ -45,13 +45,92 @@ in
     resources = lib.mkOption {
       type = lib.types.attrsOf (lib.types.attrsOf (lib.types.attrsOf resourceBody));
       default = { };
-      description = "Kubernetes resources, grouped by namespace, then kind.";
+      description = ''
+        Kubernetes resources, grouped by namespace, then kind.
+      '';
+      example = {
+        kubernetes.resources.none.Namespace.easykubenix = { };
+        kubernetes.resources.easykubenix.ConfigMap.myconfig.data.key = "value";
+      };
     };
 
     transformers = lib.mkOption {
       type = lib.types.listOf (lib.types.functionTo lib.types.attrs);
       default = [ ];
       description = "List of functions that transform resource attrsets";
+      example = ''
+        kubernetes.transformers = [
+          (
+            resource:
+            # Apply annotations to all LoadBalancers
+            if resource.kind == "Service" && resource.spec.type or null == "LoadBalancer" then
+              lib.recursiveUpdate resource {
+                # IPv4 is scarce, share!
+                metadata.annotations."metallb.io/allow-shared-ip" = "true";
+                # Lowest TTL cloudflare allows
+                metadata.annotations."external-dns.alpha.kubernetes.io/ttl" = "60";
+              }
+            # Make all services require dualstack
+            else if resource.kind == "Service" then
+              lib.recursiveUpdate resource {
+                spec.ipFamilyPolicy = "RequireDualStack";
+              }
+            # Set lowest cloudflare TTL for ingress and gapi routes
+            else if
+              lib.elem resource.kind [
+                "Ingress"
+                "HTTPRoute"
+              ]
+            then
+              lib.recursiveUpdate resource {
+                metadata.annotations."external-dns.alpha.kubernetes.io/ttl" = "60";
+              }
+            else
+              resource
+          )
+        ];
+      '';
+    };
+
+    generators = lib.mkOption {
+      type = lib.types.listOf (lib.types.functionTo (lib.types.listOf lib.types.attrs));
+      default = [ ];
+      description = "List of functions that generate resource attrsets";
+      example = ''
+        kubernetes.generators = [
+          (
+            resource:
+            lib.optionals
+              (
+                (lib.elem (resource.kind or "") [
+                  "Deployment"
+                  "StatefulSet"
+                  "DaemonSet"
+                ])
+                && resource.metadata.annotations.genvpa or "true" == "true"
+                && !lib.hasAttrByPath [
+                  resource.metadata.namespace
+                  "VerticalPodAutoscaler"
+                  resource.metadata.name
+                ] config.kubernetes.resources
+              )
+              [
+                {
+                  apiVersion = "autoscaling.k8s.io/v1";
+                  kind = "VerticalPodAutoscaler";
+                  metadata = { inherit (resource.metadata) name namespace; };
+                  spec = {
+                    targetRef = {
+                      inherit (resource) apiVersion kind;
+                      inherit (resource.metadata) name;
+                    };
+                    updatePolicy.updateMode = "InPlaceOrRecreate";
+                  };
+                }
+              ]
+          )
+        ];
+      '';
     };
 
     apiMappings = lib.mkOption {
@@ -132,20 +211,22 @@ in
         lib.mapAttrs (
           kind: resourcesByName:
           lib.mapAttrs (
-            name: resourceAttrs:
+            name: resource:
             # Provide a base set of attributes. `recursiveUpdate` will merge `attrs` on top,
             # so any user-defined values for these fields will take precedence.
-            lib.pipe (lib.recursiveUpdate (
+            lib.recursiveUpdate (
               {
+                # It must be possible to configure apiVersion on the resource level since "kind"
+                # can have collisions. Example: Cluster postgresql.cnpg.io/v1 or cluster.x-k8s.io/v1beta1
                 apiVersion =
-                  if lib.hasAttr "apiVersion" resourceAttrs then
-                    resourceAttrs.apiVersion
+                  if lib.hasAttr "apiVersion" resource then
+                    resource.apiVersion
                   else if lib.hasAttr kind cfg.apiMappings then
                     cfg.apiMappings.${kind}
                   else
                     builtins.throw ''
                       Resource kind: ${kind} name: ${name} has no apiVersion set and not apiMappings
-                      ${builtins.toJSON resourceAttrs}
+                      ${builtins.toJSON resource}
                     '';
                 kind = kind;
                 metadata.name = name;
@@ -154,20 +235,20 @@ in
               // lib.optionalAttrs (namespace != "none") {
                 metadata.namespace = namespace;
               }
-            ) resourceAttrs) cfg.transformers
+            ) resource
           ) resourcesByName
         ) resourcesByKind
       ))
+      # Convert kubernetes.resources.namespace.kind.name into a list of list resources
+      (lib.collect (x: x ? apiVersion && x ? kind && x ? metadata))
+      # Run a generator pass to allow generating resources from other resources (VPA)
+      (resources: resources ++ lib.concatMap (r: lib.concatMap (g: g r) cfg.generators) resources)
+      # Run a transformation pass over all resources (allows applying generic rules across all resources)
+      (map (resource: lib.pipe resource cfg.transformers))
       # Convert attrset with _namedlist attribute true to lists. This is useful
       # when we want to override things in the Kubernetes containers list for
       # example.
-      (lib.walkWithPath lib.kubeAttrsToLists)
-      # Convert kubernetes.resources.namespace.kind.name into a list of list resources
-      (lib.mapAttrsToList (
-        namespace: kinds: lib.mapAttrsToList (kind: names: lib.attrValues names) kinds
-      ))
-      # Flatten the nested lists
-      lib.flatten
+      (map (lib.walkWithPath lib.kubeAttrsToLists))
     ];
   };
 }
