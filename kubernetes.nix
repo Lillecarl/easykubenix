@@ -120,7 +120,7 @@ in
     };
 
     generators = lib.mkOption {
-      type = lib.types.listOf (lib.types.functionTo (lib.types.listOf lib.types.attrs));
+      type = lib.types.listOf (lib.types.functionTo lib.types.attrs);
       default = [ ];
       description = "List of functions that generate resource attrsets";
       example = ''
@@ -198,8 +198,9 @@ in
 
     generated = lib.mkOption {
       type = settingsFormat.type;
-      internal = true;
       description = "The final, generated Kubernetes list object.";
+      readOnly = true;
+    };
 
     generatedByPath = lib.mkOption {
       type = settingsFormat.type;
@@ -232,11 +233,18 @@ in
       lib.listToAttrs (map resourceToAttr data.resources);
 
     generated = lib.pipe cfg.resources [
-      # Convert kubernetes.resources.namespace.kind.name into a list of list resources
+      # Convert kubernetes.resources.namespace.kind.name into a list of resources
       (lib.collect (x: x ? apiVersion && x ? kind && x ? metadata))
-      # Run a generator pass to allow generating resources from other resources (VPA)
-      (resources: resources ++ lib.concatMap (r: lib.concatMap (g: g r) cfg.generators) resources)
-      # Run a transformation pass over all resources (allows applying generic rules across all resources)
+      # Run a generator pass to generate resources from resources.
+      (
+        resources:
+        resources
+        ++ lib.pipe resources [
+          (lib.concatMap (resource: map (generator: generator resource) cfg.generators))
+          (lib.filter (x: x != { }))
+        ]
+      )
+      # Run a transformation pass over all resources
       (map (resource: lib.pipe resource cfg.transformers))
       # Convert attrset with _namedlist attribute true to lists. This is useful
       # when we want to override things in the Kubernetes containers list for
