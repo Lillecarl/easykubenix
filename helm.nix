@@ -112,19 +112,21 @@ in
 
               objects =
                 let
-                  list = importJSON (
-                    pkgs.chart2json.override { kubernetes-helm = cfg.package; } {
-                      inherit (releaseConfig)
-                        chart
-                        name
-                        namespace
-                        values
-                        kubeVersion
-                        includeCRDs
-                        noHooks
-                        apiVersions
-                        ;
-                    }
+                  list = lib.filter (x: x != null) (
+                    importJSON (
+                      pkgs.chart2json.override { kubernetes-helm = cfg.package; } {
+                        inherit (releaseConfig)
+                          chart
+                          name
+                          namespace
+                          values
+                          kubeVersion
+                          includeCRDs
+                          noHooks
+                          apiVersions
+                          ;
+                      }
+                    )
                   );
                 in
                 list
