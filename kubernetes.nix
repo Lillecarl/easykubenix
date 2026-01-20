@@ -9,10 +9,13 @@ let
   settingsFormat = pkgs.formats.json { };
 in
 {
+  imports = [
+    (lib.mkAliasOptionModule [ "kubernetes" "resources" ] [ "kubernetes" "objects" ])
+  ];
   options.kubernetes = {
     package = lib.mkPackageOption pkgs "kubernetes" { };
 
-    resources = lib.mkOption {
+    objects = lib.mkOption {
       type = lib.types.attrsOf (
         lib.types.submodule (
           { name, ... }:
@@ -69,51 +72,51 @@ in
 
       default = { };
       description = ''
-        Kubernetes resources, grouped by namespace, then kind.
-        apiVersion is automatically injected (if apiMappings for the resource exists)
+        Kubernetes objects, grouped by namespace, then kind.
+        apiVersion is automatically injected (if apiMappings for the object exists)
         kind is automatically injected
         metadata.name is automatically injected
         metadata.namespace is automatically injected if namespace isn't "none"
       '';
       example = {
-        kubernetes.resources.none.Namespace.easykubenix = { };
-        kubernetes.resources.easykubenix.ConfigMap.myconfig.data.key = "value";
+        kubernetes.objects.none.Namespace.easykubenix = { };
+        kubernetes.objects.easykubenix.ConfigMap.myconfig.data.key = "value";
       };
     };
 
     transformers = lib.mkOption {
       type = lib.types.listOf (lib.types.functionTo lib.types.attrs);
       default = [ ];
-      description = "List of functions that transform resource attrsets";
+      description = "List of functions that transform object attrsets";
       example = ''
         kubernetes.transformers = [
           (
-            resource:
+            object:
             # Apply annotations to all LoadBalancers
-            if resource.kind == "Service" && resource.spec.type or null == "LoadBalancer" then
-              lib.recursiveUpdate resource {
+            if object.kind == "Service" && object.spec.type or null == "LoadBalancer" then
+              lib.recursiveUpdate object {
                 # IPv4 is scarce, share!
                 metadata.annotations."metallb.io/allow-shared-ip" = "true";
                 # Lowest TTL cloudflare allows
                 metadata.annotations."external-dns.alpha.kubernetes.io/ttl" = "60";
               }
             # Make all services require dualstack
-            else if resource.kind == "Service" then
-              lib.recursiveUpdate resource {
+            else if object.kind == "Service" then
+              lib.recursiveUpdate object {
                 spec.ipFamilyPolicy = "RequireDualStack";
               }
             # Set lowest cloudflare TTL for ingress and gapi routes
             else if
-              lib.elem resource.kind [
+              lib.elem object.kind [
                 "Ingress"
                 "HTTPRoute"
               ]
             then
-              lib.recursiveUpdate resource {
+              lib.recursiveUpdate object {
                 metadata.annotations."external-dns.alpha.kubernetes.io/ttl" = "60";
               }
             else
-              resource
+              object
           )
         ];
       '';
@@ -122,39 +125,37 @@ in
     generators = lib.mkOption {
       type = lib.types.listOf (lib.types.functionTo lib.types.attrs);
       default = [ ];
-      description = "List of functions that generate resource attrsets";
+      description = "List of functions that generate object attrsets";
       example = ''
         kubernetes.generators = [
           (
-            resource:
-            lib.optionals
+            object:
+            lib.optionalAttrs
               (
-                (lib.elem (resource.kind or "") [
+                (lib.elem (object.kind or "") [
                   "Deployment"
                   "StatefulSet"
                   "DaemonSet"
                 ])
-                && resource.metadata.annotations.genvpa or "true" == "true"
+                && object.metadata.annotations.genvpa or "true" == "true"
                 && !lib.hasAttrByPath [
-                  resource.metadata.namespace
+                  object.metadata.namespace
                   "VerticalPodAutoscaler"
-                  resource.metadata.name
-                ] config.kubernetes.resources
+                  object.metadata.name
+                ] config.kubernetes.objects
               )
-              [
-                {
-                  apiVersion = "autoscaling.k8s.io/v1";
-                  kind = "VerticalPodAutoscaler";
-                  metadata = { inherit (resource.metadata) name namespace; };
-                  spec = {
-                    targetRef = {
-                      inherit (resource) apiVersion kind;
-                      inherit (resource.metadata) name;
-                    };
-                    updatePolicy.updateMode = "InPlaceOrRecreate";
+              {
+                apiVersion = "autoscaling.k8s.io/v1";
+                kind = "VerticalPodAutoscaler";
+                metadata = { inherit (object.metadata) name namespace; };
+                spec = {
+                  targetRef = {
+                    inherit (object) apiVersion kind;
+                    inherit (object.metadata) name;
                   };
-                }
-              ]
+                  updatePolicy.updateMode = "InPlaceOrRecreate";
+                };
+              }
           )
         ];
       '';
@@ -163,7 +164,7 @@ in
     filters = lib.mkOption {
       type = lib.types.listOf (lib.types.functionTo lib.types.bool);
       default = [ ];
-      description = "List of functions that filter resources";
+      description = "List of functions that filter objects";
     };
 
     apiMappings = lib.mkOption {
@@ -204,13 +205,13 @@ in
 
     generated = lib.mkOption {
       type = settingsFormat.type;
-      description = "The final, generated Kubernetes list object.";
+      description = "The final, generated Kubernetes list objects";
       readOnly = true;
     };
 
     generatedByPath = lib.mkOption {
       type = settingsFormat.type;
-      description = "The final, generated Kubernetes resources";
+      description = "The final, generated Kubernetes objects by attrPath";
       readOnly = true;
     };
   };
@@ -220,51 +221,51 @@ in
     apiMappings =
       let
         data = lib.importJSON cfg.apiMappingFile;
-        resourceToAttr = resource: {
-          name = resource.kind;
+        objectToAttr = object: {
+          name = object.kind;
           value =
-            if resource.group or "" == "" then resource.version else "${resource.group}/${resource.version}";
+            if object.group or "" == "" then object.version else "${object.group}/${object.version}";
         };
       in
-      lib.listToAttrs (map resourceToAttr data.resources);
+      lib.listToAttrs (map objectToAttr data.resources);
 
     namespacedMappings =
       let
         data = lib.importJSON config.kubernetes.apiMappingFile;
-        resourceToAttr = resource: {
-          name = resource.kind;
-          value = resource.namespaced;
+        objectToAttr = object: {
+          name = object.kind;
+          value = object.namespaced;
         };
       in
-      lib.listToAttrs (map resourceToAttr data.resources);
+      lib.listToAttrs (map objectToAttr data.resources);
 
-    generated = lib.pipe cfg.resources [
-      # Convert kubernetes.resources.namespace.kind.name into a list of resources
+    generated = lib.pipe cfg.objects [
+      # Convert kubernetes.objects.namespace.kind.name into a list of objects
       (lib.collect (x: x ? apiVersion && x ? kind && x ? metadata))
-      # Run a generator pass to generate resources from resources.
+      # Run a generator pass to generate objects from objects.
       (
-        resources:
-        resources
-        ++ lib.pipe resources [
-          (lib.concatMap (resource: map (generator: generator resource) cfg.generators))
+        objects:
+        objects
+        ++ lib.pipe objects [
+          (lib.concatMap (object: map (generator: generator object) cfg.generators))
           (lib.filter (x: x != { }))
         ]
       )
-      # Run a transformation pass over all resources
-      (map (resource: lib.pipe resource cfg.transformers))
-      # Run filter pass over all resources
-      (lib.filter (resource: lib.all (function: function resource) cfg.filters))
+      # Run a transformation pass over all objects
+      (map (object: lib.pipe object cfg.transformers))
+      # Run filter pass over all objects
+      (lib.filter (object: lib.all (function: function object) cfg.filters))
       # Convert attrset with _namedlist attribute true to lists. This is useful
       # when we want to override things in the Kubernetes containers list for
       # example.
       (map (lib.walkWithPath lib.kubeAttrsToLists))
     ];
 
-    # like kubernetes.resources but with transformation and generation applied
+    # like kubernetes.objects but with transformation and generation applied
     generatedByPath = lib.foldl' (
-      acc: resource:
+      acc: object:
       lib.recursiveUpdate acc {
-        ${resource.metadata.namespace or "none"}.${resource.kind}.${resource.metadata.name} = resource;
+        ${object.metadata.namespace or "none"}.${object.kind}.${object.metadata.name} = object;
       }
     ) { } cfg.generated;
   };
