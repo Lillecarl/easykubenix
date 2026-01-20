@@ -32,7 +32,7 @@ in
       postDeployScript = lib.mkOption {
         type = lib.types.lines;
         description = ''
-          Bash script that runs just after deploying, used by nix-csi to clean secrets from store
+          Bash script that runs just after deploying
         '';
         default = "";
       };
@@ -122,12 +122,14 @@ in
           (lib.map (v: {
             path = "prio-${toString v}";
             barrier = true;
+            skipDeleteIfTags = true;
           }))
         ])
         ++ [
           # Default resource kinds go into "default"
           {
             path = "default";
+            skipDeleteIfTags = true;
           }
         ];
     };
