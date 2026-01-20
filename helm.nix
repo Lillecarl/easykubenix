@@ -51,12 +51,7 @@ in
               };
               overrides = mkOption {
                 description = "Overrides to apply to all chart objects, don't do namespace here";
-                type = types.listOf settingsFormat.type;
-                example = [
-                  {
-                    metadata.annotations."who.is/coolest" = "lillecarl";
-                  }
-                ];
+                type = lib.types.listOf (types.functionTo settingsFormat.type);
                 default = [ ];
               };
               convertLists = mkOption {
@@ -104,34 +99,41 @@ in
 
               objects = mkOption {
                 description = "Generated kubernetes objects";
-                type = types.listOf types.attrs;
+                type = types.listOf settingsFormat.type;
                 default = [ ];
               };
             };
 
-            config.objects =
-              let
-                list = importJSON (
-                  pkgs.chart2json.override { kubernetes-helm = cfg.package; } {
-                    inherit (releaseConfig)
-                      chart
-                      name
-                      namespace
-                      values
-                      kubeVersion
-                      includeCRDs
-                      noHooks
-                      apiVersions
-                      ;
-                  }
-                );
-              in
-              list
-              ++ lib.optional (releaseConfig.namespace != null) {
-                apiVersion = "v1";
-                kind = "Namespace";
-                metadata.name = releaseConfig.namespace;
-              };
+            config = {
+              # list to attrset convertion is just a preconfigured override
+              overrides = lib.optional releaseConfig.convertLists (
+                lib.mkBefore (object: (lib.walkWithPath lib.kubeListsToAttrs) object)
+              );
+
+              objects =
+                let
+                  list = importJSON (
+                    pkgs.chart2json.override { kubernetes-helm = cfg.package; } {
+                      inherit (releaseConfig)
+                        chart
+                        name
+                        namespace
+                        values
+                        kubeVersion
+                        includeCRDs
+                        noHooks
+                        apiVersions
+                        ;
+                    }
+                  );
+                in
+                list
+                ++ lib.optional (releaseConfig.namespace != null) {
+                  apiVersion = "v1";
+                  kind = "Namespace";
+                  metadata.name = releaseConfig.namespace;
+                };
+            };
           }
         )
       );
@@ -140,25 +142,15 @@ in
   };
 
   config = {
-    kubernetes.resources = mkMerge (
-      flatten (
-        mapAttrsToList (
-          _: release:
-          map (object: {
-            ${object.metadata.namespace or "none"}.${object.kind}."${object.metadata.name}" = mkMerge (
-              [
-                (
-                  if release.convertLists then # fmt
-                    (lib.walkWithPath lib.kubeListsToAttrs) object
-                  else
-                    object
-                )
-              ]
-              ++ release.overrides
-            );
-          }) release.objects
-        ) cfg.releases
-      )
-    );
+    kubernetes.objects = lib.pipe cfg.releases [
+      (lib.mapAttrsToList (
+        _: release: lib.map (object: lib.pipe object release.overrides) release.objects
+      ))
+      lib.flatten
+      (lib.map (object: {
+        ${object.metadata.namespace or "none"}.${object.kind}.${object.metadata.name} = object;
+      }))
+      lib.mkMerge
+    ];
   };
 }
