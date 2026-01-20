@@ -149,9 +149,17 @@ in
         _: release: lib.map (object: lib.pipe object release.overrides) release.objects
       ))
       lib.flatten
-      (lib.map (object: {
-        ${object.metadata.namespace or "none"}.${object.kind}.${object.metadata.name} = object;
-      }))
+      (lib.map (
+        object:
+        let
+          kind = object.kind or (throw "no kind for ${object}");
+          name = object.metadata.name or (throw "no name for ${object}");
+          namespace = object.metadata.namespace or "none";
+        in
+        {
+          ${namespace}.${kind}.${name} = object;
+        }
+      ))
       lib.mkMerge
     ];
   };
