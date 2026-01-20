@@ -20,6 +20,9 @@ in
       type = types.attrsOf (
         types.submodule (
           { config, name, ... }:
+          let
+            releaseConfig = config;
+          in
           {
             options = {
               name = mkOption {
@@ -47,7 +50,7 @@ in
                 default = globalConfig.kubernetes.package.version;
               };
               overrides = mkOption {
-                description = "Overrides to apply to all chart resources, don't do namespace here";
+                description = "Overrides to apply to all chart objects, don't do namespace here";
                 type = types.listOf settingsFormat.type;
                 example = [
                   {
@@ -55,12 +58,6 @@ in
                   }
                 ];
                 default = [ ];
-              };
-              # Do we really need this here? Doesn't Helm take care of this?
-              overrideNamespace = lib.mkOption {
-                description = "Override namespace for all namespaced resources";
-                type = types.nullOr types.str;
-                default = null;
               };
               convertLists = mkOption {
                 description = ''
@@ -116,7 +113,7 @@ in
               let
                 list = importJSON (
                   pkgs.chart2json.override { kubernetes-helm = cfg.package; } {
-                    inherit (config)
+                    inherit (releaseConfig)
                       chart
                       name
                       namespace
@@ -129,23 +126,12 @@ in
                   }
                 );
               in
-              if config.overrideNamespace != null then
-                lib.map (
-                  resource:
-                  let
-                    namespaced =
-                      if lib.hasAttr resource.kind globalConfig.kubernetes.namespacedMappings then
-                        globalConfig.kubernetes.namespacedMappings.${resource.kind}
-                      else
-                        throw "kind ${resource.kind} doesn't have a namespacedMapping";
-                  in
-                  if namespaced then
-                    lib.recursiveUpdate resource { metadata.namespace = config.overrideNamespace; }
-                  else
-                    resource
-                ) list
-              else
-                list;
+              list
+              ++ lib.optional (releaseConfig.namespace != null) {
+                apiVersion = "v1";
+                kind = "Namespace";
+                metadata.name = releaseConfig.namespace;
+              };
           }
         )
       );
