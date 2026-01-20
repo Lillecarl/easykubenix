@@ -12,6 +12,9 @@ let
 
   importyaml = types.submodule (
     { config, ... }:
+    let
+      yamlConfig = config;
+    in
     {
       options = {
         src = mkOption {
@@ -19,19 +22,9 @@ let
           type = types.either types.package types.str;
         };
         overrides = mkOption {
-          description = "Overrides to apply to all resources, don't do namespace here";
-          type = types.listOf settingsFormat.type;
-          example = [
-            {
-              metadata.annotations."who.is/coolest" = "lillecarl";
-            }
-          ];
+          description = "Overrides to apply to all chart objects, don't do namespace here";
+          type = lib.types.listOf (types.functionTo settingsFormat.type);
           default = [ ];
-        };
-        overrideNamespace = lib.mkOption {
-          description = "Override namespace for all namespaced resources";
-          type = types.nullOr types.str;
-          default = null;
         };
         convertLists = mkOption {
           description = ''
@@ -49,51 +42,31 @@ let
         };
       };
       config = {
+        # list to attrset convertion is just a preconfigured override
+        overrides = lib.optional yamlConfig.convertLists (
+          lib.mkBefore (object: (lib.walkWithPath lib.kubeListsToAttrs) object)
+        );
+
         objects =
           let
             # TODO: This is bugged if you input a fetchTree
             src =
-              if isDerivation config.src then
-                config.src
+              if isDerivation yamlConfig.src then
+                yamlConfig.src
               else
                 builtins.fetchTree {
                   type = "file";
-                  url = config.src;
+                  url = yamlConfig.src;
                 };
 
-            # Thanks kubenix
             list = lib.importJSON (
               pkgs.runCommand "yaml2json" { } # bash
                 ''
-                  # Remove null values
-                  ${lib.getExe pkgs.yq} -Scs 'walk(
-                    if type == "object" then
-                      with_entries(select(.value != null))
-                    elif type == "array" then
-                      map(select(. != null))
-                    else
-                      .
-                    end)' ${toString src} >$out
+                  ${pkgs.yq}/bin/yq -Scs '.' ${src} >$out
                 ''
             );
           in
-          if config.overrideNamespace != null then
-            lib.map (
-              resource:
-              let
-                namespaced =
-                  if lib.hasAttr resource.kind globalConfig.kubernetes.namespacedMappings then
-                    globalConfig.kubernetes.namespacedMappings.${resource.kind}
-                  else
-                    throw "kind ${resource.kind} doesn't have a namespacedMapping";
-              in
-              if namespaced then
-                lib.recursiveUpdate resource { metadata.namespace = config.overrideNamespace; }
-              else
-                resource
-            ) list
-          else
-            list;
+          list;
       };
     }
   );
@@ -104,26 +77,15 @@ in
     default = { };
   };
   config = {
-    # Thanks kubenix for this voodoo magic function
-    kubernetes.resources = mkMerge (
-      flatten (
-        mapAttrsToList (
-          _: yaml:
-          map (object: {
-            ${object.metadata.namespace or "none"}.${object.kind}."${object.metadata.name}" = mkMerge (
-              [
-                (
-                  if yaml.convertLists then # fmt
-                    (lib.walkWithPath lib.kubeListsToAttrs) object
-                  else
-                    object
-                )
-              ]
-              ++ yaml.overrides
-            );
-          }) yaml.objects
-        ) cfg
-      )
-    );
+    kubernetes.objects = lib.pipe cfg [
+      (lib.mapAttrsToList (
+        _: importspec: lib.map (object: lib.pipe object importspec.overrides) importspec.objects
+      ))
+      lib.flatten
+      (lib.map (object: {
+        ${object.metadata.namespace or "none"}.${object.kind}.${object.metadata.name} = object;
+      }))
+      lib.mkMerge
+    ];
   };
 }
