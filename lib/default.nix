@@ -87,8 +87,18 @@ self: lib: {
 
   # Master transformer: Converts all standard JSON lists into special attribute sets
   # to make them easily overridable in Nix.
+  # Takes the root object first to allow skipping entire objects (e.g., CRDs).
   kubeListsToAttrs =
+    object:
+    let
+      # Never transform CustomResourceDefinition objects. Their spec contains OpenAPI schemas
+      # with deeply nested structures that must not be converted to named/numbered lists.
+      isCRD = lib.isAttrs object && (object.kind or null) == "CustomResourceDefinition";
+    in
     path: value:
+    if isCRD then
+      value
+    else
     let
       currentKey = lib.last (path ++ [ null ]);
       # Heuristic to identify a list that should become a `_namedlist`.

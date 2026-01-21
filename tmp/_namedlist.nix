@@ -23,5 +23,5 @@ in
 rec {
   ainputVersion = input;
   blistVersion = (lib.walkWithPath lib.kubeAttrsToLists) ainputVersion;
-  cattrVersion = (lib.walkWithPath lib.kubeListsToAttrs) blistVersion;
+  cattrVersion = (lib.walkWithPath (lib.kubeListsToAttrs blistVersion)) blistVersion;
 }

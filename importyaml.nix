@@ -44,7 +44,7 @@ let
       config = {
         # list to attrset convertion is just a preconfigured override
         overrides = lib.optional yamlConfig.convertLists (
-          lib.mkBefore (object: (lib.walkWithPath lib.kubeListsToAttrs) object)
+          lib.mkBefore (object: (lib.walkWithPath (lib.kubeListsToAttrs object)) object)
         );
 
         objects =
