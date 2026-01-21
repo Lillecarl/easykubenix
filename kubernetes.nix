@@ -11,6 +11,10 @@ in
 {
   imports = [
     (lib.mkAliasOptionModule [ "kubernetes" "resources" ] [ "kubernetes" "objects" ])
+    (lib.mkRemovedOptionModule [
+      "kubernetes"
+      "namespacedMappings"
+    ] "RIP namespacedMappings")
   ];
   options.kubernetes = {
     package = lib.mkPackageOption pkgs "kubernetes" { };
@@ -185,15 +189,6 @@ in
       description = "Map of kind to apiVersion. Merged with mappings from `apiMappingFile`.";
     };
 
-    namespacedMappings = lib.mkOption {
-      type = lib.types.attrsOf lib.types.bool;
-      default = { };
-      example = {
-        Cluster = "cluster.x-k8s.io/v1beta1";
-      };
-      description = "If a kind is namespaced or not. Merged with values from `apiMappingFile`.";
-    };
-
     apiMappingFile = lib.mkOption {
       type = lib.types.path;
       default = ./apiResources/v1.33.json;
@@ -228,15 +223,6 @@ in
       in
       lib.listToAttrs (map objectToAttr data.resources);
 
-    namespacedMappings =
-      let
-        data = lib.importJSON config.kubernetes.apiMappingFile;
-        objectToAttr = object: {
-          name = object.kind;
-          value = object.namespaced;
-        };
-      in
-      lib.listToAttrs (map objectToAttr data.resources);
 
     generated = lib.pipe cfg.objects [
       # Convert kubernetes.objects.namespace.kind.name into a list of objects
