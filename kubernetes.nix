@@ -223,7 +223,6 @@ in
       in
       lib.listToAttrs (map objectToAttr data.resources);
 
-
     generated = lib.pipe cfg.objects [
       # Convert kubernetes.objects.namespace.kind.name into a list of objects
       (lib.collect (x: x ? apiVersion && x ? kind && x ? metadata))

@@ -89,12 +89,11 @@ in
 
               apiVersions = mkOption {
                 description = ''
-                  Inform Helm about which CRDs are available in the cluster (`--api-versions` option).
+                  Inform Helm about which API versions are available in the cluster (`--api-versions` option).
                   This is useful for charts which contain `.Capabilities.APIVersions.Has` checks.
-                  If you use `kubernetes.customTypes` to make kubenix aware of CRDs, it will include those as well by default.
                 '';
                 type = types.listOf types.str;
-                default = lib.attrValues globalConfig.kubernetes.apiMappings;
+                default = [ ];
               };
 
               objects = mkOption {
@@ -143,24 +142,45 @@ in
     };
   };
 
-  config = {
-    kubernetes.objects = lib.pipe cfg.releases [
-      (lib.mapAttrsToList (
-        _: release: lib.map (object: lib.pipe object release.overrides) release.objects
-      ))
-      lib.flatten
-      (lib.map (
-        object:
-        let
-          kind = object.kind or (throw "no kind for ${object}");
-          name = object.metadata.name or (throw "no name for ${object}");
-          namespace = object.metadata.namespace or "none";
-        in
-        {
-          ${namespace}.${kind}.${name} = object;
-        }
-      ))
-      lib.mkMerge
-    ];
-  };
+  config =
+    let
+      allObjects = lib.pipe cfg.releases [
+        (lib.mapAttrsToList (
+          _: release: lib.map (object: lib.pipe object release.overrides) release.objects
+        ))
+        lib.flatten
+      ];
+    in
+    {
+      kubernetes.objects = lib.pipe allObjects [
+        (lib.map (
+          object:
+          let
+            kind = object.kind or (throw "no kind for ${object}");
+            name = object.metadata.name or (throw "no name for ${object}");
+            namespace = object.metadata.namespace or "none";
+          in
+          {
+            ${namespace}.${kind}.${name} = object;
+          }
+        ))
+        lib.mkMerge
+      ];
+      kubernetes.apiMappings = lib.pipe allObjects [
+        (lib.filter (object: object.kind or null == "CustomResourceDefinition"))
+        (map (crd: {
+          name = crd.spec.names.kind;
+          value =
+            let
+              version = lib.pipe crd.spec.versions [
+                (lib.filter (x: x.storage or false == true))
+                lib.head
+                (x: x.name)
+              ];
+            in
+            "${crd.spec.group}/${version}";
+        }))
+        lib.listToAttrs
+      ];
+    };
 }

@@ -76,16 +76,37 @@ in
     type = types.attrsOf importyaml;
     default = { };
   };
-  config = {
-    kubernetes.objects = lib.pipe cfg [
-      (lib.mapAttrsToList (
-        _: importspec: lib.map (object: lib.pipe object importspec.overrides) importspec.objects
-      ))
-      lib.flatten
-      (lib.map (object: {
-        ${object.metadata.namespace or "none"}.${object.kind}.${object.metadata.name} = object;
-      }))
-      lib.mkMerge
-    ];
-  };
+  config =
+    let
+      allObjects = lib.pipe cfg [
+        (lib.mapAttrsToList (
+          _: importspec: lib.map (object: lib.pipe object importspec.overrides) importspec.objects
+        ))
+        lib.flatten
+      ];
+    in
+    {
+      kubernetes.objects = lib.pipe allObjects [
+        (lib.map (object: {
+          ${object.metadata.namespace or "none"}.${object.kind}.${object.metadata.name} = object;
+        }))
+        lib.mkMerge
+      ];
+      kubernetes.apiMappings = lib.pipe allObjects [
+        (lib.filter (object: object.kind or null == "CustomResourceDefinition"))
+        (map (crd: {
+          name = crd.spec.names.kind;
+          value =
+            let
+              version = lib.pipe crd.spec.versions [
+                (lib.filter (x: x.storage or false == true))
+                lib.head
+                (x: x.name)
+              ];
+            in
+            "${crd.spec.group}/${version}";
+        }))
+        lib.listToAttrs
+      ];
+    };
 }
