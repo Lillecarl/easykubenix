@@ -2,7 +2,6 @@
 {
   pkgs ? import <nixpkgs> { },
   modules ? [ ./demo ],
-  specialArgs ? { },
   debug ? true,
 }:
 let
@@ -15,6 +14,12 @@ let
 
   eval = lib.evalModules {
     modules = [
+      {
+        _module.args = {
+          inherit pkgs;
+          inherit (pkgs) lib;
+        };
+      }
       ./assertions.nix
       ./internal.nix
       ./kubernetes.nix
@@ -24,11 +29,6 @@ let
       ./importyaml.nix
     ]
     ++ modules;
-    specialArgs = {
-      inherit pkgs;
-      inherit (pkgs) lib;
-    }
-    // specialArgs;
   };
 in
 {
