@@ -223,8 +223,7 @@ in
         data = lib.importJSON cfg.apiMappingFile;
         objectToAttr = object: {
           name = object.kind;
-          value =
-            if object.group or "" == "" then object.version else "${object.group}/${object.version}";
+          value = if object.group or "" == "" then object.version else "${object.group}/${object.version}";
         };
       in
       lib.listToAttrs (map objectToAttr data.resources);
