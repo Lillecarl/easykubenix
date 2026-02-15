@@ -104,7 +104,7 @@ in
                 (x: x.name)
               ];
             in
-            "${crd.spec.group}/${version}";
+            lib.mkDefault "${crd.spec.group}/${version}";
         }))
         lib.listToAttrs
       ];
