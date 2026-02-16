@@ -23,12 +23,13 @@ let
         };
       }
       ./assertions.nix
-      ./internal.nix
-      ./kubernetes.nix
       ./helm.nix
-      ./kluctl.nix
-      ./validation.nix
       ./importyaml.nix
+      ./internal.nix
+      ./kluctl.nix
+      ./kubernetes.nix
+      ./lib.nix
+      ./validation.nix
     ]
     ++ modules;
   };
