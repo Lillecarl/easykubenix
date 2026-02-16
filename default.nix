@@ -2,7 +2,8 @@
 {
   pkgs ? import <nixpkgs> { },
   modules ? [ ./demo ],
-  debug ? true,
+  specialArgs ? { },
+  debug ? null, # unused but kept for API compatibility
 }:
 let
   pkgs' = pkgs.extend (import ./pkgs/default.nix);
@@ -10,9 +11,10 @@ in
 let
   pkgs = pkgs';
   lib = pkgs.lib;
-  attrIf = condition: content: if condition then content else { };
 
   eval = lib.evalModules {
+    inherit specialArgs;
+
     modules = [
       {
         _module.args = {
@@ -41,10 +43,12 @@ in
     manifestYAMLList
     manifestYAMLFileList
     ;
+  inherit
+    pkgs
+    lib
+    eval
+    ;
+
   deploymentScript = eval.config.kluctl.script;
   validationScript = eval.config.validation.script;
 }
-# Add debug attributes if debug is set
-// (attrIf debug {
-  inherit pkgs lib eval;
-})
