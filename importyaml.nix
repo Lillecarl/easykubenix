@@ -49,9 +49,11 @@ let
 
         objects =
           let
-            # TODO: This is bugged if you input a fetchTree
             src =
               if isDerivation yamlConfig.src then
+                yamlConfig.src
+              else if lib.hasPrefix "/" yamlConfig.src then
+                # Local file path (store path from path-to-string conversion)
                 yamlConfig.src
               else
                 builtins.fetchTree {
