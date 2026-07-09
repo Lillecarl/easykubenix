@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ekn"
+version = "0.1.0"
+description = "easykubenix CLI"
+requires-python = ">=3.10"
+authors = [
+    { name = "easykubenix contributors" },
+]
+dependencies = [
+    "typer",
+]
+
+[project.scripts]
+ekn = "ekn.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ekn"]
