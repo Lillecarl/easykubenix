@@ -110,3 +110,8 @@ Essentially kubectl apply --prune -l on steroids. It also integrates SOPS
 which can be used to keep secrets out of the Nix store.
 
 `easykubenix` supports generating a minimal kluctl project and deployment script.
+---
+
+*This project is made possible by*
+
+[![Dynamist](.assets/dynamist-logo.png)](https://dynamist.se/)
