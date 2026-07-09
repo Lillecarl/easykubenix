@@ -1,4 +1,7 @@
 # easykubenix
+
+[![Documentation Status](https://readthedocs.org/projects/easykubenix/badge/?version=latest)](https://easykubenix.readthedocs.io/en/latest/?badge=latest)
+
 Note that a lot of this text is AI slop(because i write like a toddler), don't
 judge the book by it's cover though!
 
@@ -110,6 +113,9 @@ Essentially kubectl apply --prune -l on steroids. It also integrates SOPS
 which can be used to keep secrets out of the Nix store.
 
 `easykubenix` supports generating a minimal kluctl project and deployment script.
+
+[Documentation](https://easykubenix.readthedocs.io/)
+
 ---
 
 *This project is made possible by*
