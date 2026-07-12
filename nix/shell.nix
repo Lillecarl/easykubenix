@@ -6,21 +6,20 @@
   furo,
   pytest,
   anyio,
-  pygit2,
-  pyyaml,
-  typer,
+  ekn,
 }:
 let
-  pythonEnv = python.withPackages (pp: [
-    sphinx
-    myst-parser
-    furo
-    pytest
-    anyio
-    pygit2
-    pyyaml
-    typer
-  ]);
+  pythonEnv = python.withPackages (
+    pp:
+    ekn.dependencies
+    ++ [
+      sphinx
+      myst-parser
+      furo
+      pytest
+      anyio
+    ]
+  );
 in
 mkShell {
   packages = [ pythonEnv ];
