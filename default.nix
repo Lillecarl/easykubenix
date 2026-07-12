@@ -45,7 +45,7 @@ let
   lib = pkgs.lib;
 
   nanopynix = import inputs.nanopynix { inherit pkgs; };
-  ekn = pkgs.python3Packages.callPackage ./easykubenix/pkgs/ekn { inherit (nanopynix) nanopynix; };
+  ekn = pkgs.python3Packages.callPackage ./ekn { inherit (nanopynix) nanopynix; };
 
   eval = lib.evalModules {
     inherit specialArgs;
@@ -58,6 +58,7 @@ let
         };
       }
       ./easykubenix/assertions.nix
+      ./easykubenix/gitops.nix
       ./easykubenix/helm.nix
       ./easykubenix/importyaml.nix
       ./easykubenix/internal.nix

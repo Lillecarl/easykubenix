@@ -16,7 +16,7 @@
       inherit (inputs.nixpkgs) lib;
       forEachSystem = lib.genAttrs lib.systems.flakeExposed;
       eachPkgs = forEachSystem (system: import inputs.nixpkgs { inherit system; });
-      eachDefNix = forEachSystem (system: import ./. { pkgs = eachPkgs.${system}; });
+      eachDefNix = forEachSystem (system: import ./. { inherit inputs; pkgs = eachPkgs.${system}; });
     in
     {
       packages = forEachSystem (
