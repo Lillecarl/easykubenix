@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path as _Path
 from typing import Any
 
 import rich.traceback
@@ -51,7 +52,7 @@ def _parse_flake(flake_ref: str) -> tuple[str, str | None]:
 
 
 async def _evaluate(
-    file: Path | None,
+    file: _Path | None,
     flake: str | None,
     attr_path: str | None,
 ) -> object:
@@ -99,7 +100,7 @@ def _get_manifests(result: dict[str, Any]) -> dict[str, Any]:
 
 class Eval(Command):
     """Evaluate Nix and dump JSON."""
-    file: Path | None = arg(None, short="-f", inherited=True)
+    file: _Path | None = arg(None, short="-f", inherited=True)
     flake: str | None = arg(None, inherited=True)
     attr_path: str | None = arg(None, help="Dot-path into the evaluated file or flake output.")
 
@@ -111,7 +112,7 @@ class Eval(Command):
 
 class Diff(Command):
     """Diff rendered manifests against the GitOps branch."""
-    file: Path | None = arg(None, short="-f", inherited=True)
+    file: _Path | None = arg(None, short="-f", inherited=True)
     flake: str | None = arg(None, inherited=True)
     attr_path: str | None = arg(None, help="Dot-path into the evaluated file or flake output.")
     branch: str | None = arg(None, short="-b", help="Override the branch name from config.gitops.branch.")
@@ -143,7 +144,7 @@ class Diff(Command):
 
 class Commit(Command):
     """Render manifests and write them to the GitOps branch."""
-    file: Path | None = arg(None, short="-f", inherited=True)
+    file: _Path | None = arg(None, short="-f", inherited=True)
     flake: str | None = arg(None, inherited=True)
     attr_path: str | None = arg(None, help="Dot-path into the evaluated file or flake output.")
     branch: str | None = arg(None, short="-b", help="Override the branch name from config.gitops.branch.")
@@ -181,7 +182,7 @@ class Commit(Command):
 
 class Validate(Command):
     """Boot real etcd+kube-apiserver, apply manifests, and run kubeconform."""
-    file: Path | None = arg(None, short="-f", inherited=True)
+    file: _Path | None = arg(None, short="-f", inherited=True)
     flake: str | None = arg(None, inherited=True)
     attr_path: str | None = arg(None, help="Dot-path into the evaluated config.")
 
@@ -381,7 +382,7 @@ class Validate(Command):
 class Ekn(Command):
     """easykubenix CLI — evaluate Nix and manage GitOps release branches."""
     subcommand: Eval | Diff | Commit | Validate | None = None
-    file: Path | None = arg(None, short="-f", help="Nix file to evaluate.")
+    file: _Path | None = arg(None, short="-f", help="Nix file to evaluate.")
     flake: str | None = arg(None, help="Flake reference (e.g. '.#myconfig'). Evaluates outputs.eknConfig.<system>.<attr>.")
 
     async def run(self) -> None:

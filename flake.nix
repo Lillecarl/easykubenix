@@ -16,7 +16,13 @@
       inherit (inputs.nixpkgs) lib;
       forEachSystem = lib.genAttrs lib.systems.flakeExposed;
       eachPkgs = forEachSystem (system: import inputs.nixpkgs { inherit system; });
-      eachDefNix = forEachSystem (system: import ./. { inherit inputs; pkgs = eachPkgs.${system}; });
+      eachDefNix = forEachSystem (
+        system:
+        import ./. {
+          inherit inputs;
+          pkgs = eachPkgs.${system};
+        }
+      );
     in
     {
       packages = forEachSystem (
@@ -25,7 +31,7 @@
           defNix = eachDefNix.${system};
         in
         {
-          inherit (defNix) ekn nanopynix nanopynix-bindings;
+          inherit (defNix.passthru) ekn nanopynix nanopynix-bindings;
         }
       );
       lib.easykubenix = import ./default.nix;

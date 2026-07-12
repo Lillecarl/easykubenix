@@ -2,6 +2,7 @@
   lib,
   buildPythonApplication,
   cacert,
+  installShellFiles,
   hatchling,
   nanopynix,
   pygit2,
@@ -19,7 +20,7 @@ buildPythonApplication (finalAttrs: {
   src = lib.cleanSource ./.;
 
   build-system = [ hatchling ];
-  nativeBuildInputs = [ cacert ];
+  nativeBuildInputs = [ cacert installShellFiles ];
   dependencies = [
     nanopynix
     pygit2
