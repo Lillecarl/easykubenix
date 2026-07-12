@@ -13,11 +13,11 @@ authors = [
 dependencies = [
     "pygit2",
     "pyyaml",
-    "typer",
+    "clypi",
 ]
 
 [project.scripts]
-ekn = "ekn.cli:app"
+ekn = "ekn.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ekn"]

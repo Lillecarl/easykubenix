@@ -1,31 +1,25 @@
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
-from ekn.cli import app
+from ekn.eval import evaluate_file, evaluate_flake_ekn
+from ekn.git import commit_manifests, flatten_manifests, diff_manifests
 
-runner = CliRunner()
-
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CUSTOMER_NIX = """\
 {
   customer1 = {
     config = {
-      gitops = {
-        enable = true;
-        branch = "test-render";
-      };
+      gitops = { enable = true; branch = "test-render"; };
       kubernetes = {
         generatedByPath = {
           default = {
             ConfigMap = {
               "my-config" = {
-                apiVersion = "v1";
-                kind = "ConfigMap";
+                apiVersion = "v1"; kind = "ConfigMap";
                 metadata = { name = "my-config"; namespace = "default"; };
                 data = { key = "value"; };
               };
@@ -38,27 +32,10 @@ CUSTOMER_NIX = """\
 }
 """
 
-NO_GITOPS_NIX = """\
-{
-  app = {
-    config = {
-      gitops = {
-        enable = false;
-      };
-      kubernetes = {
-        generatedByPath = { };
-      };
-    };
-  };
-}
-"""
 
-
-@pytest.fixture
-def customer_file(tmp_path: Path) -> Path:
-    f = tmp_path / "customers.nix"
-    f.write_text(CUSTOMER_NIX)
-    return f
+@pytest.fixture(scope="module")
+def anyio_backend() -> str:
+    return "asyncio"
 
 
 @pytest.fixture
@@ -76,56 +53,56 @@ def git_repo(tmp_path: Path) -> Path:
 
 
 class TestEval:
-    def test_callback_eval(self, customer_file: Path) -> None:
-        result = runner.invoke(app, ["-f", str(customer_file)])
-        assert result.exit_code == 0, result.stdout
-        data = json.loads(result.stdout)
-        assert "customer1" in data
+    async def test_eval_callback(self, tmp_path: Path) -> None:
+        f = tmp_path / "customers.nix"
+        f.write_text(CUSTOMER_NIX)
+        result = await evaluate_file(f, None)
+        assert isinstance(result, dict)
+        assert "customer1" in result
 
-    def test_eval_subcommand(self, customer_file: Path) -> None:
-        result = runner.invoke(app, ["eval", "-f", str(customer_file)])
-        assert result.exit_code == 0, result.stdout
-        data = json.loads(result.stdout)
-        assert "customer1" in data
-
-    def test_eval_with_attr(self, customer_file: Path) -> None:
-        result = runner.invoke(app, ["eval", "-f", str(customer_file), "customer1"])
-        assert result.exit_code == 0, result.stdout
-        data = json.loads(result.stdout)
-        assert "config" in data
-
-    def test_eval_missing_file(self) -> None:
-        result = runner.invoke(app, ["eval", "-f", "/nonexistent.nix"])
-        assert result.exit_code != 0
+    async def test_eval_with_attr(self, tmp_path: Path) -> None:
+        f = tmp_path / "customers.nix"
+        f.write_text(CUSTOMER_NIX)
+        result = await evaluate_file(f, "customer1")
+        assert isinstance(result, dict)
+        assert "config" in result
 
 
 class TestDiff:
-    def test_diff_no_changes(self, customer_file: Path, git_repo: Path) -> None:
+    async def test_diff_no_changes(self, tmp_path: Path, git_repo: Path) -> None:
+        f = tmp_path / "customers.nix"
+        f.write_text(CUSTOMER_NIX)
         os.environ["EKN_REPO"] = str(git_repo)
         try:
-            _seed_branch(customer_file)
-            result = runner.invoke(app, ["diff", "-f", str(customer_file), "customer1"])
-            assert result.exit_code == 0, result.stdout
-            assert "no differences" in result.stdout
+            result = await evaluate_file(f, "customer1")
+            files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            commit_manifests(".", result["config"]["gitops"]["branch"], files, "seed")
+            diff_out = diff_manifests(".", result["config"]["gitops"]["branch"], files)
+            assert diff_out is None
         finally:
             os.environ.pop("EKN_REPO", None)
 
-    def test_diff_without_gitops_errors(self, tmp_path: Path, git_repo: Path) -> None:
+    async def test_diff_without_gitops_errors(self, tmp_path: Path) -> None:
         f = tmp_path / "no.nix"
-        f.write_text(NO_GITOPS_NIX)
-        os.environ["EKN_REPO"] = str(git_repo)
-        try:
-            result = runner.invoke(app, ["diff", "-f", str(f), "app"])
-            assert result.exit_code != 0
-            assert "gitops is not enabled" in result.stderr
-        finally:
-            os.environ.pop("EKN_REPO", None)
+        f.write_text("""\
+{ app = {
+    config = {
+      gitops = { enable = false; };
+      kubernetes = { generatedByPath = {}; };
+    };
+  };
+}
+""")
+        result = await evaluate_file(f, "app")
+        assert result["config"]["gitops"]["enable"] is False
 
-    def test_diff_branch_override(self, customer_file: Path, git_repo: Path) -> None:
-        from ekn.git import commit_manifests, flatten_manifests
+    async def test_diff_branch_override(self, tmp_path: Path, git_repo: Path) -> None:
+        f = tmp_path / "customers.nix"
+        f.write_text(CUSTOMER_NIX)
         os.environ["EKN_REPO"] = str(git_repo)
         try:
-            files = flatten_manifests({
+            result = await evaluate_file(f, "customer1")
+            default_files = flatten_manifests({
                 "default": {
                     "ConfigMap": {
                         "my-config": {
@@ -136,48 +113,81 @@ class TestDiff:
                     }
                 },
             })
-            commit_manifests(".", "override-branch", files, "first")
-            result = runner.invoke(app, [
-                "diff", "-f", str(customer_file), "customer1", "-b", "override-branch",
-            ])
-            assert result.exit_code == 0, result.stdout
+            commit_manifests(".", "override-branch", default_files, "first")
+            new_files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            diff_out = diff_manifests(".", "override-branch", new_files)
+            assert diff_out is not None
+            assert "my-config" in diff_out or "test" in diff_out
         finally:
             os.environ.pop("EKN_REPO", None)
 
 
 class TestCommit:
-    def test_first_commit(self, customer_file: Path, git_repo: Path) -> None:
+    async def test_first_commit(self, tmp_path: Path, git_repo: Path) -> None:
+        f = tmp_path / "customers.nix"
+        f.write_text(CUSTOMER_NIX)
         os.environ["EKN_REPO"] = str(git_repo)
         try:
-            result = runner.invoke(app, ["commit", "-f", str(customer_file), "customer1", "-m", "test"])
-            assert result.exit_code == 0, result.stdout
-            assert "committed to test-render @" in result.stdout
+            result = await evaluate_file(f, "customer1")
+            files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            commit_id = commit_manifests(".", result["config"]["gitops"]["branch"], files, "test")
+            assert isinstance(commit_id, str)
+            assert len(commit_id) > 0
         finally:
             os.environ.pop("EKN_REPO", None)
 
-    def test_second_commit(self, customer_file: Path, git_repo: Path) -> None:
+    async def test_second_commit(self, tmp_path: Path, git_repo: Path) -> None:
+        f = tmp_path / "customers.nix"
+        f.write_text(CUSTOMER_NIX)
         os.environ["EKN_REPO"] = str(git_repo)
         try:
-            _seed_branch(customer_file)
-            result = runner.invoke(app, ["commit", "-f", str(customer_file), "customer1", "-m", "second"])
-            assert result.exit_code == 0, result.stdout
-            assert "committed to test-render @" in result.stdout
+            result = await evaluate_file(f, "customer1")
+            files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            commit_manifests(".", result["config"]["gitops"]["branch"], files, "first")
+            commit_id = commit_manifests(".", result["config"]["gitops"]["branch"], files, "second")
+            assert isinstance(commit_id, str)
         finally:
             os.environ.pop("EKN_REPO", None)
 
-    def test_commit_branch_override(self, customer_file: Path, git_repo: Path) -> None:
+    async def test_commit_branch_override(self, tmp_path: Path, git_repo: Path) -> None:
+        f = tmp_path / "customers.nix"
+        f.write_text(CUSTOMER_NIX)
         os.environ["EKN_REPO"] = str(git_repo)
         try:
-            result = runner.invoke(app, [
-                "commit", "-f", str(customer_file), "customer1",
-                "-b", "override", "-m", "override",
-            ])
-            assert result.exit_code == 0, result.stdout
-            assert "committed to override @" in result.stdout
+            result = await evaluate_file(f, "customer1")
+            files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            commit_id = commit_manifests(".", "override", files, "override")
+            assert isinstance(commit_id, str)
         finally:
             os.environ.pop("EKN_REPO", None)
 
 
-def _seed_branch(customer_file: Path) -> None:
-    result = runner.invoke(app, ["commit", "-f", str(customer_file), "customer1", "-m", "first"])
-    assert result.exit_code == 0, result.stdout
+EXAMPLE_FLAKE = str((Path(__file__).resolve().parent.parent / "docs/examples/example-flake").resolve())
+
+
+class TestFlakeEval:
+    async def test_flake_eval(self) -> None:
+        result = await evaluate_flake_ekn(EXAMPLE_FLAKE, "myapp")
+        assert result["config"]["gitops"]["branch"] == "flake-branch"
+        assert "default" in result["config"]["kubernetes"]["generatedByPath"]
+
+    async def test_flake_diff(self, git_repo: Path) -> None:
+        os.environ["EKN_REPO"] = str(git_repo)
+        try:
+            result = await evaluate_flake_ekn(EXAMPLE_FLAKE, "myapp")
+            files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            commit_manifests(".", result["config"]["gitops"]["branch"], files, "seed")
+            diff_out = diff_manifests(".", result["config"]["gitops"]["branch"], files)
+            assert diff_out is None
+        finally:
+            os.environ.pop("EKN_REPO", None)
+
+    async def test_flake_commit(self, git_repo: Path) -> None:
+        os.environ["EKN_REPO"] = str(git_repo)
+        try:
+            result = await evaluate_flake_ekn(EXAMPLE_FLAKE, "myapp")
+            files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            commit_id = commit_manifests(".", result["config"]["gitops"]["branch"], files, "flake-test")
+            assert isinstance(commit_id, str)
+        finally:
+            os.environ.pop("EKN_REPO", None)

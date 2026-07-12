@@ -3,11 +3,10 @@
   buildPythonApplication,
   cacert,
   hatchling,
-  installShellFiles,
   nanopynix,
   pygit2,
   pyyaml,
-  typer,
+  clypi,
 }:
 buildPythonApplication (finalAttrs: {
   name = "ekn";
@@ -17,12 +16,12 @@ buildPythonApplication (finalAttrs: {
   src = lib.cleanSource ./.;
 
   build-system = [ hatchling ];
-  nativeBuildInputs = [ installShellFiles cacert ];
+  nativeBuildInputs = [ cacert ];
   dependencies = [
     nanopynix
     pygit2
     pyyaml
-    typer
+    clypi
   ];
 
   postInstall = ''

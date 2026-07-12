@@ -34,9 +34,10 @@
         system:
         let
           pkgs = eachPkgs.${system};
+          defNix = eachDefNix.${system};
         in
         {
-          default = pkgs.python3Packages.callPackage ./nix/shell.nix { };
+          default = pkgs.python3Packages.callPackage ./nix/shell.nix { ekn = defNix.ekn; };
         }
       );
     };

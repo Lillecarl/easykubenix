@@ -13,7 +13,11 @@ let
   lib = pkgs.lib;
 
   nanopynix = import inputs.nanopynix { inherit pkgs; };
-  ekn = pkgs.python3Packages.callPackage ./ekn { inherit (nanopynix) nanopynix; };
+  clypi = pkgs.python3Packages.callPackage ./nix/clypi.nix { };
+  ekn = pkgs.python3Packages.callPackage ./ekn {
+    inherit (nanopynix) nanopynix;
+    inherit clypi;
+  };
 
   eval = lib.evalModules {
     inherit specialArgs;
@@ -51,19 +55,17 @@ in
 
   inherit (eval) config;
 
-  inherit (nanopynix) nanopynix nanopynix-bindings;
-
-  inherit ekn;
-
   deploymentScript = eval.config.kluctl.script;
   validationScript = eval.config.validation.script;
-  debug = {
+  passthru = {
+    inherit (nanopynix) nanopynix nanopynix-bindings;
     inherit
       inputs
       pkgs
       lib
       eval
       ekn
+      clypi
       ;
   };
 }

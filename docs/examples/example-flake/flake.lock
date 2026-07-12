@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "easykubenix": {
+      "inputs": {
+        "flake-compatish": "flake-compatish",
+        "nanopynix": "nanopynix",
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "path": "../../../.",
+        "type": "path"
+      },
+      "original": {
+        "path": "../../../.",
+        "type": "path"
+      },
+      "parent": []
+    },
     "flake-compatish": {
       "locked": {
         "lastModified": 1771176559,
@@ -18,6 +34,7 @@
     "nanopynix": {
       "inputs": {
         "nixpkgs": [
+          "easykubenix",
           "nixpkgs"
         ]
       },
@@ -52,11 +69,26 @@
         "type": "github"
       }
     },
+    "nixpkgs_2": {
+      "locked": {
+        "lastModified": 1783816212,
+        "narHash": "sha256-2aZisVTVGSFEk3MYcOiWQp3zvwyzbqpktB69Rcfp150=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "3b32825de172d0bc85664f495edb096b10862524",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "nixpkgs-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
-        "flake-compatish": "flake-compatish",
-        "nanopynix": "nanopynix",
-        "nixpkgs": "nixpkgs"
+        "easykubenix": "easykubenix",
+        "nixpkgs": "nixpkgs_2"
       }
     }
   },
