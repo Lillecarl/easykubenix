@@ -15,5 +15,14 @@
       '';
       example = "production";
     };
+
+    path = lib.mkOption {
+      type = lib.types.str;
+      default = "./";
+      description = ''
+        Subdirectory within the branch where rendered manifests are stored.
+      '';
+      example = "./clusters/my-cluster";
+    };
   };
 }

@@ -11,6 +11,8 @@ authors = [
     { name = "easykubenix contributors" },
 ]
 dependencies = [
+    "pygit2",
+    "pyyaml",
     "typer",
 ]
 

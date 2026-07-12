@@ -80,15 +80,22 @@ in
     manifestYAMLList
     manifestYAMLFileList
     ;
-  inherit
-    pkgs
-    lib
-    eval
-    ;
+
+  inherit (eval) config;
+
+  inherit (nanopynix) nanopynix nanopynix-bindings;
 
   inherit ekn;
-  inherit (nanopynix) nanopynix nanopynix-bindings;
 
   deploymentScript = eval.config.kluctl.script;
   validationScript = eval.config.validation.script;
+  debug = {
+    inherit
+      inputs
+      pkgs
+      lib
+      eval
+      ekn
+      ;
+  };
 }

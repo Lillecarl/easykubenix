@@ -1,10 +1,12 @@
 {
   lib,
   buildPythonApplication,
+  cacert,
   hatchling,
   installShellFiles,
   nanopynix,
   pygit2,
+  pyyaml,
   typer,
 }:
 buildPythonApplication (finalAttrs: {
@@ -15,16 +17,18 @@ buildPythonApplication (finalAttrs: {
   src = lib.cleanSource ./.;
 
   build-system = [ hatchling ];
-  nativeBuildInputs = [ installShellFiles ];
+  nativeBuildInputs = [ installShellFiles cacert ];
   dependencies = [
     nanopynix
     pygit2
+    pyyaml
     typer
   ];
 
   postInstall = ''
+    export GIT_SSL_CAINFO="${cacert}/etc/ssl/certs/ca-bundle.crt"
     installShellCompletion --name ekn --bash <(env _EKN_COMPLETE=source_bash $out/bin/ekn)
-    installShellCompletion --name ekn --zsh <(env _EKN_COMPLETE=source_zsh $out/bin/ekn)
+    installShellCompletion --name ekn --zsh  <(env _EKN_COMPLETE=source_zsh  $out/bin/ekn)
     installShellCompletion --name ekn --fish <(env _EKN_COMPLETE=source_fish $out/bin/ekn)
   '';
 
