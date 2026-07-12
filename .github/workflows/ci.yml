@@ -16,3 +16,5 @@ jobs:
         run: nix flake check ./docs/examples --print-build-logs
       - name: Validate against real kube-apiserver
         run: nix run ./docs/examples#packages.x86_64-linux.validationScript
+      - name: Run tests
+        run: nix develop -c python3 -m pytest -v --no-header

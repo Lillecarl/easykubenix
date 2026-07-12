@@ -115,3 +115,19 @@ class TestEknModule:
         assert isinstance(result, str)
         assert "ConfigMap" in result
         assert "hello" in result
+
+
+class TestValidationConfig:
+    async def test_validation_config_builds(self) -> None:
+        from ekn.eval import evaluate_validation_config
+
+        flake = str(PROJECT_ROOT / "docs/examples/example-flake")
+        cfg = await evaluate_validation_config(flake, "myapp")
+        c = cfg["config"]
+        assert c["gitops"]["branch"] == "flake-branch"
+        assert c["kubernetes"]["package"]["version"]
+        assert c["kubernetes"]["package"]["outPath"].startswith("/nix/store/")
+        assert c["validation"]["etcdPackage"]["outPath"].startswith("/nix/store/")
+        assert c["kluctl"]["script"]["outPath"].startswith("/nix/store/")
+        assert c["internal"]["manifestJSONFile"]["outPath"].startswith("/nix/store/")
+        assert "generatedByPath" in c["kubernetes"]
