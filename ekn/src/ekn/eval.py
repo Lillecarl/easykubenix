@@ -1,19 +1,22 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import nanopynix
-from nanopynix import NixError
+from nanopynix import NixError, Session
 
 
-_SESSION_KWARGS = {
-    "experimental_features": ["flakes", "nix-command"],
-}
+@asynccontextmanager
+async def _session() -> AsyncIterator[Session]:
+    async with Session(experimental_features=["flakes", "nix-command"]) as session:
+        yield session
 
 
 async def evaluate_file(file: Path, attr_path: str | None) -> object:
     async with (
-        nanopynix.Session(**_SESSION_KWARGS) as session,
+        _session() as session,
         session.store() as store,
         session.eval(store) as eval_,
     ):
@@ -35,7 +38,7 @@ async def evaluate_file_multi(
 ) -> list[object]:
     results: list[object] = []
     async with (
-        nanopynix.Session(**_SESSION_KWARGS) as session,
+        _session() as session,
         session.store() as store,
         session.eval(store) as eval_,
     ):
@@ -55,7 +58,7 @@ async def evaluate_file_multi(
 
 async def evaluate_flake(flake_uri: str, attr_path: str | None) -> object:
     async with (
-        nanopynix.Session(**_SESSION_KWARGS) as session,
+        _session() as session,
         session.store() as store,
         session.eval(store) as eval_,
     ):
@@ -73,7 +76,7 @@ async def evaluate_flake(flake_uri: str, attr_path: str | None) -> object:
 
 async def evaluate_flake_ekn(flake_uri: str, customer: str) -> dict:
     async with (
-        nanopynix.Session(**_SESSION_KWARGS) as session,
+        _session() as session,
         session.store() as store,
         session.eval(store) as eval_,
     ):
@@ -93,7 +96,7 @@ async def evaluate_flake_ekn(flake_uri: str, customer: str) -> dict:
 
 async def evaluate_validation_config(flake_uri: str, customer: str) -> dict:
     async with (
-        nanopynix.Session(**_SESSION_KWARGS) as session,
+        _session() as session,
         session.store() as store,
         session.eval(store) as eval_,
     ):

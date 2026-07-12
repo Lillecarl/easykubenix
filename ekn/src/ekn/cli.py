@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -15,6 +14,25 @@ from nanopynix import NixError
 
 from ekn.eval import evaluate_file, evaluate_flake, evaluate_flake_ekn, evaluate_validation_config
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests
+
+
+async def _exec(
+    *args: str,
+    env: dict[str, str] | None = None,
+    stdin: str | None = None,
+) -> tuple[int, str, str]:
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    stdout, stderr = await proc.communicate(
+        input=stdin.encode() if stdin is not None else None
+    )
+    assert proc.returncode is not None
+    return proc.returncode, stdout.decode(), stderr.decode()
 
 
 def _parse_flake(flake_ref: str) -> tuple[str, str | None]:
@@ -86,8 +104,8 @@ def _get_manifests(result: dict[str, Any]) -> dict[str, Any]:
 
 class Eval(Command):
     """Evaluate Nix and dump JSON."""
-    file: Path | None = arg(None, flag="--file", short="-f", inherited=True)
-    flake: str | None = arg(None, flag="--flake", inherited=True)
+    file: Path | None = arg(None, short="-f", inherited=True)
+    flake: str | None = arg(None, inherited=True)
     attr_path: Optional[str] = arg(None, help="Dot-path into the evaluated file or flake output.")
 
     async def run(self) -> None:
@@ -98,11 +116,11 @@ class Eval(Command):
 
 class Diff(Command):
     """Diff rendered manifests against the GitOps branch."""
-    file: Path | None = arg(None, flag="--file", short="-f", inherited=True)
-    flake: str | None = arg(None, flag="--flake", inherited=True)
+    file: Path | None = arg(None, short="-f", inherited=True)
+    flake: str | None = arg(None, inherited=True)
     attr_path: Optional[str] = arg(None, help="Dot-path into the evaluated file or flake output.")
-    branch: Optional[str] = arg(None, flag="--branch", short="-b", help="Override the branch name from config.gitops.branch.")
-    subdir: str = arg("./", flag="--subdir", short="-s", help="Subdirectory within the branch.")
+    branch: Optional[str] = arg(None, short="-b", help="Override the branch name from config.gitops.branch.")
+    subdir: str = arg("./", short="-s", help="Subdirectory within the branch.")
 
     async def run(self) -> None:
         result = await _evaluate(self.file, self.flake, self.attr_path)
@@ -129,12 +147,12 @@ class Diff(Command):
 
 class Commit(Command):
     """Render manifests and write them to the GitOps branch."""
-    file: Path | None = arg(None, flag="--file", short="-f", inherited=True)
-    flake: str | None = arg(None, flag="--flake", inherited=True)
+    file: Path | None = arg(None, short="-f", inherited=True)
+    flake: str | None = arg(None, inherited=True)
     attr_path: Optional[str] = arg(None, help="Dot-path into the evaluated file or flake output.")
-    branch: Optional[str] = arg(None, flag="--branch", short="-b", help="Override the branch name from config.gitops.branch.")
-    message: Optional[str] = arg(None, flag="--message", short="-m", help="Commit message.")
-    subdir: str = arg("./", flag="--subdir", short="-s", help="Subdirectory within the branch.")
+    branch: Optional[str] = arg(None, short="-b", help="Override the branch name from config.gitops.branch.")
+    message: Optional[str] = arg(None, short="-m", help="Commit message.")
+    subdir: str = arg("./", short="-s", help="Subdirectory within the branch.")
 
     async def run(self) -> None:
         result = await _evaluate(self.file, self.flake, self.attr_path)
@@ -149,13 +167,12 @@ class Commit(Command):
             print(f"error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         if not self.message:
-            head_result = subprocess.run(
-                ["git", "rev-parse", "--short", "HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            head_sha = head_result.stdout.strip() if head_result.returncode == 0 else "unknown"
+            import pygit2
+            try:
+                repo = pygit2.Repository(".")
+                head_sha = str(repo.head.target)[:7]
+            except Exception:
+                head_sha = "unknown"
             self.message = f"ekn: render manifests from {self.attr_path or 'root'} @ {head_sha}"
         try:
             commit_id = commit_manifests(".", resolved_branch, files, self.message)
@@ -167,8 +184,8 @@ class Commit(Command):
 
 class Validate(Command):
     """Boot real etcd+kube-apiserver, apply manifests, and run kubeconform."""
-    file: Path | None = arg(None, flag="--file", short="-f", inherited=True)
-    flake: str | None = arg(None, flag="--flake", inherited=True)
+    file: Path | None = arg(None, short="-f", inherited=True)
+    flake: str | None = arg(None, inherited=True)
     attr_path: Optional[str] = arg(None, help="Dot-path into the evaluated config.")
 
     @staticmethod
@@ -180,6 +197,9 @@ class Validate(Command):
 
     async def run(self) -> None:
         uri, customer = _parse_flake(str(self.flake))
+        if customer is None:
+            msg = "--flake must include a customer attr (e.g. '.#myapp')"
+            raise SystemExit(msg)
         cfg = await evaluate_validation_config(uri, customer)
         c = cfg["config"]
 
@@ -205,8 +225,6 @@ class Validate(Command):
         os.environ["BIND_ADDRESS"] = bind
         os.environ["KUBERNETES_PORT"] = str(k8s_port)
 
-        quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-
         etcd_proc: asyncio.subprocess.Process | None = None
         apiserver_proc: asyncio.subprocess.Process | None = None
 
@@ -217,15 +235,34 @@ class Validate(Command):
 
             env = os.environ | {"PATH": f"{k8s_bin}:{etcd_bin}:" + os.environ.get("PATH", "")}
 
-            subprocess.run(
-                ["kubeadm", "init", "phase", "certs", "all", f"--config={kubeadm_cfg}"],
-                check=True, env=env, **quiet,
+            rc, _, err = await _exec(
+                "kubeadm", "init", "phase", "certs", "all", f"--config={kubeadm_cfg}",
+                env=env,
             )
-            subprocess.run(
-                ["kubeadm", "init", "phase", "kubeconfig", "admin",
-                 f"--config={kubeadm_cfg}", f"--kubeconfig-dir={tmp}"],
-                check=True, env=env, **quiet,
+            if rc != 0:
+                print("kubeadm certs phase failed", file=sys.stderr)
+                print(err, file=sys.stderr, end="")
+                raise SystemExit(1)
+
+            rc, _, err = await _exec(
+                "kubeadm", "init", "phase", "kubeconfig", "admin",
+                f"--config={kubeadm_cfg}", f"--kubeconfig-dir={tmp}",
+                env=env,
             )
+            if rc != 0:
+                print("kubeadm kubeconfig phase failed", file=sys.stderr)
+                print(err, file=sys.stderr, end="")
+                raise SystemExit(1)
+
+            rc, _, err = await _exec(
+                "kubeadm", "init", "phase", "kubeconfig", "admin",
+                f"--config={kubeadm_cfg}", f"--kubeconfig-dir={tmp}",
+                env=env,
+            )
+            if rc != 0:
+                print("kubeadm kubeconfig phase failed", file=sys.stderr)
+                print(err, file=sys.stderr, end="")
+                raise SystemExit(1)
 
             print("starting etcd")
             etcd_proc = await asyncio.create_subprocess_exec(
@@ -246,24 +283,28 @@ class Validate(Command):
                   f"--peer-cert-file={cert_dir}/etcd/peer.crt",
                   f"--peer-key-file={cert_dir}/etcd/peer.key",
                   "--log-level=error"],
-                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=env, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
             )
 
             for attempt in range(10):
-                r = subprocess.run(
-                    ["etcdctl",
-                     f"--endpoints=https://{bind}:{etcd_client_port}",
-                     f"--cacert={cert_dir}/etcd/ca.crt",
-                     f"--cert={cert_dir}/etcd/healthcheck-client.crt",
-                     f"--key={cert_dir}/etcd/healthcheck-client.key",
-                     "endpoint", "health"],
-                    capture_output=True, env=env,
+                rc, _, err = await _exec(
+                    "etcdctl",
+                    f"--endpoints=https://{bind}:{etcd_client_port}",
+                    f"--cacert={cert_dir}/etcd/ca.crt",
+                    f"--cert={cert_dir}/etcd/healthcheck-client.crt",
+                    f"--key={cert_dir}/etcd/healthcheck-client.key",
+                    "endpoint", "health",
+                    env=env,
                 )
-                if r.returncode == 0:
+                if rc == 0:
                     break
                 await asyncio.sleep(attempt * 0.5)
             else:
                 print("etcd failed to start", file=sys.stderr)
+                print(err, file=sys.stderr, end="")
+                if etcd_proc.returncode is not None and etcd_proc.stderr is not None:
+                    etcd_err = await etcd_proc.stderr.read()
+                    print(etcd_err.decode(), file=sys.stderr, end="")
                 raise SystemExit(1)
 
             print("starting kube-apiserver")
@@ -287,41 +328,54 @@ class Validate(Command):
                   f"--service-account-signing-key-file={cert_dir}/sa.key",
                   f"--tls-cert-file={cert_dir}/apiserver.crt",
                   f"--tls-private-key-file={cert_dir}/apiserver.key"],
-                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=env, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
             )
 
             for attempt in range(10):
-                r = subprocess.run(
-                    ["kubectl", "get", "--raw", "/healthz"],
-                    capture_output=True, env=env,
+                rc, _, err = await _exec(
+                    "kubectl", "get", "--raw", "/healthz",
+                    env=env,
                 )
-                if r.returncode == 0:
+                if rc == 0:
                     break
                 await asyncio.sleep(attempt * 0.5)
             else:
                 print("kube-apiserver failed to start", file=sys.stderr)
+                print(err, file=sys.stderr, end="")
+                if apiserver_proc.returncode is not None and apiserver_proc.stderr is not None:
+                    apiserver_err = await apiserver_proc.stderr.read()
+                    print(apiserver_err.decode(), file=sys.stderr, end="")
                 raise SystemExit(1)
 
             print("applying manifests")
-            r = subprocess.run([kluctl_exe, "--yes", "--no-wait"], env=env)
-            if r.returncode != 0:
+            rc, _, err = await _exec(kluctl_exe, "--yes", "--no-wait", env=env)
+            if rc != 0:
                 print("kluctl deploy failed", file=sys.stderr)
+                print(err, file=sys.stderr, end="")
                 raise SystemExit(1)
 
             print("dumping OpenAPI schema")
+            rc, out, err = await _exec(
+                "kubectl", "get", "--raw", "/openapi/v2",
+                env=env,
+            )
+            if rc != 0:
+                print("OpenAPI schema dump failed", file=sys.stderr)
+                print(err, file=sys.stderr, end="")
+                raise SystemExit(1)
             with open(schema_file, "w") as f:
-                subprocess.run(
-                    ["kubectl", "get", "--raw", "/openapi/v2"],
-                    check=True, stdout=f, env=env,
-                )
+                f.write(out)
 
             print("running kubeconform")
             with open(manifest_path) as f:
-                r = subprocess.run(
-                    ["kubeconform", f"-schema-location={schema_file}", "-summary"],
-                    stdin=f, env=env,
-                )
-            if r.returncode != 0:
+                manifest_data = f.read()
+            rc, out, err = await _exec(
+                "kubeconform", f"-schema-location={schema_file}", "-summary",
+                stdin=manifest_data, env=env,
+            )
+            print(out, end="")
+            if rc != 0:
+                print(err, file=sys.stderr, end="")
                 print("kubeconform verification failed", file=sys.stderr)
                 raise SystemExit(1)
 
@@ -341,8 +395,8 @@ class Validate(Command):
 class Ekn(Command):
     """easykubenix CLI — evaluate Nix and manage GitOps release branches."""
     subcommand: Eval | Diff | Commit | Validate | None = None
-    file: Path | None = arg(None, flag="--file", short="-f", help="Nix file to evaluate.")
-    flake: str | None = arg(None, flag="--flake", help="Flake reference (e.g. '.#myconfig'). Evaluates outputs.eknConfig.<system>.<attr>.")
+    file: Path | None = arg(None, short="-f", help="Nix file to evaluate.")
+    flake: str | None = arg(None, help="Flake reference (e.g. '.#myconfig'). Evaluates outputs.eknConfig.<system>.<attr>.")
 
     async def run(self) -> None:
         if self.file is None and self.flake is None:

@@ -44,7 +44,7 @@ def _build_tree(repo: Any, files: list[tuple[str, str]]) -> Any:
     index.read()
     for rel_path, content in files:
         blob_id = repo.create_blob(content.encode("utf-8"))
-        entry = pygit2.IndexEntry(rel_path, blob_id, pygit2.GIT_FILEMODE_BLOB)
+        entry = pygit2.IndexEntry(rel_path, blob_id, pygit2.GIT_FILEMODE_BLOB)  # pyright: ignore — pygit2 GIT_FILEMODE_BLOB is an int but IndexEntry.mode accepts it at runtime
         index.add(entry)
     return index.write_tree()
 
@@ -78,6 +78,9 @@ def commit_manifests(
     )
 
     commit = repo[commit_id]
+    if not isinstance(commit, pygit2.Commit):
+        msg = f"expected Commit, got {type(commit).__name__}"
+        raise TypeError(msg)
     repo.create_branch(branch_name, commit, True)
     return str(commit_id)
 
@@ -100,7 +103,8 @@ def diff_manifests(
 
     buf = io.StringIO()
     for patch in repo.diff(old_tree_id, new_tree_id):
-        buf.write(patch.text)
+        if patch is not None and patch.text is not None:
+            buf.write(patch.text)
 
     result = buf.getvalue()
     return result if result else None

@@ -1,0 +1,54 @@
+target-version = "py313"
+line-length = 120
+
+[lint]
+select = [
+    "F",
+    "E", "W",
+    "I",
+    "B",
+    "SIM",
+    "TC",
+    "RUF",
+    "C4",
+    "ERA",
+    "UP",
+    "A",
+    "PTH",
+    "ARG",
+    "PERF",
+    "RET",
+    "RSE",
+    "T20",
+    "PIE",
+    "YTT",
+    "ASYNC",
+    "TRY",
+    "FURB",
+    "TID",
+    "N",
+    "FLY",
+    "Q",
+    "FA",
+    "PT",
+    "BLE",
+    "TD",
+    "LOG",
+]
+
+ignore = [
+    "E501",
+    "TID252",
+    "ARG002",
+    "TRY003",
+    "BLE001",
+    "A001",
+]
+
+[lint.isort]
+known-first-party = [
+    "ekn",
+]
+
+[format]
+docstring-code-format = true

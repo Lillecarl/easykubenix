@@ -21,3 +21,10 @@ ekn = "ekn.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ekn"]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+include = ["src", "../../tests"]
+extraPaths = ["src"]
+venvPath = "."
+venv = ".venv"

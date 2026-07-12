@@ -7,6 +7,8 @@
   pytest,
   anyio,
   ekn,
+  ruff,
+  pyright,
 }:
 let
   pythonEnv = python.withPackages (
@@ -22,5 +24,5 @@ let
   );
 in
 mkShell {
-  packages = [ pythonEnv ];
+  packages = [ pythonEnv ruff pyright ];
 }
