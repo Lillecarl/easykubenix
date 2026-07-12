@@ -5,12 +5,12 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from nanopynix import NixError
 
-from ekn.eval import evaluate_file, evaluate_file_multi
+from ekn.eval import evaluate_file
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests
 
 app = typer.Typer(
@@ -21,31 +21,50 @@ app = typer.Typer(
 )
 
 
-def _resolve_branch(file: Path, branch: str | None) -> str:
-    if branch is not None:
-        return branch
-    try:
-        results = asyncio.run(evaluate_file_multi(file, "config.gitops.branch"))
-    except NixError:
-        pass
-    else:
-        val = results[0]
-        if isinstance(val, str) and val:
-            return val
-    msg = (
-        "no branch specified (--branch / -b) and config.gitops.branch "
-        "is not set or not available in the evaluated file"
-    )
-    typer.echo(msg, err=True)
-    raise typer.Exit(code=1)
-
-
-def _evaluate_manifests(file: Path, attr_path: str | None) -> object:
+def _evaluate(file: Path, attr_path: str | None) -> object:
     try:
         return asyncio.run(evaluate_file(file, attr_path))
     except NixError as exc:
         typer.echo(exc.msg_without_ansi, err=True)
         raise typer.Exit(code=1)
+
+
+def _dig(data: object, *keys: str) -> Any:
+    for key in keys:
+        if not isinstance(data, dict):
+            return None
+        data = data.get(key)
+    return data
+
+
+def _check_gitops(result: dict[str, Any]) -> str:
+    enabled = _dig(result, "config", "gitops", "enable")
+    if enabled is not True:
+        typer.echo(
+            "gitops is not enabled for this config (config.gitops.enable != true)",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    branch = _dig(result, "config", "gitops", "branch")
+    if not isinstance(branch, str) or not branch:
+        typer.echo(
+            "config.gitops.branch is not set in the evaluated config",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    return branch
+
+
+def _get_manifests(result: dict[str, Any]) -> dict[str, Any]:
+    manifests = _dig(result, "config", "kubernetes", "generatedByPath")
+    if not isinstance(manifests, dict):
+        typer.echo(
+            "no kubernetes objects found (config.kubernetes.generatedByPath "
+            "is empty or not a dict)",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    return manifests
 
 
 @app.callback(invoke_without_command=True)
@@ -55,9 +74,8 @@ def callback(
         None,
         "--file",
         "-f",
-        help="Nix file to evaluate.",
+        help="Nix file or easykubenix root to evaluate.",
         exists=True,
-        dir_okay=False,
         readable=True,
     ),
 ) -> None:
@@ -66,7 +84,7 @@ def callback(
     if file is None:
         typer.echo(ctx.get_help())
         raise typer.Exit()
-    result = _evaluate_manifests(file, None)
+    result = _evaluate(file, None)
     json.dump(result, sys.stdout, indent=2, default=str)
     sys.stdout.write("\n")
 
@@ -77,9 +95,8 @@ def eval(
         ...,
         "--file",
         "-f",
-        help="Nix file to evaluate.",
+        help="Nix file or easykubenix root to evaluate.",
         exists=True,
-        dir_okay=False,
         readable=True,
     ),
     attr_path: Optional[str] = typer.Argument(
@@ -87,7 +104,7 @@ def eval(
         help="Dot-path into the evaluated file (e.g. 'a.b.c'). Omit to deep-force the whole file.",
     ),
 ) -> None:
-    result = _evaluate_manifests(file, attr_path)
+    result = _evaluate(file, attr_path)
     json.dump(result, sys.stdout, indent=2, default=str)
     sys.stdout.write("\n")
 
@@ -98,9 +115,8 @@ def diff(
         ...,
         "--file",
         "-f",
-        help="Nix file to evaluate.",
+        help="Nix file or easykubenix root to evaluate.",
         exists=True,
-        dir_okay=False,
         readable=True,
     ),
     attr_path: Optional[str] = typer.Argument(
@@ -111,33 +127,35 @@ def diff(
         None,
         "--branch",
         "-b",
-        help="GitOps branch name. Defaults to config.gitops.branch from the evaluated Nix.",
+        help="Override the branch name from config.gitops.branch.",
     ),
     subdir: str = typer.Option(
         "./",
         "--subdir",
         "-s",
-        help="Subdirectory within the branch. Defaults to config.gitops.path or './'.",
+        help="Subdirectory within the branch.",
     ),
 ) -> None:
-    manifest_data = _evaluate_manifests(file, attr_path)
-    branch = _resolve_branch(file, branch)
+    result = _evaluate(file, attr_path)
+    if not isinstance(result, dict):
+        typer.echo(f"expected a dict result at '{attr_path}', got {type(result).__name__}", err=True)
+        raise typer.Exit(code=1)
+    resolved_branch = branch or _check_gitops(result)
+    manifests = _get_manifests(result)
     try:
-        files = flatten_manifests(manifest_data, subdir)
+        files = flatten_manifests(manifests, subdir)
     except TypeError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1)
-
     try:
-        result = diff_manifests(".", branch, files)
+        diff_output = diff_manifests(".", resolved_branch, files)
     except Exception as exc:
         typer.echo(f"diff failed: {exc}", err=True)
         raise typer.Exit(code=1)
-
-    if result is None:
+    if diff_output is None:
         typer.echo("no differences")
         return
-    typer.echo(result)
+    typer.echo(diff_output)
 
 
 @app.command()
@@ -146,9 +164,8 @@ def commit(
         ...,
         "--file",
         "-f",
-        help="Nix file to evaluate.",
+        help="Nix file or easykubenix root to evaluate.",
         exists=True,
-        dir_okay=False,
         readable=True,
     ),
     attr_path: Optional[str] = typer.Argument(
@@ -159,29 +176,32 @@ def commit(
         None,
         "--branch",
         "-b",
-        help="GitOps branch name. Defaults to config.gitops.branch from the evaluated Nix.",
+        help="Override the branch name from config.gitops.branch.",
     ),
     message: Optional[str] = typer.Option(
         None,
         "--message",
         "-m",
-        help="Commit message. Defaults to a reference to the current HEAD.",
+        help="Commit message.",
     ),
     subdir: str = typer.Option(
         "./",
         "--subdir",
         "-s",
-        help="Subdirectory within the branch. Defaults to config.gitops.path or './'.",
+        help="Subdirectory within the branch.",
     ),
 ) -> None:
-    manifest_data = _evaluate_manifests(file, attr_path)
-    branch = _resolve_branch(file, branch)
+    result = _evaluate(file, attr_path)
+    if not isinstance(result, dict):
+        typer.echo(f"expected a dict result at '{attr_path}', got {type(result).__name__}", err=True)
+        raise typer.Exit(code=1)
+    resolved_branch = branch or _check_gitops(result)
+    manifests = _get_manifests(result)
     try:
-        files = flatten_manifests(manifest_data, subdir)
+        files = flatten_manifests(manifests, subdir)
     except TypeError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1)
-
     if not message:
         head_result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -191,14 +211,12 @@ def commit(
         )
         head_sha = head_result.stdout.strip() if head_result.returncode == 0 else "unknown"
         message = f"ekn: render manifests from {attr_path or 'root'} @ {head_sha}"
-
     try:
-        commit_id = commit_manifests(".", branch, files, message)
+        commit_id = commit_manifests(".", resolved_branch, files, message)
     except Exception as exc:
         typer.echo(f"commit failed: {exc}", err=True)
         raise typer.Exit(code=1)
-
-    typer.echo(f"committed to {branch} @ {commit_id}")
+    typer.echo(f"committed to {resolved_branch} @ {commit_id}")
 
 
 if __name__ == "__main__":
