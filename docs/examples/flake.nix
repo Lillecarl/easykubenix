@@ -32,6 +32,7 @@
         helm = (example system "helm").check;
         generators = (example system "generators").check;
         edge-cases = (example system "edge-cases").check;
+        validation = (example system "validation").check;
       };
 
     in
@@ -39,6 +40,7 @@
       checks = forEachSystem checksFor;
       packages = forEachSystem (system: {
         inherit (example system "basic") manifestJSON manifestYAMLFile;
+        validationScript = (example system "validation").validationScript;
       });
     };
 }

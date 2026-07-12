@@ -12,5 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: nixbuild/nix-quick-install-action@v35
-      - name: Build all examples
+      - name: Lint examples
         run: nix flake check ./docs/examples --print-build-logs
+      - name: Validate against real kube-apiserver
+        run: nix run ./docs/examples#packages.x86_64-linux.validationScript

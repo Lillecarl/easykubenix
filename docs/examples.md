@@ -77,3 +77,21 @@ for resources without a namespace.
 Note that `none.Namespace`, `none.ClusterIssuer`, and `none.Certificate` are
 cluster-scoped (no `metadata.namespace`). The `kube-system` ConfigMap
 demonstrates a resource in an existing namespace.
+
+---
+
+## Validation with Real kube-apiserver
+
+Spins up etcd + kube-apiserver, deploys all manifests via kluctl, dumps the
+live OpenAPI v2 schema, and runs kubeconform against every resource — including
+CRDs from a Helm chart and custom resources that depend on them.
+
+```{literalinclude} ./examples/validation/default.nix
+:language: nix
+```
+
+The kube-prometheus-stack chart bundles `CustomResourceDefinition` objects
+(Prometheus, ServiceMonitor, Alertmanager, etc.). These are applied first via
+kluctl's priority system, then their dependent custom resources are validated
+against the live schema. The `apiMappings` option tells easykubenix what
+apiVersion to use for each custom kind.

@@ -119,7 +119,7 @@ in
           lib.attrValues
           (lib.sort (a: b: a < b))
           lib.unique
-          (lib.map (v: {
+            (lib.map (v: {
             path = "prio-${toString v}";
             barrier = true;
             skipDeleteIfTags = true;
@@ -136,6 +136,12 @@ in
     kluctl.projectDir = pkgs.writeMultipleFiles {
       name = "kluctlProject";
       files = {
+        ".templateignore" = {
+          content = ''
+            *.yaml
+            *.json
+          '';
+        };
         ".kluctl.yaml" = {
           content = builtins.toJSON config.kluctl.project;
         };
