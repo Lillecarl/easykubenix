@@ -7,6 +7,9 @@
   pygit2,
   pyyaml,
   clypi,
+  anyio,
+  structlog,
+  rich,
 }:
 buildPythonApplication (finalAttrs: {
   name = "ekn";
@@ -22,6 +25,9 @@ buildPythonApplication (finalAttrs: {
     pygit2
     pyyaml
     clypi
+    anyio
+    structlog
+    rich
   ];
 
   postInstall = ''

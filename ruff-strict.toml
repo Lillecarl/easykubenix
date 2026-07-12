@@ -43,6 +43,8 @@ ignore = [
     "TRY003",
     "BLE001",
     "A001",
+    "T201",
+    "TC003",
 ]
 
 [lint.isort]

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import os
+import shutil
 from pathlib import PurePosixPath
 from typing import Any
+
+from anyio import Path
 
 
 def _repo_path(path: str | None = None) -> str:
@@ -107,4 +111,21 @@ def diff_manifests(
             buf.write(patch.text)
 
     result = buf.getvalue()
-    return result if result else None
+    return result or None
+
+
+async def try_jj_status(repo_path: str | None = None) -> None:
+    root = _repo_path(repo_path)
+    if not Path(root, ".jj").is_dir():
+        return
+    if shutil.which("jj") is None:
+        return
+    proc = await asyncio.create_subprocess_exec(
+        "jj", "st",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=root,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode == 0 and stdout:
+        print(stdout.decode(), end="")

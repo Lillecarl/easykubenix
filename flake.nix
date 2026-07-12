@@ -38,7 +38,7 @@
         in
         {
           default = pkgs.python3Packages.callPackage ./nix/shell.nix {
-            ekn = defNix.ekn;
+            ekn = defNix.passthru.ekn;
             ruff = pkgs.ruff;
           };
         }

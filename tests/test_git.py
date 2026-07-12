@@ -6,7 +6,6 @@ import pytest
 
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests
 
-
 SAMPLE_MANIFESTS = {
     "default": {
         "ConfigMap": {

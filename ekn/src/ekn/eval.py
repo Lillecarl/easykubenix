@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
+from os import PathLike
 
-import nanopynix
 from nanopynix import NixError, Session
 
 
@@ -14,7 +13,7 @@ async def _session() -> AsyncIterator[Session]:
         yield session
 
 
-async def evaluate_file(file: Path, attr_path: str | None) -> object:
+async def evaluate_file(file: str | PathLike[str], attr_path: str | None) -> object:
     async with (
         _session() as session,
         session.store() as store,
@@ -33,7 +32,7 @@ async def evaluate_file(file: Path, attr_path: str | None) -> object:
 
 
 async def evaluate_file_multi(
-    file: Path,
+    file: str | PathLike[str],
     *attr_paths: str | None,
 ) -> list[object]:
     results: list[object] = []

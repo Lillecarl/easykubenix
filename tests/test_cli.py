@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from ekn.eval import evaluate_file, evaluate_flake_ekn
-from ekn.git import commit_manifests, flatten_manifests, diff_manifests
+from ekn.git import commit_manifests, diff_manifests, flatten_manifests
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CUSTOMER_NIX = """\
