@@ -1,6 +1,9 @@
 {
   inputs = {
-    flake-compatish.url = "github:lillecarl/flake-compatish";
+    flake-compatish = {
+      url = "github:lillecarl/flake-compatish";
+      flake = false;
+    };
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
     nanopynix = {
       url = "github:lillecarl/nanopynix/develop";
@@ -26,5 +29,15 @@
         }
       );
       lib.easykubenix = import ./default.nix;
+
+      devShells = forEachSystem (
+        system:
+        let
+          pkgs = eachPkgs.${system};
+        in
+        {
+          default = pkgs.python3Packages.callPackage ./nix/shell.nix { };
+        }
+      );
     };
 }

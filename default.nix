@@ -38,14 +38,14 @@
   debug ? null, # unused but kept for API compatibility
 }:
 let
-  pkgs' = pkgs.extend (import ./pkgs/default.nix);
+  pkgs' = pkgs.extend (import ./easykubenix/pkgs/default.nix);
 in
 let
   pkgs = pkgs';
   lib = pkgs.lib;
 
   nanopynix = import inputs.nanopynix { inherit pkgs; };
-  ekn = pkgs.python3Packages.callPackage ./pkgs/ekn { inherit (nanopynix) nanopynix; };
+  ekn = pkgs.python3Packages.callPackage ./easykubenix/pkgs/ekn { inherit (nanopynix) nanopynix; };
 
   eval = lib.evalModules {
     inherit specialArgs;
@@ -57,14 +57,14 @@ let
           inherit (pkgs) lib;
         };
       }
-      ./assertions.nix
-      ./helm.nix
-      ./importyaml.nix
-      ./internal.nix
-      ./kluctl.nix
-      ./kubernetes.nix
-      ./lib.nix
-      ./validation.nix
+      ./easykubenix/assertions.nix
+      ./easykubenix/helm.nix
+      ./easykubenix/importyaml.nix
+      ./easykubenix/internal.nix
+      ./easykubenix/kluctl.nix
+      ./easykubenix/kubernetes.nix
+      ./easykubenix/lib.nix
+      ./easykubenix/validation.nix
     ]
     ++ modules;
   };
