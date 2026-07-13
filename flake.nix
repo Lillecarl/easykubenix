@@ -12,12 +12,11 @@
     let
       inherit (inputs.nixpkgs) lib;
       forEachSystem = lib.genAttrs lib.systems.flakeExposed;
-      eachPkgs = forEachSystem (system: import inputs.nixpkgs { inherit system; });
       eachDefNix = forEachSystem (
         system:
         import ./. {
-          inherit inputs;
-          pkgs = eachPkgs.${system};
+          inherit system;
+          pkgs = inputs.self.legacyPackages.${system};
         }
       );
     in
@@ -36,7 +35,7 @@
       devShells = forEachSystem (
         system:
         let
-          pkgs = eachPkgs.${system};
+          pkgs = inputs.self.nixpkgs.legacyPackages.${system};
           defNix = eachDefNix.${system};
         in
         {
@@ -46,5 +45,6 @@
           };
         }
       );
+      legacyPackages = forEachSystem (system: inputs.nixpkgs.legacyPackages.${system});
     };
 }

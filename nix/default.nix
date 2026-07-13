@@ -1,6 +1,7 @@
 {
   inputs ? (import ./compat.nix).inputs,
-  pkgs ? import inputs.nixpkgs { },
+  system ? builtins.currentSystem,
+  pkgs ? inputs.nixpkgs.legacyPackages.${system},
 }:
 rec {
   root = import ../default.nix { inherit pkgs; };

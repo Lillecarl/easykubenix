@@ -1,6 +1,7 @@
 {
   inputs ? (import ./nix/compat.nix).inputs,
-  pkgs ? import inputs.nixpkgs { },
+  system ? builtins.currentSystem,
+  pkgs ? inputs.nixpkgs.legacyPackages.${system},
   modules ? [ ./demo ],
   specialArgs ? { },
   debug ? null, # unused but kept for API compatibility
