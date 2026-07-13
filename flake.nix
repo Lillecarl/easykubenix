@@ -1,9 +1,6 @@
 {
   inputs = {
-    flake-compatish = {
-      url = "github:lillecarl/flake-compatish";
-      flake = false;
-    };
+    flake-compatish.url = "github:lillecarl/flake-compatish";
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
     nanopynix = {
       url = "github:lillecarl/nanopynix/develop";
