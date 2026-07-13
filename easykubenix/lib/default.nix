@@ -99,45 +99,45 @@ self: lib: {
     if isCRD then
       value
     else
-    let
-      currentKey = lib.last (path ++ [ null ]);
-      # Heuristic to identify a list that should become a `_namedlist`.
-      # A list is a candidate if all its elements are attribute sets that contain a `name` key.
-      isNamedListCandidate =
-        lib.isList value
-        && (lib.all (v: lib.isAttrs v && lib.hasAttr "name" v) value)
-        # Special exclusion for Kubernetes `initContainers`. The order of init containers is
-        # significant and must be preserved. By failing this check, it will be converted
-        # to a `_numberedlist` instead, which preserves order.
-        && currentKey != "initContainers";
-    in
-    if isNamedListCandidate then
-      # Convert the list to a `_namedlist` attribute set. The `name` attribute of each
-      # element becomes the key in the resulting attribute set.
-      lib.pipe value [
-        (lib.map (x: {
-          inherit (x) name;
-          value = lib.removeAttrs x [ "name" ];
-        }))
-        lib.listToAttrs
-        (x: x // { _namedlist = true; })
-      ]
-    # Any other list (e.g., simple string lists like container `args`, or `initContainers`)
-    # is converted to a `_numberedlist`.
-    else if lib.isList value then
-      # The list index becomes the key (e.g., "0", "1", "2", ...), preserving order.
-      lib.pipe value [
-        (lib.imap0 (
-          i: v: {
-            name = toString i;
-            value = v;
-          }
-        ))
-        lib.listToAttrs
-        (x: x // { _numberedlist = true; })
-      ]
-    else
-      value;
+      let
+        currentKey = lib.last (path ++ [ null ]);
+        # Heuristic to identify a list that should become a `_namedlist`.
+        # A list is a candidate if all its elements are attribute sets that contain a `name` key.
+        isNamedListCandidate =
+          lib.isList value
+          && (lib.all (v: lib.isAttrs v && lib.hasAttr "name" v) value)
+          # Special exclusion for Kubernetes `initContainers`. The order of init containers is
+          # significant and must be preserved. By failing this check, it will be converted
+          # to a `_numberedlist` instead, which preserves order.
+          && currentKey != "initContainers";
+      in
+      if isNamedListCandidate then
+        # Convert the list to a `_namedlist` attribute set. The `name` attribute of each
+        # element becomes the key in the resulting attribute set.
+        lib.pipe value [
+          (lib.map (x: {
+            inherit (x) name;
+            value = lib.removeAttrs x [ "name" ];
+          }))
+          lib.listToAttrs
+          (x: x // { _namedlist = true; })
+        ]
+      # Any other list (e.g., simple string lists like container `args`, or `initContainers`)
+      # is converted to a `_numberedlist`.
+      else if lib.isList value then
+        # The list index becomes the key (e.g., "0", "1", "2", ...), preserving order.
+        lib.pipe value [
+          (lib.imap0 (
+            i: v: {
+              name = toString i;
+              value = v;
+            }
+          ))
+          lib.listToAttrs
+          (x: x // { _numberedlist = true; })
+        ]
+      else
+        value;
 
   # md5 hash an attrset, useful to trigger rollouts by hashing ConfigMaps.
   hashAttrs = attrs: builtins.hashString "md5" (builtins.toJSON attrs);

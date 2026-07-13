@@ -1,9 +1,18 @@
-{ pkgs, lib, name, manifestJSON }:
-pkgs.runCommand "check-${name}" {
-  nativeBuildInputs = with pkgs; [ jq yq-go ];
-  json = manifestJSON;
-  passAsFile = [ "json" ];
-}
+{
+  pkgs,
+  lib,
+  name,
+  manifestJSON,
+}:
+pkgs.runCommand "check-${name}"
+  {
+    nativeBuildInputs = with pkgs; [
+      jq
+      yq-go
+    ];
+    json = manifestJSON;
+    passAsFile = [ "json" ];
+  }
   ''
     cd "$TMPDIR"
 

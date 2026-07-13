@@ -24,5 +24,9 @@ let
   );
 in
 mkShell {
-  packages = [ pythonEnv ruff pyright ];
+  packages = [
+    pythonEnv
+    ruff
+    pyright
+  ];
 }

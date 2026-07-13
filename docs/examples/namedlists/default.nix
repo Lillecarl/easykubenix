@@ -17,7 +17,7 @@ let
               containers = ekn.lib.mkNamedList {
                 main = {
                   image = "nginx:alpine";
-                  ports = [{ containerPort = 80; }];
+                  ports = [ { containerPort = 80; } ];
                   env = ekn.lib.mkNamedList {
                     FOO.value = "bar";
                     MODE.value = "test";
@@ -30,8 +30,22 @@ let
 
               # initContainers should use _numberedlist preserving order
               initContainers = [
-                { name = "init-step1"; image = "busybox"; command = ["echo" "step1"]; }
-                { name = "init-step2"; image = "busybox"; command = ["echo" "step2"]; }
+                {
+                  name = "init-step1";
+                  image = "busybox";
+                  command = [
+                    "echo"
+                    "step1"
+                  ];
+                }
+                {
+                  name = "init-step2";
+                  image = "busybox";
+                  command = [
+                    "echo"
+                    "step2"
+                  ];
+                }
               ];
             };
           };
@@ -41,8 +55,18 @@ let
             spec.selector.matchLabels.app = "plain";
             spec.template.metadata.labels.app = "plain";
             spec.template.spec.containers = [
-              { name = "c1"; image = "nginx:alpine"; }
-              { name = "c2"; image = "alpine:latest"; command = ["sleep" "infinity"]; }
+              {
+                name = "c1";
+                image = "nginx:alpine";
+              }
+              {
+                name = "c2";
+                image = "alpine:latest";
+                command = [
+                  "sleep"
+                  "infinity"
+                ];
+              }
             ];
           };
         };

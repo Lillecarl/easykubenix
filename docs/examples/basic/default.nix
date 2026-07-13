@@ -29,7 +29,7 @@ let
               {
                 name = "nginx";
                 image = "nginx:alpine";
-                ports = [{ containerPort = 80; }];
+                ports = [ { containerPort = 80; } ];
               }
             ];
           };
@@ -42,14 +42,17 @@ let
               {
                 name = "app";
                 image = "nginx:alpine";
-                ports = [{ containerPort = 80; }];
+                ports = [ { containerPort = 80; } ];
               }
             ];
           };
 
           default.Service.app = {
             spec.ports = [
-              { port = 80; targetPort = 80; }
+              {
+                port = 80;
+                targetPort = 80;
+              }
             ];
             spec.selector.app = "app";
           };

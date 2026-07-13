@@ -15,10 +15,7 @@ let
           (
             object:
             lib.optionalAttrs
-              (
-                object.kind or "" == "Deployment"
-                && (object.metadata.annotations.genvpa or "true") == "true"
-              )
+              (object.kind or "" == "Deployment" && (object.metadata.annotations.genvpa or "true") == "true")
               {
                 apiVersion = "autoscaling.k8s.io/v1";
                 kind = "VerticalPodAutoscaler";
@@ -59,19 +56,25 @@ let
             spec.selector.matchLabels.app = "myapp";
             spec.template.metadata.labels.app = "myapp";
             spec.template.spec.containers = [
-              { name = "myapp"; image = "nginx:alpine"; }
+              {
+                name = "myapp";
+                image = "nginx:alpine";
+              }
             ];
           };
 
           default.Service.myapp = {
-            spec.ports = [{ port = 80; }];
+            spec.ports = [ { port = 80; } ];
             spec.selector.app = "myapp";
           };
 
           # This Pod should be filtered out by the filter above
           default.Pod.should-be-filtered = {
             spec.containers = [
-              { name = "test"; image = "alpine"; }
+              {
+                name = "test";
+                image = "alpine";
+              }
             ];
           };
         };

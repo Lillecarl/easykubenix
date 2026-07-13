@@ -13,18 +13,25 @@
     { easykubenix, nixpkgs, ... }:
     let
       eknLib = easykubenix.lib.easykubenix;
-      forEachSystem = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
+      forEachSystem = nixpkgs.lib.genAttrs [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
 
-      eknPkgsFor = system: (eknLib {
-        pkgs = import nixpkgs { inherit system; };
-        modules = [ ];
-      }).pkgs;
+      eknPkgsFor =
+        system:
+        (eknLib {
+          pkgs = import nixpkgs { inherit system; };
+          modules = [ ];
+        }).pkgs;
 
-      example = system: name: import ./${name} {
-        pkgs = eknPkgsFor system;
-        inherit (nixpkgs) lib;
-        easykubenix = eknLib;
-      };
+      example =
+        system: name:
+        import ./${name} {
+          pkgs = eknPkgsFor system;
+          inherit (nixpkgs) lib;
+          easykubenix = eknLib;
+        };
 
       checksFor = system: {
         basic = (example system "basic").check;

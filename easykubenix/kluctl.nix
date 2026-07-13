@@ -119,7 +119,7 @@ in
           lib.attrValues
           (lib.sort (a: b: a < b))
           lib.unique
-            (lib.map (v: {
+          (lib.map (v: {
             path = "prio-${toString v}";
             barrier = true;
             skipDeleteIfTags = true;
