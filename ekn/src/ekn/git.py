@@ -4,10 +4,8 @@ import asyncio
 import io
 import os
 import shutil
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
-
-from anyio import Path
 
 
 def _repo_path(path: str | None = None) -> str:
@@ -44,13 +42,12 @@ def flatten_manifests(data: object, subdir: str = "./") -> list[tuple[str, str]]
 def _build_tree(repo: Any, files: list[tuple[str, str]]) -> Any:
     import pygit2
 
-    index = repo.index
-    index.read()
+    index = pygit2.Index()
     for rel_path, content in files:
         blob_id = repo.create_blob(content.encode("utf-8"))
         entry = pygit2.IndexEntry(rel_path, blob_id, pygit2.GIT_FILEMODE_BLOB)  # pyright: ignore — pygit2 GIT_FILEMODE_BLOB is an int but IndexEntry.mode accepts it at runtime
         index.add(entry)
-    return index.write_tree()
+    return index.write_tree(repo)
 
 
 def commit_manifests(

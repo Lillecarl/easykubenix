@@ -90,6 +90,16 @@ def _check_gitops(result: dict[str, Any]) -> str:
     return branch
 
 
+def _gitops_path(result: dict[str, Any]) -> str:
+    path = _dig(result, "config", "gitops", "path")
+    if path is None:
+        return "./"
+    if not isinstance(path, str) or not path:
+        _log.error("config.gitops.path must be a non-empty string")
+        raise SystemExit(1)
+    return path
+
+
 def _get_manifests(result: dict[str, Any]) -> dict[str, Any]:
     manifests = _dig(result, "config", "kubernetes", "generatedByPath")
     if not isinstance(manifests, dict):
@@ -100,7 +110,7 @@ def _get_manifests(result: dict[str, Any]) -> dict[str, Any]:
 
 class Eval(Command):
     """Evaluate Nix and dump JSON."""
-    file: _Path | None = arg(None, short="-f", inherited=True)
+    file: _Path | None = arg(None, short="f", inherited=True)
     flake: str | None = arg(None, inherited=True)
     attr_path: str | None = arg(None, help="Dot-path into the evaluated file or flake output.")
 
@@ -112,11 +122,11 @@ class Eval(Command):
 
 class Diff(Command):
     """Diff rendered manifests against the GitOps branch."""
-    file: _Path | None = arg(None, short="-f", inherited=True)
+    file: _Path | None = arg(None, short="f", inherited=True)
     flake: str | None = arg(None, inherited=True)
     attr_path: str | None = arg(None, help="Dot-path into the evaluated file or flake output.")
-    branch: str | None = arg(None, short="-b", help="Override the branch name from config.gitops.branch.")
-    subdir: str = arg("./", short="-s", help="Subdirectory within the branch.")
+    branch: str | None = arg(None, short="b", help="Override the branch name from config.gitops.branch.")
+    subdir: str | None = arg(None, short="s", help="Override the subdirectory from config.gitops.path.")
 
     async def run(self) -> None:
         result = await _evaluate(self.file, self.flake, self.attr_path)
@@ -124,9 +134,10 @@ class Diff(Command):
             _log.error("expected a dict result, got %s", type(result).__name__)
             raise SystemExit(1)
         resolved_branch = self.branch or _check_gitops(result)
+        resolved_subdir = self.subdir or _gitops_path(result)
         manifests = _get_manifests(result)
         try:
-            files = flatten_manifests(manifests, self.subdir)
+            files = flatten_manifests(manifests, resolved_subdir)
         except TypeError as exc:
             _log.error("error: %s", exc)
             raise SystemExit(1) from exc
@@ -144,12 +155,12 @@ class Diff(Command):
 
 class Commit(Command):
     """Render manifests and write them to the GitOps branch."""
-    file: _Path | None = arg(None, short="-f", inherited=True)
+    file: _Path | None = arg(None, short="f", inherited=True)
     flake: str | None = arg(None, inherited=True)
     attr_path: str | None = arg(None, help="Dot-path into the evaluated file or flake output.")
-    branch: str | None = arg(None, short="-b", help="Override the branch name from config.gitops.branch.")
-    message: str | None = arg(None, short="-m", help="Commit message.")
-    subdir: str = arg("./", short="-s", help="Subdirectory within the branch.")
+    branch: str | None = arg(None, short="b", help="Override the branch name from config.gitops.branch.")
+    message: str | None = arg(None, short="m", help="Commit message.")
+    subdir: str | None = arg(None, short="s", help="Override the subdirectory from config.gitops.path.")
 
     async def run(self) -> None:
         result = await _evaluate(self.file, self.flake, self.attr_path)
@@ -157,9 +168,10 @@ class Commit(Command):
             _log.error("expected a dict result, got %s", type(result).__name__)
             raise SystemExit(1)
         resolved_branch = self.branch or _check_gitops(result)
+        resolved_subdir = self.subdir or _gitops_path(result)
         manifests = _get_manifests(result)
         try:
-            files = flatten_manifests(manifests, self.subdir)
+            files = flatten_manifests(manifests, resolved_subdir)
         except TypeError as exc:
             _log.error("error: %s", exc)
             raise SystemExit(1) from exc
@@ -182,7 +194,7 @@ class Commit(Command):
 
 class Validate(Command):
     """Boot real etcd+kube-apiserver, apply manifests, and run kubeconform."""
-    file: _Path | None = arg(None, short="-f", inherited=True)
+    file: _Path | None = arg(None, short="f", inherited=True)
     flake: str | None = arg(None, inherited=True)
     attr_path: str | None = arg(None, help="Dot-path into the evaluated config.")
 
@@ -382,7 +394,7 @@ class Validate(Command):
 class Ekn(Command):
     """easykubenix CLI — evaluate Nix and manage GitOps release branches."""
     subcommand: Eval | Diff | Commit | Validate | None = None
-    file: _Path | None = arg(None, short="-f", help="Nix file to evaluate.")
+    file: _Path | None = arg(None, short="f", help="Nix file to evaluate.")
     flake: str | None = arg(None, help="Flake reference (e.g. '.#myconfig'). Evaluates outputs.eknConfig.<system>.<attr>.")
 
     async def run(self) -> None:

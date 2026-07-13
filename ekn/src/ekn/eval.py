@@ -84,6 +84,8 @@ async def evaluate_flake_ekn(flake_uri: str, customer: str) -> dict:
         outputs = await eval_.eval_flake(flake_uri)
         system = await (await eval_.string("builtins.currentSystem")).force_json()
         proxy = outputs.attr("eknConfig").attr(str(system)).attr(customer)
+        if await proxy.has_attr("config"):
+            proxy = proxy.attr("config")
 
         gitops = await proxy.attr("gitops").force_json()
         generated_by_path = await proxy.attr("kubernetes").attr("generatedByPath").force_json()
@@ -104,6 +106,8 @@ async def evaluate_validation_config(flake_uri: str, customer: str) -> dict:
         outputs = await eval_.eval_flake(flake_uri)
         system = await (await eval_.string("builtins.currentSystem")).force_json()
         proxy = outputs.attr("eknConfig").attr(str(system)).attr(customer)
+        if await proxy.has_attr("config"):
+            proxy = proxy.attr("config")
 
         gitops = await proxy.attr("gitops").force_json()
         generated_by_path = await proxy.attr("kubernetes").attr("generatedByPath").force_json()

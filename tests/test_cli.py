@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
-
+from ekn.cli import _gitops_path
 from ekn.eval import evaluate_file, evaluate_flake_ekn
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests
 
@@ -69,6 +70,16 @@ class TestEval:
 
 
 class TestDiff:
+    def test_gitops_path_defaults_from_config(self) -> None:
+        result = {"config": {"gitops": {"path": "clusters/demo"}}}
+
+        assert _gitops_path(result) == "clusters/demo"
+
+    def test_gitops_path_defaults_to_root(self) -> None:
+        result = {"config": {"gitops": {}}}
+
+        assert _gitops_path(result) == "./"
+
     async def test_diff_no_changes(self, tmp_path: Path, git_repo: Path) -> None:
         f = tmp_path / "customers.nix"
         f.write_text(CUSTOMER_NIX)
@@ -120,6 +131,25 @@ class TestDiff:
             assert "my-config" in diff_out or "test" in diff_out
         finally:
             os.environ.pop("EKN_REPO", None)
+
+    def test_diff_ignores_source_worktree_files(self, git_repo: Path) -> None:
+        source_file = git_repo / "flake.nix"
+        source_file.write_text("{ outputs = _: {}; }\n")
+        subprocess.run(["git", "-C", str(git_repo), "add", "flake.nix"], check=True)
+
+        os.environ["EKN_REPO"] = str(git_repo)
+        try:
+            diff_out = diff_manifests(
+                ".",
+                "rendered",
+                [("clusters/demo/none/Namespace/demo.yaml", "kind: Namespace\n")],
+            )
+        finally:
+            os.environ.pop("EKN_REPO", None)
+
+        assert diff_out is not None
+        assert "clusters/demo/none/Namespace/demo.yaml" in diff_out
+        assert "flake.nix" not in diff_out
 
 
 class TestCommit:
