@@ -47,7 +47,7 @@ def _parse_flake(flake_ref: str) -> tuple[str, str | None]:
     else:
         uri, customer = flake_ref, None
     if not uri or uri == ".":
-        uri = str(Path.cwd())
+        uri = str(_Path.cwd())
     return uri, customer
 
 
