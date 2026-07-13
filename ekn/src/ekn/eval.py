@@ -4,12 +4,14 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from os import PathLike
 
-from nanopynix import NixError, Session
+from nanopynix import NixError, NixSettings, Session
+
+_SESSION_SETTINGS = NixSettings()
 
 
 @asynccontextmanager
 async def _session() -> AsyncIterator[Session]:
-    async with Session(experimental_features=["flakes", "nix-command"]) as session:
+    async with Session(settings=_SESSION_SETTINGS) as session:
         yield session
 
 
