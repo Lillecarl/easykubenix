@@ -11,7 +11,6 @@ class GitOpsTargetError(ValueError):
 
 @dataclass(frozen=True)
 class GitOpsTarget:
-    backend: str
     branch: str
     path: str
 
@@ -55,7 +54,6 @@ def routed_manifests(
                     )
                 for route in routes:
                     target = GitOpsTarget(
-                        backend=_required_string(route, "backend"),
                         branch=_required_string(route, "branch"),
                         path=_required_string(route, "path"),
                     )

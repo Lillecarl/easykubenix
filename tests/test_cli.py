@@ -166,6 +166,7 @@ class TestCommit:
         monkeypatch.setattr(Commit, "run", commit)
         deploy = object.__new__(Deploy)
         deploy.no_verify = False
+        deploy.flake = ".#test"
 
         await Deploy.run(deploy)
 

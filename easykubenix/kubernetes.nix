@@ -53,7 +53,6 @@ let
       throw "ekn.argo must reference an Argo CD Application"
     else
       {
-        backend = "argo";
         branch = application.spec.source.targetRevision;
         path = application.spec.source.path;
       };
@@ -72,7 +71,6 @@ let
         throw "ekn.flux Kustomization sourceRef must reference a Flux GitRepository"
       else
         {
-          backend = "flux";
           branch = source.spec.ref.branch;
           path = kustomization.spec.path;
         };

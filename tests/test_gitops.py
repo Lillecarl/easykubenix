@@ -33,14 +33,13 @@ def test_argo_target_routes_payload() -> None:
     routing = {
         "default": {
             "Deployment": {
-                "api": [{"backend": "argo", "branch": "deploy", "path": "clusters/home/apps"}]
+                "api": [{"branch": "deploy", "path": "clusters/home/apps"}]
             }
         }
     }
 
     assert routed_manifests(manifests, routing) == {
         GitOpsTarget(
-            backend="argo",
             branch="deploy",
             path="clusters/home/apps",
         ): [_deployment()]
@@ -76,14 +75,13 @@ def test_flux_target_routes_payload() -> None:
     routing = {
         "default": {
             "Deployment": {
-                "api": [{"backend": "flux", "branch": "deploy", "path": "./clusters/home/apps"}]
+                "api": [{"branch": "deploy", "path": "./clusters/home/apps"}]
             }
         }
     }
 
     assert routed_manifests(manifests, routing) == {
         GitOpsTarget(
-            backend="flux",
             branch="deploy",
             path="./clusters/home/apps",
         ): [_deployment()]
@@ -92,7 +90,7 @@ def test_flux_target_routes_payload() -> None:
 
 def test_route_requires_fields() -> None:
     manifests = {"default": {"Deployment": {"api": _deployment()}}}
-    routing = {"default": {"Deployment": {"api": [{"backend": "argo"}]}}}
+    routing = {"default": {"Deployment": {"api": [{}]}}}
 
     with pytest.raises(GitOpsTargetError, match="branch"):
         routed_manifests(manifests, routing)
@@ -121,7 +119,7 @@ def test_file_groups_use_target_branch_and_path() -> None:
                 "eknByPath": {
                     "default": {
                         "Deployment": {
-                            "api": [{"backend": "argo", "branch": "deploy", "path": "clusters/home/apps"}]
+                            "api": [{"branch": "deploy", "path": "clusters/home/apps"}]
                         }
                     }
                 },

@@ -51,7 +51,6 @@ class TestEknModule:
         assert "ekn" not in deployment
         route = result["eknByPath"]["default"]["Deployment"]["api"][0]
         assert route == {
-            "backend": "argo",
             "branch": "deploy",
             "path": "clusters/home/apps",
         }

@@ -16,7 +16,13 @@ from anyio import Path
 from clypi import Command, arg
 from nanopynix import NixError
 
-from ekn.eval import evaluate_file, evaluate_flake, evaluate_flake_ekn, evaluate_validation_config
+from ekn.eval import (
+    evaluate_file,
+    evaluate_flake,
+    evaluate_flake_ekn,
+    evaluate_validation_config,
+    evaluate_validation_file,
+)
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests, try_jj_status
 from ekn.gitops import GitOpsTargetError, routed_manifests
 
@@ -117,7 +123,7 @@ def _gitops_file_groups(result: dict[str, Any]) -> dict[str, list[tuple[str, str
 
     routed = routed_manifests(manifests, routing)
 
-    groups: dict[str, list[tuple[str, str]]] = {}
+    groups: dict[str, dict[str, str]] = {}
     for target, target_manifests in routed.items():
         objects: dict[str, dict[str, dict[str, Any]]] = {}
         for manifest in target_manifests:
@@ -137,10 +143,15 @@ def _gitops_file_groups(result: dict[str, Any]) -> dict[str, list[tuple[str, str
             ):
                 raise GitOpsTargetError("routed manifest has no namespace, kind, or name")
             objects.setdefault(namespace, {}).setdefault(kind, {})[name] = manifest
-        groups.setdefault(target.branch, []).extend(
-            flatten_manifests(objects, target.path)
-        )
-    return groups
+        branch_files = groups.setdefault(target.branch, {})
+        for path, content in flatten_manifests(objects, target.path):
+            existing = branch_files.get(path)
+            if existing is not None and existing != content:
+                raise GitOpsTargetError(
+                    f"conflicting generated content for {target.branch}:{path}"
+                )
+            branch_files[path] = content
+    return {branch: list(files.items()) for branch, files in groups.items()}
 
 
 class Eval(Command):
@@ -235,11 +246,14 @@ class Validate(Command):
             return s.getsockname()[1]
 
     async def run(self) -> None:
-        uri, customer = _parse_flake(str(self.flake))
-        if customer is None:
-            _log.error("--flake must include a customer attr (e.g. '.#myapp')")
-            raise SystemExit(1)
-        cfg = await evaluate_validation_config(uri, customer)
+        if self.file is not None:
+            cfg = await evaluate_validation_file(self.file, self.attr_path)
+        else:
+            uri, customer = _parse_flake(str(self.flake))
+            if customer is None:
+                _log.error("--flake must include a customer attr (e.g. '.#myapp')")
+                raise SystemExit(1)
+            cfg = await evaluate_validation_config(uri, customer)
         c = cfg["config"]
 
         tmp = Path(tempfile.mkdtemp(suffix="eknvalidation"))
