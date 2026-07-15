@@ -7,6 +7,75 @@
 let
   cfg = config.kubernetes;
   settingsFormat = pkgs.formats.json { };
+  generatedWithEkn = lib.pipe cfg.objects [
+    # Convert kubernetes.objects.namespace.kind.name into a list of objects
+    (lib.collect (x: x ? apiVersion && x ? kind && x ? metadata))
+    # Run a generator pass to generate objects from objects.
+    (
+      objects:
+      objects
+      ++ lib.pipe objects [
+        (
+          lib.concatMap (
+            object:
+            map (
+              generator:
+              let
+                generated = generator object;
+              in
+              generated
+              // lib.optionalAttrs (!(generated ? ekn)) {
+                ekn = object.ekn or { };
+              }
+            ) cfg.generators
+          )
+        )
+        (lib.filter (x: x != { }))
+      ]
+    )
+    # Run a transformation pass over all objects
+    (map (object: lib.pipe object cfg.transformers))
+    # Run filter pass over all objects
+    (lib.filter (object: lib.all (function: function object) cfg.filters))
+    # Convert attrset with _namedlist attribute true to lists. This is useful
+    # when we want to override things in the Kubernetes containers list for
+    # example.
+    (map (lib.walkWithPath lib.kubeAttrsToLists))
+  ];
+  generatedWithEknByPath = lib.foldl' (
+    acc: object:
+    lib.recursiveUpdate acc {
+      ${object.metadata.namespace or "none"}.${object.kind}.${object.metadata.name} = object;
+    }
+  ) { } generatedWithEkn;
+  argoRoute = application:
+    if application.kind != "Application" || !(lib.hasPrefix "argoproj.io/" application.apiVersion) then
+      throw "ekn.argo must reference an Argo CD Application"
+    else
+      {
+        backend = "argo";
+        branch = application.spec.source.targetRevision;
+        path = application.spec.source.path;
+      };
+  fluxRoute = kustomization:
+    if kustomization.kind != "Kustomization" || !(lib.hasPrefix "kustomize.toolkit.fluxcd.io/" kustomization.apiVersion) then
+      throw "ekn.flux must reference a Flux Kustomization"
+    else
+      let
+        sourceRef = kustomization.spec.sourceRef;
+        namespace = sourceRef.namespace or kustomization.metadata.namespace or "none";
+        source = lib.attrByPath [ namespace sourceRef.kind sourceRef.name ]
+          (throw "ekn.flux Kustomization sourceRef does not resolve to a Kubernetes resource")
+          generatedWithEknByPath;
+      in
+      if source.kind != "GitRepository" || !(lib.hasPrefix "source.toolkit.fluxcd.io/" source.apiVersion) then
+        throw "ekn.flux Kustomization sourceRef must reference a Flux GitRepository"
+      else
+        {
+          backend = "flux";
+          branch = source.spec.ref.branch;
+          path = kustomization.spec.path;
+        };
 in
 {
   imports = [
@@ -40,6 +109,34 @@ in
                       {
                         freeformType = settingsFormat.type;
                         options = {
+                          ekn = lib.mkOption {
+                            type = lib.types.submodule {
+                              options = {
+                                argo = lib.mkOption {
+                                  type = lib.types.listOf lib.types.attrs;
+                                  default = [ ];
+                                  description = ''
+                                    Argo Application resources which should receive this
+                                    object. This is EKN-only routing metadata and is
+                                    stripped before Kubernetes manifests are rendered.
+                                  '';
+                                };
+
+                                flux = lib.mkOption {
+                                  type = lib.types.listOf lib.types.attrs;
+                                  default = [ ];
+                                  description = ''
+                                    Flux Kustomization resources which should receive
+                                    this object. This is EKN-only routing metadata and
+                                    is stripped before Kubernetes manifests are rendered.
+                                  '';
+                                };
+                              };
+                            };
+                            default = { };
+                            description = "EKN-only metadata for this Kubernetes object.";
+                          };
+
                           apiVersion = lib.mkOption {
                             type = lib.types.str;
                             default = cfg.apiMappings.${kind} or (throw "No apiMapping for ${kind}");
@@ -209,6 +306,15 @@ in
       description = "The final, generated Kubernetes objects by attrPath";
       readOnly = true;
     };
+
+    eknByPath = lib.mkOption {
+      type = settingsFormat.type;
+      description = ''
+        Resolved EKN GitOps routes by Kubernetes object path. This is derived
+        before the `ekn` field is stripped from rendered Kubernetes objects.
+      '';
+      readOnly = true;
+    };
   };
 
   config.kubernetes = {
@@ -223,26 +329,29 @@ in
       in
       lib.listToAttrs (map objectToAttr data.resources);
 
-    generated = lib.pipe cfg.objects [
-      # Convert kubernetes.objects.namespace.kind.name into a list of objects
-      (lib.collect (x: x ? apiVersion && x ? kind && x ? metadata))
-      # Run a generator pass to generate objects from objects.
+    generated = lib.pipe generatedWithEkn [
+      # `ekn` belongs to the EKN compiler, not to the Kubernetes manifest.
+      (map (object: removeAttrs object [ "ekn" ]))
+    ];
+
+    eknByPath = lib.pipe generatedWithEkn [
+      (lib.filter (
+        object:
+        let
+          ekn = object.ekn or { };
+        in
+        (ekn.argo or [ ]) != [ ] || (ekn.flux or [ ]) != [ ]
+      ))
       (
         objects:
-        objects
-        ++ lib.pipe objects [
-          (lib.concatMap (object: map (generator: generator object) cfg.generators))
-          (lib.filter (x: x != { }))
-        ]
+        lib.foldl' (
+          acc: object:
+          lib.recursiveUpdate acc {
+            ${object.metadata.namespace or "none"}.${object.kind}.${object.metadata.name} =
+              map argoRoute object.ekn.argo ++ map fluxRoute object.ekn.flux;
+          }
+        ) { } objects
       )
-      # Run a transformation pass over all objects
-      (map (object: lib.pipe object cfg.transformers))
-      # Run filter pass over all objects
-      (lib.filter (object: lib.all (function: function object) cfg.filters))
-      # Convert attrset with _namedlist attribute true to lists. This is useful
-      # when we want to override things in the Kubernetes containers list for
-      # example.
-      (map (lib.walkWithPath lib.kubeAttrsToLists))
     ];
 
     # like kubernetes.objects but with transformation and generation applied

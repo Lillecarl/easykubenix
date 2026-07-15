@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from ekn.cli import _gitops_path
+from ekn.cli import Commit, Deploy, Validate, _gitops_path
 from ekn.eval import evaluate_file, evaluate_flake_ekn
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests
 
@@ -153,6 +153,42 @@ class TestDiff:
 
 
 class TestCommit:
+    async def test_deploy_verifies_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[str] = []
+
+        async def verify(_: object) -> None:
+            calls.append("verify")
+
+        async def commit(_: object) -> None:
+            calls.append("commit")
+
+        monkeypatch.setattr(Validate, "run", verify)
+        monkeypatch.setattr(Commit, "run", commit)
+        deploy = object.__new__(Deploy)
+        deploy.no_verify = False
+
+        await Deploy.run(deploy)
+
+        assert calls == ["verify", "commit"]
+
+    async def test_deploy_no_verify_skips_validation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[str] = []
+
+        async def verify(_: object) -> None:
+            calls.append("verify")
+
+        async def commit(_: object) -> None:
+            calls.append("commit")
+
+        monkeypatch.setattr(Validate, "run", verify)
+        monkeypatch.setattr(Commit, "run", commit)
+        deploy = object.__new__(Deploy)
+        deploy.no_verify = True
+
+        await Deploy.run(deploy)
+
+        assert calls == ["commit"]
+
     async def test_first_commit(self, tmp_path: Path, git_repo: Path) -> None:
         f = tmp_path / "customers.nix"
         f.write_text(CUSTOMER_NIX)
@@ -198,7 +234,6 @@ EXAMPLE_FLAKE = str((Path(__file__).resolve().parent.parent / "docs/examples/exa
 class TestFlakeEval:
     async def test_flake_eval(self) -> None:
         result = await evaluate_flake_ekn(EXAMPLE_FLAKE, "myapp")
-        assert result["config"]["gitops"]["branch"] == "flake-branch"
         assert "default" in result["config"]["kubernetes"]["generatedByPath"]
 
     async def test_flake_diff(self, git_repo: Path) -> None:
@@ -206,8 +241,8 @@ class TestFlakeEval:
         try:
             result = await evaluate_flake_ekn(EXAMPLE_FLAKE, "myapp")
             files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
-            commit_manifests(".", result["config"]["gitops"]["branch"], files, "seed")
-            diff_out = diff_manifests(".", result["config"]["gitops"]["branch"], files)
+            commit_manifests(".", "flake-test", files, "seed")
+            diff_out = diff_manifests(".", "flake-test", files)
             assert diff_out is None
         finally:
             os.environ.pop("EKN_REPO", None)
@@ -217,7 +252,7 @@ class TestFlakeEval:
         try:
             result = await evaluate_flake_ekn(EXAMPLE_FLAKE, "myapp")
             files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
-            commit_id = commit_manifests(".", result["config"]["gitops"]["branch"], files, "flake-test")
+            commit_id = commit_manifests(".", "flake-test", files, "flake-test")
             assert isinstance(commit_id, str)
         finally:
             os.environ.pop("EKN_REPO", None)

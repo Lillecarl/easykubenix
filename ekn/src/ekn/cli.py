@@ -8,7 +8,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path as _Path
-from typing import Any
+from typing import Any, cast
 
 import rich.traceback
 import structlog
@@ -18,6 +18,7 @@ from nanopynix import NixError
 
 from ekn.eval import evaluate_file, evaluate_flake, evaluate_flake_ekn, evaluate_validation_config
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests, try_jj_status
+from ekn.gitops import GitOpsTargetError, routed_manifests
 
 _log = structlog.get_logger()
 
@@ -108,6 +109,40 @@ def _get_manifests(result: dict[str, Any]) -> dict[str, Any]:
     return manifests
 
 
+def _gitops_file_groups(result: dict[str, Any]) -> dict[str, list[tuple[str, str]]]:
+    manifests = _get_manifests(result)
+    routing = _dig(result, "config", "kubernetes", "eknByPath")
+    if not isinstance(routing, dict) or not routing:
+        raise GitOpsTargetError("no GitOps-routed Kubernetes objects found")
+
+    routed = routed_manifests(manifests, routing)
+
+    groups: dict[str, list[tuple[str, str]]] = {}
+    for target, target_manifests in routed.items():
+        objects: dict[str, dict[str, dict[str, Any]]] = {}
+        for manifest in target_manifests:
+            metadata = manifest.get("metadata")
+            if not isinstance(metadata, dict):
+                raise GitOpsTargetError("routed manifest has no metadata attribute set")
+            namespace = metadata.get("namespace", "none")
+            kind = manifest.get("kind")
+            name = metadata.get("name")
+            if (
+                not isinstance(namespace, str)
+                or not namespace
+                or not isinstance(kind, str)
+                or not kind
+                or not isinstance(name, str)
+                or not name
+            ):
+                raise GitOpsTargetError("routed manifest has no namespace, kind, or name")
+            objects.setdefault(namespace, {}).setdefault(kind, {})[name] = manifest
+        groups.setdefault(target.branch, []).extend(
+            flatten_manifests(objects, target.path)
+        )
+    return groups
+
+
 class Eval(Command):
     """Evaluate Nix and dump JSON."""
     file: _Path | None = arg(None, short="f", inherited=True)
@@ -121,59 +156,52 @@ class Eval(Command):
 
 
 class Diff(Command):
-    """Diff rendered manifests against the GitOps branch."""
+    """Diff GitOps-routed manifests against their target branches."""
     file: _Path | None = arg(None, short="f", inherited=True)
     flake: str | None = arg(None, inherited=True)
     attr_path: str | None = arg(None, help="Dot-path into the evaluated file or flake output.")
-    branch: str | None = arg(None, short="b", help="Override the branch name from config.gitops.branch.")
-    subdir: str | None = arg(None, short="s", help="Override the subdirectory from config.gitops.path.")
 
     async def run(self) -> None:
         result = await _evaluate(self.file, self.flake, self.attr_path)
         if not isinstance(result, dict):
             _log.error("expected a dict result, got %s", type(result).__name__)
             raise SystemExit(1)
-        resolved_branch = self.branch or _check_gitops(result)
-        resolved_subdir = self.subdir or _gitops_path(result)
-        manifests = _get_manifests(result)
         try:
-            files = flatten_manifests(manifests, resolved_subdir)
-        except TypeError as exc:
-            _log.error("error: %s", exc)
+            groups = _gitops_file_groups(result)
+        except (GitOpsTargetError, TypeError) as exc:
+            _log.error("GitOps routing failed: %s", exc)
             raise SystemExit(1) from exc
-        try:
-            diff_output = diff_manifests(".", resolved_branch, files)
-        except Exception as exc:
-            _log.error("diff failed: %s", exc)
-            raise SystemExit(1) from exc
-        if diff_output is None:
+        has_differences = False
+        for branch, files in groups.items():
+            try:
+                diff_output = diff_manifests(".", branch, files)
+            except Exception as exc:
+                _log.error("diff failed: %s", exc)
+                raise SystemExit(1) from exc
+            if diff_output is not None:
+                has_differences = True
+                sys.stdout.write(diff_output)
+        if not has_differences:
             _log.info("no differences")
-            return
-        sys.stdout.write(diff_output)
         await try_jj_status(".")
 
 
 class Commit(Command):
-    """Render manifests and write them to the GitOps branch."""
+    """Render manifests and write them to their GitOps target branches."""
     file: _Path | None = arg(None, short="f", inherited=True)
     flake: str | None = arg(None, inherited=True)
     attr_path: str | None = arg(None, help="Dot-path into the evaluated file or flake output.")
-    branch: str | None = arg(None, short="b", help="Override the branch name from config.gitops.branch.")
     message: str | None = arg(None, short="m", help="Commit message.")
-    subdir: str | None = arg(None, short="s", help="Override the subdirectory from config.gitops.path.")
 
     async def run(self) -> None:
         result = await _evaluate(self.file, self.flake, self.attr_path)
         if not isinstance(result, dict):
             _log.error("expected a dict result, got %s", type(result).__name__)
             raise SystemExit(1)
-        resolved_branch = self.branch or _check_gitops(result)
-        resolved_subdir = self.subdir or _gitops_path(result)
-        manifests = _get_manifests(result)
         try:
-            files = flatten_manifests(manifests, resolved_subdir)
-        except TypeError as exc:
-            _log.error("error: %s", exc)
+            groups = _gitops_file_groups(result)
+        except (GitOpsTargetError, TypeError) as exc:
+            _log.error("GitOps routing failed: %s", exc)
             raise SystemExit(1) from exc
         if not self.message:
             import pygit2
@@ -183,12 +211,13 @@ class Commit(Command):
             except Exception:
                 head_sha = "unknown"
             self.message = f"ekn: render manifests from {self.attr_path or 'root'} @ {head_sha}"
-        try:
-            commit_id = commit_manifests(".", resolved_branch, files, self.message)
-        except Exception as exc:
-            _log.error("commit failed: %s", exc)
-            raise SystemExit(1) from exc
-        _log.info("committed to %s @ %s", resolved_branch, commit_id)
+        for branch, files in groups.items():
+            try:
+                commit_id = commit_manifests(".", branch, files, self.message)
+            except Exception as exc:
+                _log.error("commit failed: %s", exc)
+                raise SystemExit(1) from exc
+            _log.info("committed to %s @ %s", branch, commit_id)
         await try_jj_status(".")
 
 
@@ -391,9 +420,24 @@ class Validate(Command):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class Deploy(Commit):
+    """Verify and write GitOps-routed manifests to their target branches."""
+
+    no_verify: bool = arg(
+        False,
+        help="Skip temporary API-server and kubeconform verification.",
+    )
+    _free_port = staticmethod(Validate._free_port)
+
+    async def run(self) -> None:
+        if not self.no_verify:
+            await Validate.run(cast(Validate, self))
+        await super().run()
+
+
 class Ekn(Command):
     """easykubenix CLI — evaluate Nix and manage GitOps release branches."""
-    subcommand: Eval | Diff | Commit | Validate | None = None
+    subcommand: Deploy | Eval | Diff | Commit | Validate | None = None
     file: _Path | None = arg(None, short="f", help="Nix file to evaluate.")
     flake: str | None = arg(None, help="Flake reference (e.g. '.#myconfig'). Evaluates outputs.eknConfig.<system>.<attr>.")
 
@@ -408,6 +452,7 @@ class Ekn(Command):
             print("  --flake       Flake reference (e.g. '.#myconfig').")
             print()
             print("Commands:")
+            print("  deploy        Verify, then render and write routed GitOps manifests.")
             print("  eval          Evaluate Nix and dump JSON.")
             print("  diff          Diff rendered manifests against the GitOps branch.")
             print("  commit        Render manifests and write them to the GitOps branch.")

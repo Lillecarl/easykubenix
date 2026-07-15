@@ -87,12 +87,14 @@ async def evaluate_flake_ekn(flake_uri: str, customer: str) -> dict:
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
 
-        gitops = await proxy.attr("gitops").force_json()
         generated_by_path = await proxy.attr("kubernetes").attr("generatedByPath").force_json()
+        ekn_by_path = await proxy.attr("kubernetes").attr("eknByPath").force_json()
         return {
             "config": {
-                "gitops": gitops,
-                "kubernetes": {"generatedByPath": generated_by_path},
+                "kubernetes": {
+                    "generatedByPath": generated_by_path,
+                    "eknByPath": ekn_by_path,
+                },
             }
         }
 
@@ -109,8 +111,8 @@ async def evaluate_validation_config(flake_uri: str, customer: str) -> dict:
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
 
-        gitops = await proxy.attr("gitops").force_json()
         generated_by_path = await proxy.attr("kubernetes").attr("generatedByPath").force_json()
+        ekn_by_path = await proxy.attr("kubernetes").attr("eknByPath").force_json()
 
         v = proxy.attr("validation")
         kubeadm_config = await v.attr("kubeadmConfig").force_json()
@@ -126,9 +128,9 @@ async def evaluate_validation_config(flake_uri: str, customer: str) -> dict:
 
         return {
             "config": {
-                "gitops": gitops,
                 "kubernetes": {
                     "generatedByPath": generated_by_path,
+                    "eknByPath": ekn_by_path,
                     "package": {"version": k8s_version, "outPath": k8s_out},
                 },
                 "validation": {

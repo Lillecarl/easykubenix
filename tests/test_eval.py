@@ -4,8 +4,10 @@ from pathlib import Path
 
 import nanopynix
 import pytest
+from ekn.eval import evaluate_file
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+NIX_TEST_FILE = PROJECT_ROOT / "tests/test_eval.nix"
 
 
 @pytest.fixture(scope="module")
@@ -41,6 +43,19 @@ class TestSimpleEval:
 
 
 class TestEknModule:
+    async def test_ekn_routing_is_stripped_from_manifests(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "eknRouting")
+        assert isinstance(result, dict)
+
+        deployment = result["generatedByPath"]["default"]["Deployment"]["api"]
+        assert "ekn" not in deployment
+        route = result["eknByPath"]["default"]["Deployment"]["api"][0]
+        assert route == {
+            "backend": "argo",
+            "branch": "deploy",
+            "path": "clusters/home/apps",
+        }
+
     async def test_generated_by_path(self, ekn_root: str) -> None:
         nix = f"""
         let
@@ -66,30 +81,6 @@ class TestEknModule:
         assert "default" in result
         assert "ConfigMap" in result["default"]
         assert "test" in result["default"]["ConfigMap"]
-
-    async def test_gitops_branch(self, ekn_root: str) -> None:
-        nix = f"""
-        let
-          compat = import {ekn_root}/nix/compat.nix;
-          pkgs = import compat.inputs.nixpkgs {{}};
-          easy = import {ekn_root} {{
-            inherit pkgs;
-            modules = [{{
-              gitops.enable = true;
-              gitops.branch = "production";
-            }}];
-          }};
-        in
-        easy.config.gitops.branch
-        """
-        async with (
-            nanopynix.Session(experimental_features=["flakes", "nix-command"]) as session,
-            session.store() as store,
-            session.eval(store) as eval_,
-        ):
-            root = await eval_.string(nix)
-            result = await root.force_json()
-        assert result == "production"
 
     async def test_manifest_yaml_list(self, ekn_root: str) -> None:
         nix = f"""
@@ -124,7 +115,6 @@ class TestValidationConfig:
         flake = str(PROJECT_ROOT / "docs/examples/example-flake")
         cfg = await evaluate_validation_config(flake, "myapp")
         c = cfg["config"]
-        assert c["gitops"]["branch"] == "flake-branch"
         assert c["kubernetes"]["package"]["version"]
         assert c["kubernetes"]["package"]["outPath"].startswith("/nix/store/")
         assert c["validation"]["etcdPackage"]["outPath"].startswith("/nix/store/")
