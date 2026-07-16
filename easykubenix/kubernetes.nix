@@ -86,6 +86,12 @@ in
   options.kubernetes = {
     package = lib.mkPackageOption pkgs "kubernetes" { };
 
+    templates = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.functionTo settingsFormat.type);
+      default = { };
+      description = "Typed resource template functions, usually created with the Adios-backed `template` helper.";
+    };
+
     objects = lib.mkOption {
       type = lib.types.attrsOf (
         lib.types.submodule (

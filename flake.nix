@@ -1,5 +1,6 @@
 {
   inputs = {
+    adios.url = "github:adisbladis/adios";
     flake-compatish.url = "github:lillecarl/flake-compatish";
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
     nanopynix = {

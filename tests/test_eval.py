@@ -4,10 +4,12 @@ from pathlib import Path
 
 import nanopynix
 import pytest
+
 from ekn.eval import evaluate_file
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 NIX_TEST_FILE = PROJECT_ROOT / "tests/test_eval.nix"
+TEMPLATES_NIX_TEST_FILE = PROJECT_ROOT / "tests/test_templates.nix"
 
 
 @pytest.fixture(scope="module")
@@ -43,6 +45,22 @@ class TestSimpleEval:
 
 
 class TestEknModule:
+    async def test_adios_template_creates_a_resource(self) -> None:
+        result = await evaluate_file(TEMPLATES_NIX_TEST_FILE, "templates")
+        assert result == {
+            "apiVersion": "bitnami.com/v1alpha1",
+            "kind": "SealedSecret",
+            "metadata": {"name": "database", "namespace": "default"},
+            "spec": {
+                "encryptedData": {"password": "AgByEncrypted"},
+                "template": {"metadata": {"labels": {"app": "api"}}},
+            },
+        }
+
+    async def test_adios_template_checks_arguments(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="encryptedData"):
+            await evaluate_file(TEMPLATES_NIX_TEST_FILE, "invalidTemplateArguments")
+
     async def test_ekn_routing_is_stripped_from_manifests(self) -> None:
         result = await evaluate_file(NIX_TEST_FILE, "eknRouting")
         assert isinstance(result, dict)

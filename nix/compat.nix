@@ -6,6 +6,7 @@ in
 flake-compatish {
   source = ../.;
   overrides = {
+    adios = ../../adios;
     self = ../.;
     nixpkgs = <nixpkgs>;
     nanopynix = ../../nanopynix;

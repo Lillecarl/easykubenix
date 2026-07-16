@@ -14,6 +14,8 @@ let
   lib = pkgs.lib;
 
   nanopynix = import inputs.nanopynix { inherit pkgs; };
+  adios = (import inputs.adios).adios;
+  template = definition: adios definition { };
   clypi = pkgs.python3Packages.callPackage ./nix/clypi.nix { };
   ekn = pkgs.python3Packages.callPackage ./ekn {
     inherit (nanopynix) nanopynix;
@@ -21,7 +23,10 @@ let
   };
 
   eval = lib.evalModules {
-    inherit specialArgs;
+    specialArgs = {
+      inherit adios template;
+    }
+    // specialArgs;
 
     modules = [
       {
@@ -64,6 +69,7 @@ in
       inputs
       pkgs
       lib
+      adios
       eval
       ekn
       clypi

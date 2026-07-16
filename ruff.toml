@@ -11,3 +11,8 @@ select = [
 ignore = [
     "E501",
 ]
+
+[lint.isort]
+known-first-party = [
+    "ekn",
+]
