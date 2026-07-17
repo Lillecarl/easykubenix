@@ -21,6 +21,7 @@ let
     inherit (nanopynix) nanopynix;
     inherit clypi;
   };
+  easykubenix-docs = pkgs.python3Packages.callPackage ./nix/docs.nix { };
 
   eval = lib.evalModules {
     specialArgs = {
@@ -73,6 +74,7 @@ in
       eval
       ekn
       clypi
+      easykubenix-docs
       ;
   };
 }
