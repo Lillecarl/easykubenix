@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Helm_Ping_FullMethodName = "/helmrpc.Helm/Ping"
+	Helm_Ping_FullMethodName   = "/helmrpc.Helm/Ping"
+	Helm_Render_FullMethodName = "/helmrpc.Helm/Render"
 )
 
 // HelmClient is the client API for Helm service.
@@ -33,6 +34,11 @@ type HelmClient interface {
 	// Ping verifies the stdio transport end to end before any Helm rendering
 	// logic is wired in.
 	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingResponse, error)
+	// Render runs `helm template` (client-side dry-run install) against a
+	// chart already present on disk and returns the rendered resources as
+	// structured values, so callers never round-trip through a second YAML
+	// parser the way CLI-wrapping approaches do.
+	Render(ctx context.Context, in *RenderRequest, opts ...grpc.CallOption) (*RenderResponse, error)
 }
 
 type helmClient struct {
@@ -53,6 +59,16 @@ func (c *helmClient) Ping(ctx context.Context, in *PingRequest, opts ...grpc.Cal
 	return out, nil
 }
 
+func (c *helmClient) Render(ctx context.Context, in *RenderRequest, opts ...grpc.CallOption) (*RenderResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenderResponse)
+	err := c.cc.Invoke(ctx, Helm_Render_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HelmServer is the server API for Helm service.
 // All implementations must embed UnimplementedHelmServer
 // for forward compatibility.
@@ -64,6 +80,11 @@ type HelmServer interface {
 	// Ping verifies the stdio transport end to end before any Helm rendering
 	// logic is wired in.
 	Ping(context.Context, *PingRequest) (*PingResponse, error)
+	// Render runs `helm template` (client-side dry-run install) against a
+	// chart already present on disk and returns the rendered resources as
+	// structured values, so callers never round-trip through a second YAML
+	// parser the way CLI-wrapping approaches do.
+	Render(context.Context, *RenderRequest) (*RenderResponse, error)
 	mustEmbedUnimplementedHelmServer()
 }
 
@@ -76,6 +97,9 @@ type UnimplementedHelmServer struct{}
 
 func (UnimplementedHelmServer) Ping(context.Context, *PingRequest) (*PingResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Ping not implemented")
+}
+func (UnimplementedHelmServer) Render(context.Context, *RenderRequest) (*RenderResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Render not implemented")
 }
 func (UnimplementedHelmServer) mustEmbedUnimplementedHelmServer() {}
 func (UnimplementedHelmServer) testEmbeddedByValue()              {}
@@ -116,6 +140,24 @@ func _Helm_Ping_Handler(srv interface{}, ctx context.Context, dec func(interface
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Helm_Render_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HelmServer).Render(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Helm_Render_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HelmServer).Render(ctx, req.(*RenderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Helm_ServiceDesc is the grpc.ServiceDesc for Helm service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -126,6 +168,10 @@ var Helm_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Ping",
 			Handler:    _Helm_Ping_Handler,
+		},
+		{
+			MethodName: "Render",
+			Handler:    _Helm_Render_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

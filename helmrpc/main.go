@@ -20,6 +20,10 @@ func (s *helmServer) Ping(ctx context.Context, req *pb.PingRequest) (*pb.PingRes
 	return &pb.PingResponse{Message: req.GetMessage()}, nil
 }
 
+func (s *helmServer) Render(ctx context.Context, req *pb.RenderRequest) (*pb.RenderResponse, error) {
+	return renderChart(ctx, req)
+}
+
 func main() {
 	// Reserve the real stdout exclusively for H2 frames; redirect anything
 	// else (log output, accidental prints, panics writing to stdout) to

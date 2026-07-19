@@ -8,7 +8,7 @@ buildGoModule (finalAttrs: {
 
   src = lib.cleanSource ./.;
 
-  vendorHash = "sha256-q+B0TA9BJrvZWvkB22RbpYoqcioUR+lLPQcK+rtbwW4=";
+  vendorHash = "sha256-K4t9ts4unj19zmuSBSJXUs892UWpfgDBnM1EIpXMtcY=";
 
   meta = {
     mainProgram = finalAttrs.pname;

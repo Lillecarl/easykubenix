@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package helmrpc;
 
+import "google/protobuf/struct.proto";
+
 option go_package = "github.com/lillecarl/easykubenix/helmrpc/pb";
 
 // Helm is served over a stdio-transported gRPC connection, wire-compatible
@@ -11,6 +13,12 @@ service Helm {
   // Ping verifies the stdio transport end to end before any Helm rendering
   // logic is wired in.
   rpc Ping(PingRequest) returns (PingResponse);
+
+  // Render runs `helm template` (client-side dry-run install) against a
+  // chart already present on disk and returns the rendered resources as
+  // structured values, so callers never round-trip through a second YAML
+  // parser the way CLI-wrapping approaches do.
+  rpc Render(RenderRequest) returns (RenderResponse);
 }
 
 message PingRequest {
@@ -19,4 +27,23 @@ message PingRequest {
 
 message PingResponse {
   string message = 1;
+}
+
+message RenderRequest {
+  // Filesystem path to the chart directory (e.g. a fetchHelm store path).
+  string chart_path = 1;
+  // Release name; matches `helm template [NAME]`.
+  string name = 2;
+  string namespace = 3;
+  google.protobuf.Struct values = 4;
+  // Kubernetes version used for Capabilities.KubeVersion, e.g. "1.29.0".
+  string kube_version = 5;
+  bool include_crds = 6;
+  bool no_hooks = 7;
+  // Kubernetes API versions used for Capabilities.APIVersions.
+  repeated string api_versions = 8;
+}
+
+message RenderResponse {
+  repeated google.protobuf.Struct resources = 1;
 }
