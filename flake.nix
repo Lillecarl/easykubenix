@@ -28,7 +28,14 @@
           defNix = eachDefNix.${system};
         in
         {
-          inherit (defNix.passthru) ekn nanopynix nanopynix-bindings nanopynix-helpers easykubenix-docs;
+          inherit (defNix.passthru)
+            ekn
+            nanopynix
+            nanopynix-bindings
+            nanopynix-helpers
+            easykubenix-docs
+            helmrpc
+            ;
         }
       );
       lib.easykubenix = import ./default.nix;

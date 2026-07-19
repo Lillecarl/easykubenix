@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package helmrpc;
+
+option go_package = "github.com/lillecarl/easykubenix/helmrpc/pb";
+
+// Helm is served over a stdio-transported gRPC connection, wire-compatible
+// with grpclib-transports' StdioChannel (raw HTTP/2 frames on stdin/stdout,
+// no handshake, no socket).
+service Helm {
+  // Ping verifies the stdio transport end to end before any Helm rendering
+  // logic is wired in.
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+message PingRequest {
+  string message = 1;
+}
+
+message PingResponse {
+  string message = 1;
+}

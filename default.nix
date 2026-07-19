@@ -22,6 +22,7 @@ let
     inherit clypi;
   };
   easykubenix-docs = pkgs.python3Packages.callPackage ./nix/docs.nix { };
+  helmrpc = pkgs.callPackage ./helmrpc { };
 
   eval = lib.evalModules {
     specialArgs = {
@@ -75,6 +76,7 @@ in
       ekn
       clypi
       easykubenix-docs
+      helmrpc
       ;
   };
 }
