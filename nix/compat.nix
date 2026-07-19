@@ -9,6 +9,6 @@ flake-compatish {
     adios = ../../adios;
     self = ../.;
     nixpkgs = <nixpkgs>;
-    nanopynix = /tmp/nanopynix-1;
+    nanopynix = /home/lillecarl/Code/nanopynix-ekn;
   };
 }

@@ -8,3 +8,9 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Nix / direnv
+.direnv/
+
+# Personal Claude Code settings
+.claude/settings.local.json
