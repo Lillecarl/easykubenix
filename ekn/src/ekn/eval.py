@@ -7,12 +7,18 @@ from typing import Any
 
 from nanopynix import NixError, NixSettings, Session
 
+from ekn.helm import RENDER_HELM_SPEC, render_helm
+
 _SESSION_SETTINGS = NixSettings()
 
 
 @asynccontextmanager
 async def _session() -> AsyncIterator[Session]:
-    async with Session(settings=_SESSION_SETTINGS) as session:
+    async with Session(
+        settings=_SESSION_SETTINGS,
+        primops=[RENDER_HELM_SPEC],
+        primop_callables={"renderHelm": render_helm},
+    ) as session:
         yield session
 
 
