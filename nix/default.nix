@@ -5,7 +5,11 @@
 }:
 rec {
   root = import ../default.nix { inherit pkgs; };
-  ekn = pkgs.python3Packages.callPackage ../ekn { inherit (root.passthru) nanopynix nanopynix-helpers clypi; };
   helmrpc = pkgs.callPackage ../helmrpc { };
-  shell = pkgs.python3Packages.callPackage ./shell.nix { inherit ekn; };
+  helmrpc-proto = pkgs.python3Packages.callPackage ../helmrpc-proto { protoc = pkgs.protobuf; };
+  ekn = pkgs.python3Packages.callPackage ../ekn {
+    inherit (root.passthru) nanopynix nanopynix-helpers clypi grpclib-transports;
+    inherit helmrpc helmrpc-proto;
+  };
+  shell = pkgs.python3Packages.callPackage ./shell.nix { inherit ekn helmrpc; };
 }

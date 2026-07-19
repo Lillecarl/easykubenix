@@ -17,12 +17,13 @@ let
   adios = (import inputs.adios).adios;
   template = definition: adios definition { };
   clypi = pkgs.python3Packages.callPackage ./nix/clypi.nix { };
+  helmrpc = pkgs.callPackage ./helmrpc { };
+  helmrpc-proto = pkgs.python3Packages.callPackage ./helmrpc-proto { protoc = pkgs.protobuf; };
   ekn = pkgs.python3Packages.callPackage ./ekn {
-    inherit (nanopynix) nanopynix nanopynix-helpers;
-    inherit clypi;
+    inherit (nanopynix) nanopynix nanopynix-helpers grpclib-transports;
+    inherit clypi helmrpc helmrpc-proto;
   };
   easykubenix-docs = pkgs.python3Packages.callPackage ./nix/docs.nix { };
-  helmrpc = pkgs.callPackage ./helmrpc { };
 
   eval = lib.evalModules {
     specialArgs = {
@@ -66,7 +67,7 @@ in
   deploymentScript = eval.config.kluctl.script;
   validationScript = eval.config.validation.script;
   passthru = {
-    inherit (nanopynix) nanopynix nanopynix-bindings nanopynix-helpers;
+    inherit (nanopynix) nanopynix nanopynix-bindings nanopynix-helpers grpclib-transports;
     inherit
       inputs
       pkgs
@@ -77,6 +78,7 @@ in
       clypi
       easykubenix-docs
       helmrpc
+      helmrpc-proto
       ;
   };
 }

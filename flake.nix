@@ -35,6 +35,7 @@
             nanopynix-helpers
             easykubenix-docs
             helmrpc
+            helmrpc-proto
             ;
         }
       );
@@ -49,6 +50,7 @@
         {
           default = pkgs.python3Packages.callPackage ./nix/shell.nix {
             ekn = defNix.passthru.ekn;
+            helmrpc = defNix.passthru.helmrpc;
             ruff = pkgs.ruff;
           };
         }
