@@ -36,15 +36,12 @@ async def test_render_helm_primop_is_callable_from_nix(tmp_path: Path) -> None:
 
     nix_file = tmp_path / "render.nix"
     nix_file.write_text(f"""
-    let
-      requestJSON = builtins.toJSON {{
-        chart = "{chart_dir}";
-        name = "release-under-test";
-        namespace = "my-namespace";
-        values = {{ name = "my-config"; greeting = "hello from helmrpc"; }};
-      }};
-    in
-    builtins.fromJSON (builtins.renderHelm requestJSON)
+    builtins.renderHelm {{
+      chart = "{chart_dir}";
+      name = "release-under-test";
+      namespace = "my-namespace";
+      values = {{ name = "my-config"; greeting = "hello from helmrpc"; }};
+    }}
     """)
 
     resources = await evaluate_file(nix_file, None)
