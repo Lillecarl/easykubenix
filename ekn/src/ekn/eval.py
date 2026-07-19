@@ -28,7 +28,7 @@ async def evaluate_file(file: str | PathLike[str], attr_path: str | None) -> obj
         session.store() as store,
         session.eval(store) as eval_,
     ):
-        root = await eval_.file(str(file))
+        root = await (await eval_.file(str(file))).auto_call()
 
         proxy = root
         if attr_path:
@@ -50,7 +50,7 @@ async def evaluate_file_multi(
         session.store() as store,
         session.eval(store) as eval_,
     ):
-        root = await eval_.file(str(file))
+        root = await (await eval_.file(str(file))).auto_call()
         for attr_path in attr_paths:
             proxy = root
             if attr_path:
@@ -106,6 +106,47 @@ async def evaluate_flake_ekn(flake_uri: str, customer: str) -> dict:
         }
 
 
+async def evaluate_generated_manifests(
+    file: str | PathLike[str] | None,
+    flake_uri: str | None,
+    customer: str | None,
+    attr_path: str | None,
+) -> Any:
+    """Resolve a file or flake target down to `kubernetes.generatedByPath`.
+
+    Unlike `evaluate_file`/`evaluate_flake`, this never force_json's the whole
+    module `config` -- easykubenix options without a default (e.g. unset
+    `gitops.branch`) would blow up a blanket deep evaluation even when unused.
+    """
+    async with (
+        _session() as session,
+        session.store() as store,
+        session.eval(store) as eval_,
+    ):
+        if flake_uri is not None:
+            outputs = await eval_.eval_flake(flake_uri)
+            if customer:
+                system = await (await eval_.string("builtins.currentSystem")).force_json()
+                proxy = outputs.attr("eknConfig").attr(str(system)).attr(customer)
+            else:
+                proxy = outputs
+        elif file is not None:
+            proxy = await (await eval_.file(str(file))).auto_call()
+        else:
+            raise ValueError("specify --file or --flake")
+
+        if attr_path:
+            for name in attr_path.split("."):
+                if not name:
+                    raise ValueError(f"empty segment in attr path: {attr_path!r}")
+                proxy = proxy.attr(name)
+
+        if await proxy.has_attr("config"):
+            proxy = proxy.attr("config")
+
+        return await proxy.attr("kubernetes").attr("generatedByPath").force_json()
+
+
 async def _validation_config(proxy: Any) -> dict:
     if await proxy.has_attr("config"):
         proxy = proxy.attr("config")
@@ -153,7 +194,7 @@ async def evaluate_validation_file(
         session.store() as store,
         session.eval(store) as eval_,
     ):
-        proxy = await eval_.file(str(file))
+        proxy = await (await eval_.file(str(file))).auto_call()
         if attr_path:
             for name in attr_path.split("."):
                 if not name:
@@ -180,6 +221,7 @@ __all__ = [
     "evaluate_file_multi",
     "evaluate_flake",
     "evaluate_flake_ekn",
+    "evaluate_generated_manifests",
     "evaluate_validation_config",
     "evaluate_validation_file",
 ]

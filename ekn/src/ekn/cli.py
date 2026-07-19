@@ -20,6 +20,7 @@ from ekn.eval import (
     evaluate_file,
     evaluate_flake,
     evaluate_flake_ekn,
+    evaluate_generated_manifests,
     evaluate_validation_config,
     evaluate_validation_file,
 )
@@ -61,16 +62,16 @@ def _parse_flake(flake_ref: str) -> tuple[str, str | None]:
 async def _evaluate(
     file: _Path | None,
     flake: str | None,
-    attr_path: str | None,
+    attr: str | None,
 ) -> object:
     try:
         if flake is not None:
             uri, customer = _parse_flake(flake)
             if customer:
                 return await evaluate_flake_ekn(uri, customer)
-            return await evaluate_flake(uri, attr_path)
+            return await evaluate_flake(uri, attr)
         if file is not None:
-            return await evaluate_file(file, attr_path)
+            return await evaluate_file(file, attr)
         raise ValueError("specify --file or --flake")
     except NixError as exc:
         _log.error(exc.msg_without_ansi)
@@ -158,22 +159,43 @@ class Eval(Command):
     """Evaluate Nix and dump JSON."""
     file: _Path | None = arg(None, short="f", inherited=True)
     flake: str | None = arg(None, inherited=True)
-    attr_path: str | None = arg(None, help="Dot-path into the evaluated file or flake output.")
+    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
 
     async def run(self) -> None:
-        result = await _evaluate(self.file, self.flake, self.attr_path)
+        result = await _evaluate(self.file, self.flake, self.attr)
         json.dump(result, sys.stdout, indent=2, default=str)
         sys.stdout.write("\n")
+
+
+class Render(Command):
+    """Render Kubernetes manifests as YAML on stdout."""
+    file: _Path | None = arg(None, short="f", inherited=True)
+    flake: str | None = arg(None, inherited=True)
+    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
+
+    async def run(self) -> None:
+        uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
+        try:
+            manifests = await evaluate_generated_manifests(self.file, uri, customer, self.attr)
+        except NixError as exc:
+            _log.error(exc.msg_without_ansi)
+            raise SystemExit(1) from exc
+        if not isinstance(manifests, dict):
+            _log.error("expected a dict result, got %s", type(manifests).__name__)
+            raise SystemExit(1)
+        for _, content in flatten_manifests(manifests):
+            sys.stdout.write("---\n")
+            sys.stdout.write(content)
 
 
 class Diff(Command):
     """Diff GitOps-routed manifests against their target branches."""
     file: _Path | None = arg(None, short="f", inherited=True)
     flake: str | None = arg(None, inherited=True)
-    attr_path: str | None = arg(None, help="Dot-path into the evaluated file or flake output.")
+    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
 
     async def run(self) -> None:
-        result = await _evaluate(self.file, self.flake, self.attr_path)
+        result = await _evaluate(self.file, self.flake, self.attr)
         if not isinstance(result, dict):
             _log.error("expected a dict result, got %s", type(result).__name__)
             raise SystemExit(1)
@@ -201,11 +223,11 @@ class Commit(Command):
     """Render manifests and write them to their GitOps target branches."""
     file: _Path | None = arg(None, short="f", inherited=True)
     flake: str | None = arg(None, inherited=True)
-    attr_path: str | None = arg(None, help="Dot-path into the evaluated file or flake output.")
+    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
     message: str | None = arg(None, short="m", help="Commit message.")
 
     async def run(self) -> None:
-        result = await _evaluate(self.file, self.flake, self.attr_path)
+        result = await _evaluate(self.file, self.flake, self.attr)
         if not isinstance(result, dict):
             _log.error("expected a dict result, got %s", type(result).__name__)
             raise SystemExit(1)
@@ -221,7 +243,7 @@ class Commit(Command):
                 head_sha = str(repo.head.target)[:7]
             except Exception:
                 head_sha = "unknown"
-            self.message = f"ekn: render manifests from {self.attr_path or 'root'} @ {head_sha}"
+            self.message = f"ekn: render manifests from {self.attr or 'root'} @ {head_sha}"
         for branch, files in groups.items():
             try:
                 commit_id = commit_manifests(".", branch, files, self.message)
@@ -236,7 +258,7 @@ class Validate(Command):
     """Boot real etcd+kube-apiserver, apply manifests, and run kubeconform."""
     file: _Path | None = arg(None, short="f", inherited=True)
     flake: str | None = arg(None, inherited=True)
-    attr_path: str | None = arg(None, help="Dot-path into the evaluated config.")
+    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
 
     @staticmethod
     def _free_port() -> int:
@@ -247,7 +269,7 @@ class Validate(Command):
 
     async def run(self) -> None:
         if self.file is not None:
-            cfg = await evaluate_validation_file(self.file, self.attr_path)
+            cfg = await evaluate_validation_file(self.file, self.attr)
         else:
             uri, customer = _parse_flake(str(self.flake))
             if customer is None:
@@ -451,9 +473,10 @@ class Deploy(Commit):
 
 class Ekn(Command):
     """easykubenix CLI — evaluate Nix and manage GitOps release branches."""
-    subcommand: Deploy | Eval | Diff | Commit | Validate | None = None
+    subcommand: Deploy | Eval | Render | Diff | Commit | Validate | None = None
     file: _Path | None = arg(None, short="f", help="Nix file to evaluate.")
     flake: str | None = arg(None, help="Flake reference (e.g. '.#myconfig'). Evaluates outputs.eknConfig.<system>.<attr>.")
+    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
 
     async def run(self) -> None:
         if self.file is None and self.flake is None:
@@ -462,17 +485,19 @@ class Ekn(Command):
             print("  easykubenix CLI — evaluate Nix and manage GitOps release branches.")
             print()
             print("Options:")
-            print("  --file, -f    Nix file to evaluate.")
-            print("  --flake       Flake reference (e.g. '.#myconfig').")
+            print("  --file, -f       Nix file to evaluate.")
+            print("  --flake          Flake reference (e.g. '.#myconfig').")
+            print("  --attr, -A       Dot-separated attribute path within the evaluation result.")
             print()
             print("Commands:")
             print("  deploy        Verify, then render and write routed GitOps manifests.")
             print("  eval          Evaluate Nix and dump JSON.")
+            print("  render        Render Kubernetes manifests as YAML on stdout.")
             print("  diff          Diff rendered manifests against the GitOps branch.")
             print("  commit        Render manifests and write them to the GitOps branch.")
             print("  validate      Boot real etcd+kube-apiserver, apply manifests, run kubeconform.")
             raise SystemExit(0)
-        result = await _evaluate(self.file, self.flake, None)
+        result = await _evaluate(self.file, self.flake, self.attr)
         json.dump(result, sys.stdout, indent=2, default=str)
         sys.stdout.write("\n")
 
