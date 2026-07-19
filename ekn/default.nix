@@ -5,6 +5,7 @@
   installShellFiles,
   hatchling,
   nanopynix,
+  nanopynix-helpers,
   pygit2,
   pyyaml,
   clypi,
@@ -26,6 +27,7 @@ buildPythonApplication (finalAttrs: {
   ];
   dependencies = [
     nanopynix
+    nanopynix-helpers
     pygit2
     pyyaml
     clypi

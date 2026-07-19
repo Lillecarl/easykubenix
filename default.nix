@@ -18,7 +18,7 @@ let
   template = definition: adios definition { };
   clypi = pkgs.python3Packages.callPackage ./nix/clypi.nix { };
   ekn = pkgs.python3Packages.callPackage ./ekn {
-    inherit (nanopynix) nanopynix;
+    inherit (nanopynix) nanopynix nanopynix-helpers;
     inherit clypi;
   };
   easykubenix-docs = pkgs.python3Packages.callPackage ./nix/docs.nix { };
@@ -65,7 +65,7 @@ in
   deploymentScript = eval.config.kluctl.script;
   validationScript = eval.config.validation.script;
   passthru = {
-    inherit (nanopynix) nanopynix nanopynix-bindings;
+    inherit (nanopynix) nanopynix nanopynix-bindings nanopynix-helpers;
     inherit
       inputs
       pkgs

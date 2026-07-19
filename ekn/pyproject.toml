@@ -11,6 +11,8 @@ authors = [
     { name = "easykubenix contributors" },
 ]
 dependencies = [
+    "nanopynix",
+    "nanopynix-helpers",
     "pygit2",
     "pyyaml",
     "clypi",

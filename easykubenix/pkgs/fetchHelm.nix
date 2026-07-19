@@ -39,7 +39,15 @@ stdenvNoCC.mkDerivation {
       ${if devel then "--devel" else ""} \
       ${if verify then "--verify" else ""} \
       ${if chartUrl == null then (if repo == null then chart else "repository/${chart}") else chartUrl}
-    cp -r chart/*/ $out
+    # helm fetch --untar with a direct chartUrl can leave a same-named empty
+    # directory alongside the real extracted chart, so pick the one directory
+    # that actually contains a Chart.yaml rather than globbing all of them.
+    chartDir=$(find chart -mindepth 1 -maxdepth 1 -type d -exec test -f {}/Chart.yaml \; -print -quit)
+    if [ -z "$chartDir" ]; then
+      echo "no extracted chart directory containing Chart.yaml found under ./chart" >&2
+      exit 1
+    fi
+    cp -r "$chartDir"/. $out
   '';
   outputHashMode = "recursive";
   outputHashAlgo = "sha256";
