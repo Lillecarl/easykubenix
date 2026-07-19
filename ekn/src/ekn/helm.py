@@ -11,10 +11,10 @@ from helmrpc_proto.helmrpc_pb2 import RenderRequest
 from nanopynix import PrimOpSpec
 
 # nanopynix's RPC primop backchannel now carries DeepValue (recursive
-# attrs/list/scalar), so the request attrset and the rendered resource list
-# cross as real Nix values -- no builtins.toJSON/builtins.fromJSON needed on
-# either side. Field names mirror easykubenix/pkgs/chart2json.nix's (chart,
-# name, namespace, values, kubeVersion, includeCRDs, noHooks, apiVersions).
+# attrs/list/scalar), so the request attrset and the rendered resources cross
+# as real Nix values -- no builtins.toJSON/builtins.fromJSON needed on either
+# side. Field names mirror easykubenix/pkgs/chart2json.nix's (chart, name,
+# namespace, values, kubeVersion, includeCRDs, noHooks, apiVersions).
 RENDER_HELM_SPEC = PrimOpSpec(
     name="renderHelm",
     arity=1,
@@ -23,13 +23,16 @@ RENDER_HELM_SPEC = PrimOpSpec(
         "Render a Helm chart with `helm template` semantics via the helmrpc "
         "gRPC service. Takes an attrset with fields chart, name, namespace, "
         "values, kubeVersion, includeCRDs, noHooks, apiVersions and returns "
-        "the rendered resources as a list of attrsets."
+        "the rendered resources grouped `namespace.kind.name -> object`, "
+        "the same shape `kubernetes.objects` uses -- assign the result "
+        "straight into it (or `lib.recursiveUpdate` it in) with no "
+        "reshaping on the Nix side."
     ),
     rpc=True,
 )
 
 
-async def render_helm(request: dict[str, Any]) -> list[dict[str, Any]]:
+async def render_helm(request: dict[str, Any]) -> dict[str, Any]:
     helmrpc = shutil.which("helmrpc")
     if helmrpc is None:
         raise RuntimeError("helmrpc binary not found on PATH")
@@ -53,7 +56,23 @@ async def render_helm(request: dict[str, Any]) -> list[dict[str, Any]]:
             )
         )
 
-    return [MessageToDict(resource) for resource in response.resources]
+    by_path: dict[str, Any] = {}
+    for resource in response.resources:
+        obj = MessageToDict(resource)
+        kind = obj["kind"]
+        name = obj["metadata"]["name"]
+        # "none" is the same sentinel kubernetes.nix uses for objects without
+        # a namespace -- see its `${object.metadata.namespace or "none"}`.
+        namespace = obj.get("metadata", {}).get("namespace") or "none"
+
+        kind_bucket = by_path.setdefault(namespace, {}).setdefault(kind, {})
+        if name in kind_bucket:
+            raise ValueError(
+                f"chart {request.get('chart')!r} rendered {namespace}.{kind}.{name} more than once"
+            )
+        kind_bucket[name] = obj
+
+    return by_path
 
 
 __all__ = ["RENDER_HELM_SPEC", "render_helm"]

@@ -20,6 +20,15 @@ data:
   greeting: {{ .Values.greeting | quote }}
 """
 
+# Never references .Release.Namespace -- real `helm template` renders this
+# with no metadata.namespace at all, same as this fixture.
+_SERVICEACCOUNT_TEMPLATE = """\
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.name }}-sa
+"""
+
 
 def _write_chart(chart_dir: Path) -> None:
     chart_dir.mkdir()
@@ -27,6 +36,7 @@ def _write_chart(chart_dir: Path) -> None:
     templates = chart_dir / "templates"
     templates.mkdir()
     (templates / "configmap.yaml").write_text(_CONFIGMAP_TEMPLATE)
+    (templates / "serviceaccount.yaml").write_text(_SERVICEACCOUNT_TEMPLATE)
 
 
 async def test_render_helm_primop_is_callable_from_nix(tmp_path: Path) -> None:
@@ -44,13 +54,17 @@ async def test_render_helm_primop_is_callable_from_nix(tmp_path: Path) -> None:
     }}
     """)
 
-    resources = await evaluate_file(nix_file, None)
+    by_path = await evaluate_file(nix_file, None)
 
-    assert isinstance(resources, list)
-    assert len(resources) == 1
-    resource = resources[0]
+    # namespace.kind.name -- the same shape kubernetes.objects uses, so the
+    # result assigns straight in with no reshaping on the Nix side.
+    assert set(by_path.keys()) == {"my-namespace", "none"}
+    configmap = by_path["my-namespace"]["ConfigMap"]["my-config"]
+    assert configmap["metadata"]["namespace"] == "my-namespace"
+    assert configmap["data"]["greeting"] == "hello from helmrpc"
 
-    assert resource["kind"] == "ConfigMap"
-    assert resource["metadata"]["name"] == "my-config"
-    assert resource["metadata"]["namespace"] == "my-namespace"
-    assert resource["data"]["greeting"] == "hello from helmrpc"
+    # The ServiceAccount template never sets metadata.namespace -- it belongs
+    # on the "none" attrpath, the same sentinel kubernetes.objects uses for
+    # any other object without one.
+    serviceaccount = by_path["none"]["ServiceAccount"]["my-config-sa"]
+    assert serviceaccount["kind"] == "ServiceAccount"
