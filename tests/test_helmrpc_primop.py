@@ -4,6 +4,8 @@ from pathlib import Path
 
 from ekn.eval import evaluate_file
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 _CHART_YAML = """\
 apiVersion: v2
 name: mychart
@@ -68,3 +70,32 @@ async def test_render_helm_primop_is_callable_from_nix(tmp_path: Path) -> None:
     # any other object without one.
     serviceaccount = by_path["none"]["ServiceAccount"]["my-config-sa"]
     assert serviceaccount["kind"] == "ServiceAccount"
+
+
+async def test_render_helm_accepts_a_derivation_chart_path_directly(tmp_path: Path) -> None:
+    """chart callers (e.g. fetchHelm) pass "${someDerivation}" -- a string with
+    Nix string context. builtins.renderHelm must build that derivation and
+    substitute the real store path itself; callers must NOT need the
+    builtins.pathExists + unsafeDiscardStringContext dance to force it first."""
+    chart_dir = tmp_path / "mychart"
+    _write_chart(chart_dir)
+
+    nix_file = tmp_path / "render.nix"
+    nix_file.write_text(f"""
+    let
+      compat = import {PROJECT_ROOT}/nix/compat.nix;
+      pkgs = import compat.inputs.nixpkgs {{ }};
+      chart = pkgs.runCommand "mychart" {{ }} "cp -r {chart_dir} $out";
+    in
+    builtins.renderHelm {{
+      chart = "${{chart}}";
+      name = "release-under-test";
+      namespace = "my-namespace";
+      values = {{ name = "my-config"; greeting = "hello from helmrpc"; }};
+    }}
+    """)
+
+    by_path = await evaluate_file(nix_file, None)
+
+    configmap = by_path["my-namespace"]["ConfigMap"]["my-config"]
+    assert configmap["data"]["greeting"] == "hello from helmrpc"
