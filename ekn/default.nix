@@ -15,6 +15,7 @@
   anyio,
   structlog,
   rich,
+  pydantic-core,
 }:
 buildPythonApplication (finalAttrs: {
   name = "ekn";
@@ -39,6 +40,7 @@ buildPythonApplication (finalAttrs: {
     anyio
     structlog
     rich
+    pydantic-core
   ];
 
   # helmrpc is a Go binary, not a Python dependency: put it on PATH for the

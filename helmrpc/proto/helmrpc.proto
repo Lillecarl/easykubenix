@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package helmrpc;
 
-import "google/protobuf/struct.proto";
-
 option go_package = "github.com/lillecarl/easykubenix/helmrpc/pb";
 
 // Helm is served over a stdio-transported gRPC connection, wire-compatible
@@ -29,21 +27,21 @@ message PingResponse {
   string message = 1;
 }
 
+// RenderRequest/RenderResponse both wrap a single opaque JSON payload rather
+// than typed protobuf fields. google.protobuf.Struct was tried for the
+// rendered resources first, but its wire format nests one submessage per
+// object/array level -- deep CRD OpenAPI schemas (cert-manager,
+// prometheus-operator, ...) routinely exceed upb's hardcoded ~100-message
+// decode depth limit that way, and there's no public API to raise it. Once
+// resources needed a JSON escape hatch anyway, keeping `values` (and every
+// other field) as typed protobuf fields alongside it was just two encodings
+// for the same job; this collapses both messages down to one. Adding or
+// renaming a field is now a JSON-shape change on both sides, not a .proto
+// regeneration.
 message RenderRequest {
-  // Filesystem path to the chart directory (e.g. a fetchHelm store path).
-  string chart_path = 1;
-  // Release name; matches `helm template [NAME]`.
-  string name = 2;
-  string namespace = 3;
-  google.protobuf.Struct values = 4;
-  // Kubernetes version used for Capabilities.KubeVersion, e.g. "1.29.0".
-  string kube_version = 5;
-  bool include_crds = 6;
-  bool no_hooks = 7;
-  // Kubernetes API versions used for Capabilities.APIVersions.
-  repeated string api_versions = 8;
+  bytes request_json = 1;
 }
 
 message RenderResponse {
-  repeated google.protobuf.Struct resources = 1;
+  bytes response_json = 1;
 }

@@ -3,12 +3,11 @@ from __future__ import annotations
 import shutil
 from typing import Any
 
-from google.protobuf.json_format import MessageToDict
-from google.protobuf.struct_pb2 import Struct
 from grpclib_transports import stdio_worker
 from helmrpc_proto.helmrpc_grpc import HelmStub
 from helmrpc_proto.helmrpc_pb2 import RenderRequest
 from nanopynix import PrimOpSpec
+from pydantic_core import from_json, to_json
 
 # nanopynix's RPC primop backchannel now carries DeepValue (recursive
 # attrs/list/scalar), so the request attrset and the rendered resources cross
@@ -37,28 +36,33 @@ async def render_helm(request: dict[str, Any]) -> dict[str, Any]:
     if helmrpc is None:
         raise RuntimeError("helmrpc binary not found on PATH")
 
-    values = Struct()
-    if request.get("values"):
-        values.update(request["values"])
+    # RenderRequest/RenderResponse each wrap a single opaque JSON payload
+    # rather than typed protobuf fields -- see helmrpc.proto for why (in
+    # short: google.protobuf.Struct's per-nesting-level submessages blow past
+    # upb's hardcoded ~100-message decode depth on deep CRD OpenAPI schemas).
+    # pydantic_core is already a real dependency (nanopynix-proto's
+    # betterproto2 codegen uses pydantic dataclasses) and its from_json/
+    # to_json are Rust-backed, so there's no reason to reach for stdlib json
+    # here instead.
+    request_body = {
+        "chart": request["chart"],
+        "name": request.get("name", ""),
+        "namespace": request.get("namespace", ""),
+        "values": request.get("values") or {},
+        "kubeVersion": request.get("kubeVersion", ""),
+        "includeCRDs": request.get("includeCRDs", False),
+        "noHooks": request.get("noHooks", False),
+        "apiVersions": request.get("apiVersions", []),
+    }
 
     async with stdio_worker([helmrpc]) as channel:
         stub = HelmStub(channel)
-        response = await stub.Render(
-            RenderRequest(
-                chart_path=request["chart"],
-                name=request.get("name", ""),
-                namespace=request.get("namespace", ""),
-                values=values,
-                kube_version=request.get("kubeVersion", ""),
-                include_crds=request.get("includeCRDs", False),
-                no_hooks=request.get("noHooks", False),
-                api_versions=request.get("apiVersions", []),
-            )
-        )
+        response = await stub.Render(RenderRequest(request_json=to_json(request_body)))
+
+    response_body = from_json(response.response_json)
 
     by_path: dict[str, Any] = {}
-    for resource in response.resources:
-        obj = MessageToDict(resource)
+    for obj in response_body["resources"]:
         kind = obj["kind"]
         name = obj["metadata"]["name"]
         # "none" is the same sentinel kubernetes.nix uses for objects without

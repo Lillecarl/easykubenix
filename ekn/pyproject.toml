@@ -21,6 +21,7 @@ dependencies = [
     "anyio",
     "structlog",
     "rich",
+    "pydantic-core",
 ]
 
 [project.scripts]

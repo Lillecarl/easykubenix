@@ -85,7 +85,14 @@ async def test_render_helm_accepts_a_derivation_chart_path_directly(tmp_path: Pa
     let
       compat = import {PROJECT_ROOT}/nix/compat.nix;
       pkgs = import compat.inputs.nixpkgs {{ }};
-      chart = pkgs.runCommand "mychart" {{ }} "cp -r {chart_dir} $out";
+      # A bare (unquoted) absolute path is a Nix path *value*, not a plain
+      # string -- interpolating it below ("${{chartSrc}}") is what makes Nix
+      # copy it into the store as a real build input. Embedding chart_dir
+      # directly inside the builder's shell string instead (as text) doesn't:
+      # the sandboxed builder can't see an arbitrary host path it was never
+      # told is a dependency.
+      chartSrc = {chart_dir};
+      chart = pkgs.runCommand "mychart" {{ }} "cp -r ${{chartSrc}} $out";
     in
     builtins.renderHelm {{
       chart = "${{chart}}";

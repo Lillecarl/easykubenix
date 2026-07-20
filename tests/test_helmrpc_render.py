@@ -6,7 +6,7 @@ from pathlib import Path
 from grpclib_transports import stdio_worker
 from helmrpc_proto.helmrpc_grpc import HelmStub
 from helmrpc_proto.helmrpc_pb2 import RenderRequest
-from google.protobuf.struct_pb2 import Struct
+from pydantic_core import from_json, to_json
 
 _CHART_YAML = """\
 apiVersion: v2
@@ -41,22 +41,22 @@ async def test_helmrpc_render_produces_real_templated_output(tmp_path: Path) -> 
     chart_dir = tmp_path / "mychart"
     _write_chart(chart_dir)
 
-    values = Struct()
-    values.update({"name": "my-config", "greeting": "hello from helmrpc"})
+    request_body = {
+        "chart": str(chart_dir),
+        "name": "release-under-test",
+        "namespace": "my-namespace",
+        "values": {"name": "my-config", "greeting": "hello from helmrpc"},
+    }
 
     async with stdio_worker([helmrpc]) as channel:
         stub = HelmStub(channel)
-        response = await stub.Render(
-            RenderRequest(
-                chart_path=str(chart_dir),
-                name="release-under-test",
-                namespace="my-namespace",
-                values=values,
-            )
-        )
+        response = await stub.Render(RenderRequest(request_json=to_json(request_body)))
 
-    assert len(response.resources) == 1
-    resource = response.resources[0]
+    response_body = from_json(response.response_json)
+    resources = response_body["resources"]
+
+    assert len(resources) == 1
+    resource = resources[0]
 
     assert resource["kind"] == "ConfigMap"
     assert resource["metadata"]["name"] == "my-config"

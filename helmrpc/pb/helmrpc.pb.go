@@ -9,7 +9,6 @@ package pb
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
-	structpb "google.golang.org/protobuf/types/known/structpb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -110,20 +109,20 @@ func (x *PingResponse) GetMessage() string {
 	return ""
 }
 
+// RenderRequest/RenderResponse both wrap a single opaque JSON payload rather
+// than typed protobuf fields. google.protobuf.Struct was tried for the
+// rendered resources first, but its wire format nests one submessage per
+// object/array level -- deep CRD OpenAPI schemas (cert-manager,
+// prometheus-operator, ...) routinely exceed upb's hardcoded ~100-message
+// decode depth limit that way, and there's no public API to raise it. Once
+// resources needed a JSON escape hatch anyway, keeping `values` (and every
+// other field) as typed protobuf fields alongside it was just two encodings
+// for the same job; this collapses both messages down to one. Adding or
+// renaming a field is now a JSON-shape change on both sides, not a .proto
+// regeneration.
 type RenderRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Filesystem path to the chart directory (e.g. a fetchHelm store path).
-	ChartPath string `protobuf:"bytes,1,opt,name=chart_path,json=chartPath,proto3" json:"chart_path,omitempty"`
-	// Release name; matches `helm template [NAME]`.
-	Name      string           `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Namespace string           `protobuf:"bytes,3,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Values    *structpb.Struct `protobuf:"bytes,4,opt,name=values,proto3" json:"values,omitempty"`
-	// Kubernetes version used for Capabilities.KubeVersion, e.g. "1.29.0".
-	KubeVersion string `protobuf:"bytes,5,opt,name=kube_version,json=kubeVersion,proto3" json:"kube_version,omitempty"`
-	IncludeCrds bool   `protobuf:"varint,6,opt,name=include_crds,json=includeCrds,proto3" json:"include_crds,omitempty"`
-	NoHooks     bool   `protobuf:"varint,7,opt,name=no_hooks,json=noHooks,proto3" json:"no_hooks,omitempty"`
-	// Kubernetes API versions used for Capabilities.APIVersions.
-	ApiVersions   []string `protobuf:"bytes,8,rep,name=api_versions,json=apiVersions,proto3" json:"api_versions,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestJson   []byte                 `protobuf:"bytes,1,opt,name=request_json,json=requestJson,proto3" json:"request_json,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -158,65 +157,16 @@ func (*RenderRequest) Descriptor() ([]byte, []int) {
 	return file_helmrpc_proto_rawDescGZIP(), []int{2}
 }
 
-func (x *RenderRequest) GetChartPath() string {
+func (x *RenderRequest) GetRequestJson() []byte {
 	if x != nil {
-		return x.ChartPath
-	}
-	return ""
-}
-
-func (x *RenderRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *RenderRequest) GetNamespace() string {
-	if x != nil {
-		return x.Namespace
-	}
-	return ""
-}
-
-func (x *RenderRequest) GetValues() *structpb.Struct {
-	if x != nil {
-		return x.Values
-	}
-	return nil
-}
-
-func (x *RenderRequest) GetKubeVersion() string {
-	if x != nil {
-		return x.KubeVersion
-	}
-	return ""
-}
-
-func (x *RenderRequest) GetIncludeCrds() bool {
-	if x != nil {
-		return x.IncludeCrds
-	}
-	return false
-}
-
-func (x *RenderRequest) GetNoHooks() bool {
-	if x != nil {
-		return x.NoHooks
-	}
-	return false
-}
-
-func (x *RenderRequest) GetApiVersions() []string {
-	if x != nil {
-		return x.ApiVersions
+		return x.RequestJson
 	}
 	return nil
 }
 
 type RenderResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Resources     []*structpb.Struct     `protobuf:"bytes,1,rep,name=resources,proto3" json:"resources,omitempty"`
+	ResponseJson  []byte                 `protobuf:"bytes,1,opt,name=response_json,json=responseJson,proto3" json:"response_json,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -251,9 +201,9 @@ func (*RenderResponse) Descriptor() ([]byte, []int) {
 	return file_helmrpc_proto_rawDescGZIP(), []int{3}
 }
 
-func (x *RenderResponse) GetResources() []*structpb.Struct {
+func (x *RenderResponse) GetResponseJson() []byte {
 	if x != nil {
-		return x.Resources
+		return x.ResponseJson
 	}
 	return nil
 }
@@ -262,23 +212,15 @@ var File_helmrpc_proto protoreflect.FileDescriptor
 
 const file_helmrpc_proto_rawDesc = "" +
 	"\n" +
-	"\rhelmrpc.proto\x12\ahelmrpc\x1a\x1cgoogle/protobuf/struct.proto\"'\n" +
+	"\rhelmrpc.proto\x12\ahelmrpc\"'\n" +
 	"\vPingRequest\x12\x18\n" +
 	"\amessage\x18\x01 \x01(\tR\amessage\"(\n" +
 	"\fPingResponse\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessage\"\x95\x02\n" +
-	"\rRenderRequest\x12\x1d\n" +
-	"\n" +
-	"chart_path\x18\x01 \x01(\tR\tchartPath\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1c\n" +
-	"\tnamespace\x18\x03 \x01(\tR\tnamespace\x12/\n" +
-	"\x06values\x18\x04 \x01(\v2\x17.google.protobuf.StructR\x06values\x12!\n" +
-	"\fkube_version\x18\x05 \x01(\tR\vkubeVersion\x12!\n" +
-	"\finclude_crds\x18\x06 \x01(\bR\vincludeCrds\x12\x19\n" +
-	"\bno_hooks\x18\a \x01(\bR\anoHooks\x12!\n" +
-	"\fapi_versions\x18\b \x03(\tR\vapiVersions\"G\n" +
-	"\x0eRenderResponse\x125\n" +
-	"\tresources\x18\x01 \x03(\v2\x17.google.protobuf.StructR\tresources2v\n" +
+	"\amessage\x18\x01 \x01(\tR\amessage\"2\n" +
+	"\rRenderRequest\x12!\n" +
+	"\frequest_json\x18\x01 \x01(\fR\vrequestJson\"5\n" +
+	"\x0eRenderResponse\x12#\n" +
+	"\rresponse_json\x18\x01 \x01(\fR\fresponseJson2v\n" +
 	"\x04Helm\x123\n" +
 	"\x04Ping\x12\x14.helmrpc.PingRequest\x1a\x15.helmrpc.PingResponse\x129\n" +
 	"\x06Render\x12\x16.helmrpc.RenderRequest\x1a\x17.helmrpc.RenderResponseB-Z+github.com/lillecarl/easykubenix/helmrpc/pbb\x06proto3"
@@ -297,24 +239,21 @@ func file_helmrpc_proto_rawDescGZIP() []byte {
 
 var file_helmrpc_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_helmrpc_proto_goTypes = []any{
-	(*PingRequest)(nil),     // 0: helmrpc.PingRequest
-	(*PingResponse)(nil),    // 1: helmrpc.PingResponse
-	(*RenderRequest)(nil),   // 2: helmrpc.RenderRequest
-	(*RenderResponse)(nil),  // 3: helmrpc.RenderResponse
-	(*structpb.Struct)(nil), // 4: google.protobuf.Struct
+	(*PingRequest)(nil),    // 0: helmrpc.PingRequest
+	(*PingResponse)(nil),   // 1: helmrpc.PingResponse
+	(*RenderRequest)(nil),  // 2: helmrpc.RenderRequest
+	(*RenderResponse)(nil), // 3: helmrpc.RenderResponse
 }
 var file_helmrpc_proto_depIdxs = []int32{
-	4, // 0: helmrpc.RenderRequest.values:type_name -> google.protobuf.Struct
-	4, // 1: helmrpc.RenderResponse.resources:type_name -> google.protobuf.Struct
-	0, // 2: helmrpc.Helm.Ping:input_type -> helmrpc.PingRequest
-	2, // 3: helmrpc.Helm.Render:input_type -> helmrpc.RenderRequest
-	1, // 4: helmrpc.Helm.Ping:output_type -> helmrpc.PingResponse
-	3, // 5: helmrpc.Helm.Render:output_type -> helmrpc.RenderResponse
-	4, // [4:6] is the sub-list for method output_type
-	2, // [2:4] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	0, // 0: helmrpc.Helm.Ping:input_type -> helmrpc.PingRequest
+	2, // 1: helmrpc.Helm.Render:input_type -> helmrpc.RenderRequest
+	1, // 2: helmrpc.Helm.Ping:output_type -> helmrpc.PingResponse
+	3, // 3: helmrpc.Helm.Render:output_type -> helmrpc.RenderResponse
+	2, // [2:4] is the sub-list for method output_type
+	0, // [0:2] is the sub-list for method input_type
+	0, // [0:0] is the sub-list for extension type_name
+	0, // [0:0] is the sub-list for extension extendee
+	0, // [0:0] is the sub-list for field type_name
 }
 
 func init() { file_helmrpc_proto_init() }
