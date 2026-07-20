@@ -34,6 +34,22 @@ let
         _module.args = {
           inherit pkgs;
           inherit (pkgs) lib;
+          # Helper functions for consuming modules, distinct from `object.ekn`
+          # (GitOps-routing metadata on rendered Kubernetes objects, see
+          # kubernetes.nix's `ekn.argo`/`ekn.flux`/`eknByPath`) and the
+          # top-level `ekn` CLI package bound above (exposed via
+          # `passthru.ekn`, never visible to modules) -- same word, three
+          # unrelated meanings in this codebase, kept in separate namespaces
+          # by construction (module function-arg vs. object attrset field
+          # vs. outer let-binding), but worth this note so nobody conflates
+          # them.
+          ekn = {
+            # Recursively wrap every leaf of an attrset in `lib.mkDefault`,
+            # so a module's baked-in option value (e.g. a Helm chart's
+            # `values`) stays overridable leaf-by-leaf instead of a caller's
+            # single definition replacing the whole thing.
+            mkDefaults = lib.mapAttrsRecursive (_: v: lib.mkDefault v);
+          };
         };
       }
       ./easykubenix/assertions.nix
