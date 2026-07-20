@@ -21,6 +21,7 @@ from ekn.eval import (
     evaluate_flake,
     evaluate_flake_ekn,
     evaluate_generated_manifests,
+    evaluate_gitops_manifests,
     evaluate_validation_config,
     evaluate_validation_file,
 )
@@ -78,6 +79,21 @@ async def _evaluate(
         raise SystemExit(1) from exc
 
 
+async def _evaluate_gitops(
+    file: _Path | None,
+    flake: str | None,
+    attr: str | None,
+) -> dict:
+    """Like `_evaluate`, but only forces kubernetes.generated/eknByPath --
+    the only fields Diff/Commit/Deploy read via `_gitops_file_groups`."""
+    try:
+        uri, customer = _parse_flake(flake) if flake is not None else (None, None)
+        return await evaluate_gitops_manifests(file, uri, customer, attr)
+    except NixError as exc:
+        _log.error(exc.msg_without_ansi)
+        raise SystemExit(1) from exc
+
+
 def _dig(data: object, *keys: str) -> Any:
     for key in keys:
         if not isinstance(data, dict):
@@ -108,10 +124,10 @@ def _gitops_path(result: dict[str, Any]) -> str:
     return path
 
 
-def _get_manifests(result: dict[str, Any]) -> dict[str, Any]:
-    manifests = _dig(result, "config", "kubernetes", "generatedByPath")
-    if not isinstance(manifests, dict):
-        _log.error("no kubernetes objects found (config.kubernetes.generatedByPath is empty or not a dict)")
+def _get_manifests(result: dict[str, Any]) -> list[Any]:
+    manifests = _dig(result, "config", "kubernetes", "generated")
+    if not isinstance(manifests, list):
+        _log.error("no kubernetes objects found (config.kubernetes.generated is empty or not a list)")
         raise SystemExit(1)
     return manifests
 
@@ -126,26 +142,8 @@ def _gitops_file_groups(result: dict[str, Any]) -> dict[str, list[tuple[str, str
 
     groups: dict[str, dict[str, str]] = {}
     for target, target_manifests in routed.items():
-        objects: dict[str, dict[str, dict[str, Any]]] = {}
-        for manifest in target_manifests:
-            metadata = manifest.get("metadata")
-            if not isinstance(metadata, dict):
-                raise GitOpsTargetError("routed manifest has no metadata attribute set")
-            namespace = metadata.get("namespace", "none")
-            kind = manifest.get("kind")
-            name = metadata.get("name")
-            if (
-                not isinstance(namespace, str)
-                or not namespace
-                or not isinstance(kind, str)
-                or not kind
-                or not isinstance(name, str)
-                or not name
-            ):
-                raise GitOpsTargetError("routed manifest has no namespace, kind, or name")
-            objects.setdefault(namespace, {}).setdefault(kind, {})[name] = manifest
         branch_files = groups.setdefault(target.branch, {})
-        for path, content in flatten_manifests(objects, target.path):
+        for path, content in flatten_manifests(target_manifests, target.path):
             existing = branch_files.get(path)
             if existing is not None and existing != content:
                 raise GitOpsTargetError(
@@ -180,8 +178,8 @@ class Render(Command):
         except NixError as exc:
             _log.error(exc.msg_without_ansi)
             raise SystemExit(1) from exc
-        if not isinstance(manifests, dict):
-            _log.error("expected a dict result, got %s", type(manifests).__name__)
+        if not isinstance(manifests, list):
+            _log.error("expected a list result, got %s", type(manifests).__name__)
             raise SystemExit(1)
         for _, content in flatten_manifests(manifests):
             sys.stdout.write("---\n")
@@ -195,10 +193,7 @@ class Diff(Command):
     attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
 
     async def run(self) -> None:
-        result = await _evaluate(self.file, self.flake, self.attr)
-        if not isinstance(result, dict):
-            _log.error("expected a dict result, got %s", type(result).__name__)
-            raise SystemExit(1)
+        result = await _evaluate_gitops(self.file, self.flake, self.attr)
         try:
             groups = _gitops_file_groups(result)
         except (GitOpsTargetError, TypeError) as exc:
@@ -227,10 +222,7 @@ class Commit(Command):
     message: str | None = arg(None, short="m", help="Commit message.")
 
     async def run(self) -> None:
-        result = await _evaluate(self.file, self.flake, self.attr)
-        if not isinstance(result, dict):
-            _log.error("expected a dict result, got %s", type(result).__name__)
-            raise SystemExit(1)
+        result = await _evaluate_gitops(self.file, self.flake, self.attr)
         try:
             groups = _gitops_file_groups(result)
         except (GitOpsTargetError, TypeError) as exc:

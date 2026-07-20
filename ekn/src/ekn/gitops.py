@@ -24,21 +24,36 @@ def _required_string(route: object, field: str) -> str:
     return value
 
 
-def _manifest_at(
-    manifests: dict[str, Any], namespace: str, kind: str, name: str
-) -> dict[str, Any]:
-    result = manifests.get(namespace, {}).get(kind, {}).get(name)
-    if not isinstance(result, dict):
-        raise GitOpsTargetError(
-            f"routing references missing resource {namespace}/{kind}/{name}"
-        )
-    return result
+def _index_by_path(generated: list[Any]) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Build a (namespace, kind, name) -> manifest lookup from a flat manifest list.
+
+    `kubernetes.generatedByPath` used to provide this pre-grouped shape
+    directly from Nix, but building it there costs an O(n) chain of
+    `lib.recursiveUpdate` calls over every generated object just to support
+    this one lookup -- cheaper to build the same index here in Python from
+    the flat `kubernetes.generated` list, which Nix produces as a plain
+    `map`/`++` pipeline with no extra merge step.
+    """
+    index: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for manifest in generated:
+        if not isinstance(manifest, dict):
+            continue
+        metadata = manifest.get("metadata")
+        kind = manifest.get("kind")
+        if not isinstance(metadata, dict) or not isinstance(kind, str):
+            continue
+        namespace = metadata.get("namespace", "none")
+        name = metadata.get("name")
+        if isinstance(namespace, str) and isinstance(name, str):
+            index[(namespace, kind, name)] = manifest
+    return index
 
 
 def routed_manifests(
-    manifests: dict[str, Any], routing: dict[str, Any]
+    generated: list[Any], routing: dict[str, Any]
 ) -> dict[GitOpsTarget, list[dict[str, Any]]]:
     """Group manifests using normalized routes evaluated by the Nix module."""
+    index = _index_by_path(generated)
     result: defaultdict[GitOpsTarget, list[dict[str, Any]]] = defaultdict(list)
     for namespace, kinds in routing.items():
         if not isinstance(kinds, dict):
@@ -47,7 +62,11 @@ def routed_manifests(
             if not isinstance(names, dict):
                 continue
             for name, routes in names.items():
-                manifest = _manifest_at(manifests, namespace, kind, name)
+                manifest = index.get((namespace, kind, name))
+                if manifest is None:
+                    raise GitOpsTargetError(
+                        f"routing references missing resource {namespace}/{kind}/{name}"
+                    )
                 if not isinstance(routes, list):
                     raise GitOpsTargetError(
                         f"routing for {namespace}/{kind}/{name} must be a list"

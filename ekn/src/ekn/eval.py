@@ -1,22 +1,51 @@
 from __future__ import annotations
 
+import os
+import sys
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from os import PathLike
 from typing import Any
 
-from nanopynix import NixError, NixSettings, Session
+from nanopynix import NixError, NixEvalSettings, NixSettings, Session
+from nanopynix.primops import yaml_primops
 
 from ekn.helm import RENDER_HELM_SPEC, render_helm
 
 _SESSION_SETTINGS = NixSettings()
 
 
+def _profiler_eval_settings() -> NixEvalSettings | None:
+    """Build eval-profiler settings from EKN_EVAL_PROFILER* env vars, if set.
+
+    Unset by default so normal runs are unaffected. Set EKN_EVAL_PROFILER=
+    flamegraph (plus optionally EKN_EVAL_PROFILE_FILE and
+    EKN_EVAL_PROFILER_FREQUENCY) to profile the exact same code path a real
+    `ekn eval`/`ekn render` invocation takes.
+    """
+    profiler = os.environ.get("EKN_EVAL_PROFILER")
+    if not profiler:
+        return None
+    return NixEvalSettings(
+        eval_profiler=profiler,
+        eval_profile_file=os.environ.get("EKN_EVAL_PROFILE_FILE", "nix.profile"),
+        eval_profiler_frequency=int(os.environ.get("EKN_EVAL_PROFILER_FREQUENCY", "0")),
+    )
+
+
 @asynccontextmanager
 async def _session() -> AsyncIterator[Session]:
     async with Session(
         settings=_SESSION_SETTINGS,
-        primops=[RENDER_HELM_SPEC],
+        verbosity="error",
+        # yaml_primops() (fromYAML/fromYAML11/*Stream/toYAML) are bundled
+        # with nanopynix but opt-in, not auto-registered by Session -- needed
+        # so Nix-side chart-rendering code (renderChart.nix) can parse
+        # `helm template`'s IFD-built output in-process via fromYAML11Stream,
+        # instead of round-tripping every eval through the helmrpc gRPC
+        # subprocess (builtins.renderHelm).
+        primops=[RENDER_HELM_SPEC, *yaml_primops()],
         primop_callables={"renderHelm": render_helm},
     ) as session:
         yield session
@@ -26,7 +55,7 @@ async def evaluate_file(file: str | PathLike[str], attr_path: str | None) -> obj
     async with (
         _session() as session,
         session.store() as store,
-        session.eval(store) as eval_,
+        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
     ):
         root = await (await eval_.file(str(file))).auto_call()
 
@@ -48,7 +77,7 @@ async def evaluate_file_multi(
     async with (
         _session() as session,
         session.store() as store,
-        session.eval(store) as eval_,
+        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
     ):
         root = await (await eval_.file(str(file))).auto_call()
         for attr_path in attr_paths:
@@ -68,7 +97,7 @@ async def evaluate_flake(flake_uri: str, attr_path: str | None) -> object:
     async with (
         _session() as session,
         session.store() as store,
-        session.eval(store) as eval_,
+        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
     ):
         root = await eval_.eval_flake(flake_uri)
 
@@ -86,7 +115,7 @@ async def evaluate_flake_ekn(flake_uri: str, customer: str) -> dict:
     async with (
         _session() as session,
         session.store() as store,
-        session.eval(store) as eval_,
+        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
     ):
         outputs = await eval_.eval_flake(flake_uri)
         system = await (await eval_.string("builtins.currentSystem")).force_json()
@@ -94,16 +123,29 @@ async def evaluate_flake_ekn(flake_uri: str, customer: str) -> dict:
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
 
-        generated_by_path = await proxy.attr("kubernetes").attr("generatedByPath").force_json()
+        # `generated` (a flat list) instead of `generatedByPath`: the latter
+        # costs an extra O(n) chain of `lib.recursiveUpdate` calls in Nix
+        # just to pre-group by namespace/kind/name, a lookup gitops.py now
+        # builds itself in Python from the flat list instead.
+        generated = await proxy.attr("kubernetes").attr("generated").force_json()
         ekn_by_path = await proxy.attr("kubernetes").attr("eknByPath").force_json()
         return {
             "config": {
                 "kubernetes": {
-                    "generatedByPath": generated_by_path,
+                    "generated": generated,
                     "eknByPath": ekn_by_path,
                 },
             }
         }
+
+
+def _timing_enabled() -> bool:
+    return bool(os.environ.get("EKN_TIMING"))
+
+
+def _log_timing(label: str, elapsed: float) -> None:
+    if _timing_enabled():
+        print(f"[EKN_TIMING] {label}: {elapsed:.3f}s", file=sys.stderr)
 
 
 async def evaluate_generated_manifests(
@@ -112,16 +154,73 @@ async def evaluate_generated_manifests(
     customer: str | None,
     attr_path: str | None,
 ) -> Any:
-    """Resolve a file or flake target down to `kubernetes.generatedByPath`.
+    """Resolve a file or flake target down to `kubernetes.generated`.
 
     Unlike `evaluate_file`/`evaluate_flake`, this never force_json's the whole
     module `config` -- easykubenix options without a default (e.g. unset
     `gitops.branch`) would blow up a blanket deep evaluation even when unused.
+    Uses `generated` (a flat list) rather than `generatedByPath`, which costs
+    an extra O(n) chain of `lib.recursiveUpdate` calls in Nix just to
+    pre-group by namespace/kind/name -- callers that need that grouping (e.g.
+    GitOps routing) build the lookup themselves in Python instead.
+    """
+    t_start = time.monotonic()
+    async with (
+        _session() as session,
+        session.store() as store,
+        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
+    ):
+        t_session_ready = time.monotonic()
+        _log_timing("session/store/eval-session setup", t_session_ready - t_start)
+
+        if flake_uri is not None:
+            outputs = await eval_.eval_flake(flake_uri)
+            if customer:
+                system = await (await eval_.string("builtins.currentSystem")).force_json()
+                proxy = outputs.attr("eknConfig").attr(str(system)).attr(customer)
+            else:
+                proxy = outputs
+        elif file is not None:
+            proxy = await (await eval_.file(str(file))).auto_call()
+        else:
+            raise ValueError("specify --file or --flake")
+
+        if attr_path:
+            for name in attr_path.split("."):
+                if not name:
+                    raise ValueError(f"empty segment in attr path: {attr_path!r}")
+                proxy = proxy.attr(name)
+
+        if await proxy.has_attr("config"):
+            proxy = proxy.attr("config")
+
+        t_before_force = time.monotonic()
+        result = await proxy.attr("kubernetes").attr("generated").force_json()
+        t_after_force = time.monotonic()
+        _log_timing("force_json(kubernetes.generated)", t_after_force - t_before_force)
+        _log_timing("total evaluate_generated_manifests", t_after_force - t_start)
+        return result
+
+
+async def evaluate_gitops_manifests(
+    file: str | PathLike[str] | None,
+    flake_uri: str | None,
+    customer: str | None,
+    attr_path: str | None,
+) -> dict:
+    """Resolve to `{"config": {"kubernetes": {"generated": ..., "eknByPath": ...}}}`.
+
+    Used by Diff/Commit/Deploy, which only ever read those two fields via
+    `_gitops_file_groups`. Diff/Commit previously went through the generic
+    `_evaluate` -> `evaluate_file`/`evaluate_flake`, which force_json's the
+    *entire* narrowed `config` (every option in every module, not just
+    kubernetes.generated/eknByPath) before `_dig()`-ing out just these two
+    fields -- forcing everything else was pure waste.
     """
     async with (
         _session() as session,
         session.store() as store,
-        session.eval(store) as eval_,
+        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
     ):
         if flake_uri is not None:
             outputs = await eval_.eval_flake(flake_uri)
@@ -144,16 +243,28 @@ async def evaluate_generated_manifests(
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
 
-        return await proxy.attr("kubernetes").attr("generatedByPath").force_json()
+        generated = await proxy.attr("kubernetes").attr("generated").force_json()
+        ekn_by_path = await proxy.attr("kubernetes").attr("eknByPath").force_json()
+        return {
+            "config": {
+                "kubernetes": {
+                    "generated": generated,
+                    "eknByPath": ekn_by_path,
+                },
+            }
+        }
 
 
 async def _validation_config(proxy: Any) -> dict:
     if await proxy.has_attr("config"):
         proxy = proxy.attr("config")
 
-    generated_by_path = await proxy.attr("kubernetes").attr("generatedByPath").force_json()
-    ekn_by_path = await proxy.attr("kubernetes").attr("eknByPath").force_json()
-
+    # Deliberately does not force kubernetes.generated/generatedByPath/
+    # eknByPath: Validate.run() applies manifests via
+    # internal.manifestJSONFile (a derivation built straight from
+    # kubernetes.generated, see internal.nix) and never reads the fields
+    # this function returns beyond what's assembled below -- forcing them
+    # here would just be wasted eval work.
     v = proxy.attr("validation")
     kubeadm_config = await v.attr("kubeadmConfig").force_json()
     pod_subnet = await v.attr("podSubnet").force_json()
@@ -169,8 +280,6 @@ async def _validation_config(proxy: Any) -> dict:
     return {
         "config": {
             "kubernetes": {
-                "generatedByPath": generated_by_path,
-                "eknByPath": ekn_by_path,
                 "package": {"version": k8s_version, "outPath": k8s_out},
             },
             "validation": {
@@ -192,7 +301,7 @@ async def evaluate_validation_file(
     async with (
         _session() as session,
         session.store() as store,
-        session.eval(store) as eval_,
+        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
     ):
         proxy = await (await eval_.file(str(file))).auto_call()
         if attr_path:
@@ -207,7 +316,7 @@ async def evaluate_validation_config(flake_uri: str, customer: str) -> dict:
     async with (
         _session() as session,
         session.store() as store,
-        session.eval(store) as eval_,
+        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
     ):
         outputs = await eval_.eval_flake(flake_uri)
         system = await (await eval_.string("builtins.currentSystem")).force_json()

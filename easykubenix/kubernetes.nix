@@ -42,6 +42,11 @@ let
     # example.
     (map (lib.walkWithPath lib.kubeAttrsToLists))
   ];
+  # cfg.crds objects deliberately don't flow through generatedWithEkn's
+  # pipeline above (generators/transformers/filters/kubeAttrsToLists) -- that
+  # walk is exactly what kubernetes.crds exists to avoid paying for. They're
+  # concatenated in afterwards, already complete and untouched.
+  allGenerated = generatedWithEkn ++ cfg.crds;
   generatedWithEknByPath = lib.foldl' (
     acc: object:
     lib.recursiveUpdate acc {
@@ -189,6 +194,38 @@ in
       };
     };
 
+    crds = lib.mkOption {
+      # `types.attrs` never recurses into a value's content (just checks
+      # `isAttrs` on each list element) -- unlike `kubernetes.objects`'
+      # per-object submodule, whose freeformType is settingsFormat.type (a
+      # real recursive JSON-schema-shaped type: nullOr(oneOf[bool int float
+      # str path (attrsOf ...) (listOf ...)])). Profiling `ekn render` on a
+      # CRD-heavy environment showed nixpkgs lib.types' `either`/`oneOf`
+      # v2-merge-coherence machinery (types.nix's `merge`/`functor`/
+      # `checkV2MergeCoherence`) accounting for ~86% of inclusive eval time,
+      # entirely from that per-leaf validation walking every attribute of
+      # every object's spec/data -- CRDs' OpenAPI schemas are the worst
+      # offenders, but it applies to every object, not just CRDs. Changing
+      # `kubernetes.objects.<namespace>.CustomResourceDefinition`'s type
+      # alone did NOT help, because the value still lived inside the same
+      # `kubernetes.objects` submodule tree; only routing objects through an
+      # entirely separate option, outside that tree, avoids the expensive
+      # type ever being reached. Each entry must already be a complete,
+      # valid object (apiVersion/kind/metadata.name set) -- there is no
+      # auto-injection here, unlike `kubernetes.objects`.
+      type = lib.types.listOf lib.types.attrs;
+      default = [ ];
+      description = ''
+        Pre-rendered, already-complete Kubernetes objects (typically
+        CustomResourceDefinitions from Nix-rendered Helm charts) that bypass
+        `kubernetes.objects`' per-object submodule and its expensive
+        settingsFormat.type value-checking entirely. Still passes through
+        `ekn.argo`/`ekn.flux` GitOps routing and the final YAML render, just
+        skips generators/transformers/filters and the auto-defaulting
+        `kubernetes.objects` provides.
+      '';
+    };
+
     transformers = lib.mkOption {
       type = lib.types.listOf (lib.types.functionTo lib.types.attrs);
       default = [ ];
@@ -299,20 +336,28 @@ in
       '';
     };
 
+    # generated/generatedByPath/eknByPath are readOnly, fully-computed
+    # outputs -- there is nothing left to override/merge on them, so
+    # settingsFormat.type's recursive per-leaf JSON-schema-style validation
+    # buys nothing here and would re-force the exact same expensive
+    # either/oneOf machinery `kubernetes.crds` was added to avoid (Nix's
+    # laziness means forcing these option *values* re-enters that machinery
+    # regardless of where the underlying data came from). `types.anything`
+    # merges/passes the value through structurally with no per-leaf check.
     generated = lib.mkOption {
-      type = settingsFormat.type;
+      type = lib.types.anything;
       description = "The final, generated Kubernetes list objects";
       readOnly = true;
     };
 
     generatedByPath = lib.mkOption {
-      type = settingsFormat.type;
+      type = lib.types.anything;
       description = "The final, generated Kubernetes objects by attrPath";
       readOnly = true;
     };
 
     eknByPath = lib.mkOption {
-      type = settingsFormat.type;
+      type = lib.types.anything;
       description = ''
         Resolved EKN GitOps routes by Kubernetes object path. This is derived
         before the `ekn` field is stripped from rendered Kubernetes objects.
@@ -333,12 +378,12 @@ in
       in
       lib.listToAttrs (map objectToAttr data.resources);
 
-    generated = lib.pipe generatedWithEkn [
+    generated = lib.pipe allGenerated [
       # `ekn` belongs to the EKN compiler, not to the Kubernetes manifest.
       (map (object: removeAttrs object [ "ekn" ]))
     ];
 
-    eknByPath = lib.pipe generatedWithEkn [
+    eknByPath = lib.pipe allGenerated [
       (lib.filter (
         object:
         let
@@ -352,7 +397,11 @@ in
           acc: object:
           lib.recursiveUpdate acc {
             ${object.metadata.namespace or "none"}.${object.kind}.${object.metadata.name} =
-              map argoRoute object.ekn.argo ++ map fluxRoute object.ekn.flux;
+              # `or [ ]`: kubernetes.crds objects (renderChart-tagged) only
+              # ever set ekn.argo, never ekn.flux -- unlike
+              # kubernetes.objects' per-object submodule, there's no option
+              # default filling in the missing field for them.
+              map argoRoute (object.ekn.argo or [ ]) ++ map fluxRoute (object.ekn.flux or [ ]);
           }
         ) { } objects
       )
