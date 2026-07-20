@@ -11,8 +11,6 @@ from typing import Any
 from nanopynix import NixError, NixEvalSettings, NixSettings, Session
 from nanopynix.primops import yaml_primops
 
-from ekn.helm import RENDER_HELM_SPEC, render_helm
-
 _SESSION_SETTINGS = NixSettings()
 
 
@@ -42,11 +40,8 @@ async def _session() -> AsyncIterator[Session]:
         # yaml_primops() (fromYAML/fromYAML11/*Stream/toYAML) are bundled
         # with nanopynix but opt-in, not auto-registered by Session -- needed
         # so Nix-side chart-rendering code (renderChart.nix) can parse
-        # `helm template`'s IFD-built output in-process via fromYAML11Stream,
-        # instead of round-tripping every eval through the helmrpc gRPC
-        # subprocess (builtins.renderHelm).
-        primops=[RENDER_HELM_SPEC, *yaml_primops()],
-        primop_callables={"renderHelm": render_helm},
+        # `helm template`'s IFD-built output in-process via fromYAML11Stream.
+        primops=yaml_primops(),
     ) as session:
         yield session
 

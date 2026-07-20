@@ -6,9 +6,6 @@
   hatchling,
   nanopynix,
   nanopynix-helpers,
-  grpclib-transports,
-  helmrpc,
-  helmrpc-proto,
   pygit2,
   pyyaml,
   clypi,
@@ -32,8 +29,6 @@ buildPythonApplication (finalAttrs: {
   dependencies = [
     nanopynix
     nanopynix-helpers
-    grpclib-transports
-    helmrpc-proto
     pygit2
     pyyaml
     clypi
@@ -41,16 +36,6 @@ buildPythonApplication (finalAttrs: {
     structlog
     rich
     pydantic-core
-  ];
-
-  # helmrpc is a Go binary, not a Python dependency: put it on PATH for the
-  # wrapped ekn executable so it can be spawned via grpclib_transports'
-  # stdio_worker without relying on the caller's shell PATH.
-  makeWrapperArgs = [
-    "--prefix"
-    "PATH"
-    ":"
-    (lib.makeBinPath [ helmrpc ])
   ];
 
   postInstall = ''

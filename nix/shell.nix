@@ -7,7 +7,6 @@
   pytest,
   anyio,
   ekn,
-  helmrpc,
   ruff,
   pyright,
 }:
@@ -27,7 +26,6 @@ in
 mkShell {
   packages = [
     pythonEnv
-    helmrpc
     ruff
     pyright
   ];

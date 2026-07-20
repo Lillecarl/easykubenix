@@ -17,11 +17,9 @@ let
   adios = (import inputs.adios).adios;
   template = definition: adios definition { };
   clypi = pkgs.python3Packages.callPackage ./nix/clypi.nix { };
-  helmrpc = pkgs.callPackage ./helmrpc { };
-  helmrpc-proto = pkgs.python3Packages.callPackage ./helmrpc-proto { protoc = pkgs.protobuf; };
   ekn = pkgs.python3Packages.callPackage ./ekn {
-    inherit (nanopynix) nanopynix nanopynix-helpers grpclib-transports;
-    inherit clypi helmrpc helmrpc-proto;
+    inherit (nanopynix) nanopynix nanopynix-helpers;
+    inherit clypi;
   };
   easykubenix-docs = pkgs.python3Packages.callPackage ./nix/docs.nix { };
 
@@ -77,8 +75,6 @@ in
       ekn
       clypi
       easykubenix-docs
-      helmrpc
-      helmrpc-proto
       ;
   };
 }

@@ -13,8 +13,6 @@ authors = [
 dependencies = [
     "nanopynix",
     "nanopynix-helpers",
-    "grpclib-transports",
-    "helmrpc-proto",
     "pygit2",
     "pyyaml",
     "clypi",
