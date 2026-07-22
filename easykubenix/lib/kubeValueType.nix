@@ -81,7 +81,12 @@ let
           anyNumbered = any (def: isNumberedListMarked def.value) defs;
         in
         if anyNamed then
-          attrValues (
+          # `attrsType.merge` returns a plain `{name -> mergedElement}`
+          # attrset -- the `name` lives only as the attrset key at this
+          # point (stripped off when converting to `_namedlist` in the
+          # first place), so it must be injected back into each element
+          # here, same as `kubeAttrsToLists`'s `val // { inherit name; }`.
+          lib.mapAttrsToList (name: val: val // { inherit name; }) (
             attrsType.merge loc (
               map (
                 def:
@@ -108,13 +113,26 @@ let
           listType.merge loc defs;
     };
 
+  # Plain `types.attrsOf`'s `check` accepts *any* attrset -- including one
+  # tagged `_namedlist`/`_numberedlist` -- so `oneOf` below would route a
+  # marked value here instead of to `namedListOf` whenever there's only a
+  # single definition (no separate plain-list definition forcing `oneOf` to
+  # fall back to `namedListOf`, which is the *only* case every existing
+  # test exercises). That silently skips `namedListOf`'s list-restoring
+  # merge and leaves the raw marker key baked into the value. Explicitly
+  # excluding marked attrsets here makes `namedListOf` the only possible
+  # match for them, regardless of how many definitions there are.
+  unmarkedAttrsOf =
+    elemType:
+    types.addCheck (types.attrsOf elemType) (x: !(isNamedListMarked x) && !(isNumberedListMarked x));
+
   baseType = types.oneOf [
     types.bool
     types.int
     types.float
     types.str
     types.path
-    (types.attrsOf valueType)
+    (unmarkedAttrsOf valueType)
     (namedListOf valueType)
   ];
   valueType = (types.nullOr baseType) // {
