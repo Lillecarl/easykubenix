@@ -35,7 +35,7 @@ from ekn.eval import (
 )
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests, try_jj_status
 from ekn.gitops import GitOpsTargetError, resolved_targets
-from ekn.sops import maybe_decrypt
+from ekn.sops import ensure_age_identities, maybe_decrypt
 
 _log = structlog.get_logger()
 
@@ -500,14 +500,18 @@ class KubeApply(Command):
     """Apply Kubernetes objects directly against the current kubeconfig
     context: server-side apply in barrier order, with optional pruning.
 
-    General-purpose primitive backing both scripts/bootstrap-argocd.py
-    (`--target bootstrap`, one-time -- gets ArgoCD running before it can
+    General-purpose primitive backing both one-time direct bootstraps
+    (`--target bootstrap` -- gets a GitOps engine running before it can
     sync itself) and `ekn validate`'s ephemeral-apiserver conformance runs
     (which apply the full `kubernetes.generated` set). Decrypts any object
     carrying a `sops:` metadata block (see ekn.sops) before applying it --
     SOPS-encrypted objects flow untouched through `ekn commit`'s GitOps
     path, but a direct apply has no ArgoCD+kustomize+ksops step to do that
-    decryption for it.
+    decryption for it. Also ensures every `kubernetes.sopsAgeIdentities`
+    entry exists as a Secret first (generating a fresh age keypair the
+    first time one is missing) -- any easykubenix consumer that needs a
+    SOPS-decrypting workload bootstrapped (e.g. argocd.nix's ksops
+    support) declares it there instead of a bespoke bootstrap script.
     """
     @classmethod
     def prog(cls) -> str:
@@ -524,16 +528,31 @@ class KubeApply(Command):
         False,
         help="Delete previously-applied (same discriminator) objects no longer present in this apply.",
     )
+    confirm_context: str | None = arg(
+        None,
+        help="Prompt for confirmation unless the current kubectl context ends with this name.",
+    )
 
     async def run(self) -> None:
+        if self.confirm_context is not None:
+            rc, out, _ = await _exec("kubectl", "config", "current-context")
+            current = out.strip()
+            if rc != 0 or not current.endswith(self.confirm_context):
+                _log.warning(f"current kubectl context is {current!r}, not *{self.confirm_context}")
+                answer = await asyncio.to_thread(input, "Continue anyway? [y/N] ")
+                if answer.strip().lower() != "y":
+                    raise SystemExit("Aborted.")
+
         uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
         try:
             cfg = await evaluate_kubeapply_config(self.file, uri, customer, self.attr, self.target)
         except NixError as exc:
             _log.error(exc.msg_without_ansi)
             raise SystemExit(1) from exc
-        objects = [await maybe_decrypt(obj) for obj in cfg["objects"]]
         api = await kr8s.asyncio.api()
+        if cfg["sops_age_identities"]:
+            await ensure_age_identities(cfg["sops_age_identities"], api=api)
+        objects = [await maybe_decrypt(obj) for obj in cfg["objects"]]
         try:
             await apply_and_prune(
                 objects,

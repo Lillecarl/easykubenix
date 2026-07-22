@@ -1,11 +1,34 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
-from typing import Any
+import re
+import tempfile
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import kr8s
+import structlog
+import yaml
+
+from ekn.apply import _build_object, ssa_apply
+
+if TYPE_CHECKING:
+    from kr8s._api import Api  # kr8s.asyncio.api() returns this, not kr8s.Api
+
+_log = structlog.get_logger()
 
 
 class SopsDecryptError(RuntimeError):
+    pass
+
+
+class AgeKeygenError(RuntimeError):
+    pass
+
+
+class SopsUpdateKeysError(RuntimeError):
     pass
 
 
@@ -49,4 +72,174 @@ async def maybe_decrypt(obj: dict[str, Any]) -> dict[str, Any]:
     return decrypted
 
 
-__all__ = ["SopsDecryptError", "maybe_decrypt"]
+def _public_key_from_identity_text(key_text: str) -> str:
+    return next(
+        line.split(":", 1)[1].strip()
+        for line in key_text.splitlines()
+        if line.startswith("# public key:")
+    )
+
+
+async def _generate_age_identity() -> str:
+    with tempfile.TemporaryDirectory() as tmp:
+        key_file = Path(tmp) / "key.txt"
+        proc = await asyncio.create_subprocess_exec(
+            "age-keygen",
+            "-o",
+            str(key_file),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise AgeKeygenError(f"age-keygen failed: {stderr.decode()}")
+        return key_file.read_text()
+
+
+def _add_recipient_to_sops_config(
+    config_file: str, sops_files: list[str], public_key: str
+) -> bool:
+    """Add `public_key` as an age recipient to every `creation_rules` entry
+    in `config_file` whose `path_regex` matches one of `sops_files` (matched
+    relative to `config_file`'s own directory, mirroring how SOPS itself
+    resolves path_regex). Idempotent -- a rule that already lists the key is
+    left untouched. Returns whether anything actually changed, so the caller
+    knows whether `sops updatekeys` needs to run at all.
+    """
+    path = Path(config_file)
+    config = yaml.safe_load(path.read_text()) or {}
+    rules = config.get("creation_rules") or []
+    if not isinstance(rules, list):
+        raise SopsUpdateKeysError(f"{config_file}: creation_rules is not a list")
+
+    base_dir = path.parent
+    relative_files = [str(Path(f).resolve().relative_to(base_dir.resolve())) for f in sops_files]
+
+    changed = False
+    for rule in rules:
+        pattern = rule.get("path_regex")
+        if not pattern or not any(re.search(pattern, f) for f in relative_files):
+            continue
+        existing = [k.strip() for k in (rule.get("age") or "").split(",") if k.strip()]
+        if public_key in existing:
+            continue
+        rule["age"] = ",".join([*existing, public_key])
+        changed = True
+
+    if changed:
+        path.write_text(yaml.safe_dump(config, sort_keys=False))
+    return changed
+
+
+async def _run_sops_updatekeys(config_file: str, sops_files: list[str]) -> None:
+    for sops_file in sops_files:
+        proc = await asyncio.create_subprocess_exec(
+            "sops",
+            "--config",
+            config_file,
+            "updatekeys",
+            "--yes",
+            sops_file,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise SopsUpdateKeysError(
+                f"sops updatekeys failed for {sops_file}: {stderr.decode() or stdout.decode()}"
+            )
+
+
+async def ensure_age_identities(
+    identities: list[dict[str, Any]],
+    *,
+    api: Api,
+    field_manager: str = "ekn",
+) -> None:
+    """Idempotently ensure each declared SOPS age decrypt identity exists as
+    a Secret, generating a fresh age keypair (via the real `age-keygen` CLI)
+    the first time one is missing, and -- when the identity declares a
+    `sopsConfigFile` -- registering its public key as a recipient there and
+    re-running `sops updatekeys` on `sopsFiles` so their data key is
+    rewrapped for it too.
+
+    `identities` is `kubernetes.sopsAgeIdentities` -- any easykubenix module
+    that needs a SOPS-decrypting workload (e.g. argocd.nix's ksops-enabled
+    repo-server) declares its need there instead of a bespoke bootstrap
+    script. This is the one place ekn actually generates key material and
+    edits a git-tracked file; everywhere else it only ever decrypts what
+    SOPS already produced (see `maybe_decrypt` above).
+
+    Deliberately raises (aborting the whole `ekn kubeapply` run before it
+    proceeds to actually apply anything) if either the `.sops.yaml` update
+    or `sops updatekeys` fails, rather than leaving a half-configured setup
+    where the identity Secret exists but nothing is encrypted for it yet.
+    Re-running after such a failure is safe: the Secret is left as-is (an
+    existing identity is never regenerated), and the config/updatekeys step
+    is retried since it only checks -- never assumes -- that it already ran.
+    """
+    for identity in identities:
+        namespace = identity["namespace"]
+        secret_name = identity["secretName"]
+        key = identity.get("key", "key.txt")
+
+        secret = await _build_object(
+            {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {"name": secret_name, "namespace": namespace},
+            },
+            api,
+        )
+        try:
+            await secret.async_refresh()
+            key_text = base64.b64decode(secret.raw["data"][key]).decode()
+        except kr8s.NotFoundError:
+            # The Secret's own namespace may not exist yet either (e.g. a
+            # fresh bootstrap target whose Namespace object hasn't been
+            # applied in this same `ekn kubeapply` run) -- ensure it
+            # directly rather than depending on apply ordering.
+            namespace_obj = await _build_object(
+                {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}}, api
+            )
+            await ssa_apply(namespace_obj, field_manager=field_manager)
+
+            key_text = await _generate_age_identity()
+
+            secret_obj = await _build_object(
+                {
+                    "apiVersion": "v1",
+                    "kind": "Secret",
+                    "metadata": {"name": secret_name, "namespace": namespace},
+                    "stringData": {key: key_text},
+                },
+                api,
+            )
+            await ssa_apply(secret_obj, field_manager=field_manager)
+            _log.info("created SOPS age identity", namespace=namespace, secret=secret_name)
+
+        public_key = _public_key_from_identity_text(key_text)
+
+        sops_config_file = identity.get("sopsConfigFile")
+        if not sops_config_file:
+            continue
+        sops_files = identity.get("sopsFiles") or []
+        if _add_recipient_to_sops_config(sops_config_file, sops_files, public_key):
+            await _run_sops_updatekeys(sops_config_file, sops_files)
+            _log.info(
+                "registered SOPS age recipient and ran sops updatekeys",
+                namespace=namespace,
+                secret=secret_name,
+                public_key=public_key,
+                config_file=sops_config_file,
+                sops_files=sops_files,
+            )
+
+
+__all__ = [
+    "AgeKeygenError",
+    "SopsDecryptError",
+    "SopsUpdateKeysError",
+    "ensure_age_identities",
+    "maybe_decrypt",
+]

@@ -422,6 +422,66 @@ in
       '';
       readOnly = true;
     };
+
+    sopsAgeIdentities = lib.mkOption {
+      type = lib.types.listOf (
+        lib.types.submodule {
+          options = {
+            namespace = lib.mkOption {
+              type = lib.types.nonEmptyStr;
+              description = "Namespace the identity Secret lives in.";
+            };
+            secretName = lib.mkOption {
+              type = lib.types.nonEmptyStr;
+              description = "Name of the Secret holding the age identity.";
+            };
+            key = lib.mkOption {
+              type = lib.types.nonEmptyStr;
+              default = "key.txt";
+              description = "Key within the Secret's data the age identity is stored under.";
+            };
+            sopsConfigFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.path;
+              default = null;
+              description = ''
+                Path to the `.sops.yaml` this identity's age public key should
+                be registered in as a recipient (idempotent -- skipped if
+                already present in every matching creation rule). Null (the
+                default) leaves `.sops.yaml` untouched; the public key is only
+                logged for manual handling.
+              '';
+            };
+            sopsFiles = lib.mkOption {
+              type = lib.types.listOf lib.types.path;
+              default = [ ];
+              description = ''
+                Already-SOPS-encrypted files to run `sops updatekeys` on after
+                the recipient is added to `sopsConfigFile`, so their data key
+                gets rewrapped for the new identity too. Only consulted when
+                `sopsConfigFile` is set.
+              '';
+            };
+          };
+        }
+      );
+      default = [ ];
+      description = ''
+        SOPS age decrypt identities some GitOps engine needs mounted as a
+        Secret before it can sync anything referencing them (e.g. ArgoCD's
+        ksops-enabled repo-server, see argocd.nix's `ksops.enable`). Purely
+        additive metadata -- any module wanting this generic bootstrap
+        behavior appends an entry here instead of hand-rolling its own
+        bootstrap script. `ekn kubeapply` ensures each declared identity
+        exists (generating a fresh age keypair the first time one is
+        missing) before applying, and -- when `sopsConfigFile` is set --
+        registers the public key as a recipient there and re-runs
+        `sops updatekeys` on `sopsFiles`, aborting the whole apply rather
+        than proceeding half-configured if either step fails. This is the
+        one place ekn actually generates key material -- everywhere else,
+        ekn only ever decrypts what SOPS already produced (see
+        `ekn.sops.maybe_decrypt`).
+      '';
+    };
   };
 
   config.kubernetes = {

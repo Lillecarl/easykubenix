@@ -250,11 +250,12 @@ async def evaluate_kubeapply_config(
     target: str | None,
 ) -> dict[str, Any]:
     """Resolve the object list `ekn kubeapply` should apply, plus the
-    `kluctl.discriminator`/`kluctl.resourcePriority` `apply_and_prune` needs.
+    `kluctl.discriminator`/`kluctl.resourcePriority` `apply_and_prune` needs
+    and `kubernetes.sopsAgeIdentities` (SOPS age decrypt identities some
+    consumer needs bootstrapped as a Secret -- see `ekn.sops.ensure_age_identities`).
 
-    `target` narrows to one `kubernetes.gitopsTargets` entry's objects (like
-    `bootstrap_objects()` in scripts/bootstrap-argocd.py does today, `.ekn`
-    routing metadata stripped); omitted, force_json's the full
+    `target` narrows to one `kubernetes.gitopsTargets` entry's objects,
+    `.ekn` routing metadata stripped; omitted, force_json's the full
     `kubernetes.generated` instead -- never both, so this only ever forces
     the one field it actually needs.
     """
@@ -307,11 +308,13 @@ async def evaluate_kubeapply_config(
 
         discriminator = await proxy.attr("kluctl").attr("discriminator").force_json()
         resource_priority = await proxy.attr("kluctl").attr("resourcePriority").force_json()
+        sops_age_identities = await proxy.attr("kubernetes").attr("sopsAgeIdentities").force_json()
 
         return {
             "objects": objects,
             "discriminator": discriminator,
             "resource_priority": resource_priority,
+            "sops_age_identities": sops_age_identities,
         }
 
 
