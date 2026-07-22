@@ -100,7 +100,12 @@ self: lib: {
       value
     else
       let
-        currentKey = lib.last (path ++ [ null ]);
+        # `path` includes this value's own key as its last element (see
+        # `walkWithPath`), except at the root where `path == []` -- guard
+        # that case explicitly, since `lib.last (path ++ [ null ])` (the
+        # previous form here) always evaluates to `null` regardless of
+        # `path` and silently disabled the `initContainers` exclusion below.
+        currentKey = if path == [ ] then null else lib.last path;
         # Heuristic to identify a list that should become a `_namedlist`.
         # A list is a candidate if all its elements are attribute sets that contain a `name` key.
         isNamedListCandidate =
