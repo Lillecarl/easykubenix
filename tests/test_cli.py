@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
 from ekn.cli import Commit, Deploy, Validate, _gitops_path
 from ekn.eval import evaluate_file, evaluate_flake_ekn
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests
@@ -16,17 +17,13 @@ CUSTOMER_NIX = """\
     config = {
       gitops = { enable = true; branch = "test-render"; };
       kubernetes = {
-        generatedByPath = {
-          default = {
-            ConfigMap = {
-              "my-config" = {
-                apiVersion = "v1"; kind = "ConfigMap";
-                metadata = { name = "my-config"; namespace = "default"; };
-                data = { key = "value"; };
-              };
-            };
-          };
-        };
+        generated = [
+          {
+            apiVersion = "v1"; kind = "ConfigMap";
+            metadata = { name = "my-config"; namespace = "default"; };
+            data = { key = "value"; };
+          }
+        ];
       };
     };
   };
@@ -86,7 +83,7 @@ class TestDiff:
         os.environ["EKN_REPO"] = str(git_repo)
         try:
             result = await evaluate_file(f, "customer1")
-            files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            files = flatten_manifests(result["config"]["kubernetes"]["generated"])
             commit_manifests(".", result["config"]["gitops"]["branch"], files, "seed")
             diff_out = diff_manifests(".", result["config"]["gitops"]["branch"], files)
             assert diff_out is None
@@ -99,7 +96,7 @@ class TestDiff:
 { app = {
     config = {
       gitops = { enable = false; };
-      kubernetes = { generatedByPath = {}; };
+      kubernetes = { generated = []; };
     };
   };
 }
@@ -113,19 +110,15 @@ class TestDiff:
         os.environ["EKN_REPO"] = str(git_repo)
         try:
             result = await evaluate_file(f, "customer1")
-            default_files = flatten_manifests({
-                "default": {
-                    "ConfigMap": {
-                        "my-config": {
-                            "apiVersion": "v1", "kind": "ConfigMap",
-                            "metadata": {"name": "my-config", "namespace": "default"},
-                            "data": {"key": "original"},
-                        }
-                    }
-                },
-            })
+            default_files = flatten_manifests([
+                {
+                    "apiVersion": "v1", "kind": "ConfigMap",
+                    "metadata": {"name": "my-config", "namespace": "default"},
+                    "data": {"key": "original"},
+                }
+            ])
             commit_manifests(".", "override-branch", default_files, "first")
-            new_files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            new_files = flatten_manifests(result["config"]["kubernetes"]["generated"])
             diff_out = diff_manifests(".", "override-branch", new_files)
             assert diff_out is not None
             assert "my-config" in diff_out or "test" in diff_out
@@ -196,7 +189,7 @@ class TestCommit:
         os.environ["EKN_REPO"] = str(git_repo)
         try:
             result = await evaluate_file(f, "customer1")
-            files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            files = flatten_manifests(result["config"]["kubernetes"]["generated"])
             commit_id = commit_manifests(".", result["config"]["gitops"]["branch"], files, "test")
             assert isinstance(commit_id, str)
             assert len(commit_id) > 0
@@ -209,7 +202,7 @@ class TestCommit:
         os.environ["EKN_REPO"] = str(git_repo)
         try:
             result = await evaluate_file(f, "customer1")
-            files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            files = flatten_manifests(result["config"]["kubernetes"]["generated"])
             commit_manifests(".", result["config"]["gitops"]["branch"], files, "first")
             commit_id = commit_manifests(".", result["config"]["gitops"]["branch"], files, "second")
             assert isinstance(commit_id, str)
@@ -222,7 +215,7 @@ class TestCommit:
         os.environ["EKN_REPO"] = str(git_repo)
         try:
             result = await evaluate_file(f, "customer1")
-            files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            files = flatten_manifests(result["config"]["kubernetes"]["generated"])
             commit_id = commit_manifests(".", "override", files, "override")
             assert isinstance(commit_id, str)
         finally:
@@ -235,13 +228,14 @@ EXAMPLE_FLAKE = str((Path(__file__).resolve().parent.parent / "docs/examples/exa
 class TestFlakeEval:
     async def test_flake_eval(self) -> None:
         result = await evaluate_flake_ekn(EXAMPLE_FLAKE, "myapp")
-        assert "default" in result["config"]["kubernetes"]["generatedByPath"]
+        namespaces = {obj["metadata"]["namespace"] for obj in result["config"]["kubernetes"]["generated"]}
+        assert "default" in namespaces
 
     async def test_flake_diff(self, git_repo: Path) -> None:
         os.environ["EKN_REPO"] = str(git_repo)
         try:
             result = await evaluate_flake_ekn(EXAMPLE_FLAKE, "myapp")
-            files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            files = flatten_manifests(result["config"]["kubernetes"]["generated"])
             commit_manifests(".", "flake-test", files, "seed")
             diff_out = diff_manifests(".", "flake-test", files)
             assert diff_out is None
@@ -252,7 +246,7 @@ class TestFlakeEval:
         os.environ["EKN_REPO"] = str(git_repo)
         try:
             result = await evaluate_flake_ekn(EXAMPLE_FLAKE, "myapp")
-            files = flatten_manifests(result["config"]["kubernetes"]["generatedByPath"])
+            files = flatten_manifests(result["config"]["kubernetes"]["generated"])
             commit_id = commit_manifests(".", "flake-test", files, "flake-test")
             assert isinstance(commit_id, str)
         finally:

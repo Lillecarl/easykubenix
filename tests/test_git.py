@@ -6,32 +6,24 @@ import pytest
 
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests
 
-SAMPLE_MANIFESTS = {
-    "default": {
-        "ConfigMap": {
-            "my-config": {
-                "apiVersion": "v1",
-                "kind": "ConfigMap",
-                "metadata": {"name": "my-config", "namespace": "default"},
-                "data": {"key": "value"},
-            }
-        }
+SAMPLE_MANIFESTS = [
+    {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "my-config", "namespace": "default"},
+        "data": {"key": "value"},
     },
-    "kube-system": {
-        "ConfigMap": {
-            "cluster-config": {
-                "apiVersion": "v1",
-                "kind": "ConfigMap",
-                "metadata": {"name": "cluster-config", "namespace": "kube-system"},
-                "data": {"setting": "true"},
-            }
-        }
+    {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "cluster-config", "namespace": "kube-system"},
+        "data": {"setting": "true"},
     },
-}
+]
 
 
 class TestFlattenManifests:
-    def test_dict(self) -> None:
+    def test_list(self) -> None:
         files = flatten_manifests(SAMPLE_MANIFESTS)
         paths = [p for p, _ in files]
         assert "default/ConfigMap/my-config.yaml" in paths
@@ -48,9 +40,9 @@ class TestFlattenManifests:
         paths = [p for p, _ in files]
         assert "clusters/prod/default/ConfigMap/my-config.yaml" in paths
 
-    def test_not_dict(self) -> None:
-        with pytest.raises(TypeError, match="expected dict"):
-            flatten_manifests([1, 2, 3])
+    def test_not_list(self) -> None:
+        with pytest.raises(TypeError, match="expected list"):
+            flatten_manifests({"default": {}})
 
 
 class TestCommit:
@@ -79,18 +71,14 @@ class TestCommit:
         files = flatten_manifests(SAMPLE_MANIFESTS)
         commit_manifests(".", "test-render", files, "first")
 
-        changed = {
-            "default": {
-                "ConfigMap": {
-                    "my-config": {
-                        "apiVersion": "v1",
-                        "kind": "ConfigMap",
-                        "metadata": {"name": "my-config", "namespace": "default"},
-                        "data": {"key": "updated"},
-                    }
-                }
+        changed = [
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "my-config", "namespace": "default"},
+                "data": {"key": "updated"},
             },
-        }
+        ]
         new_files = flatten_manifests(changed)
         result = diff_manifests(".", "test-render", new_files)
         assert result is not None

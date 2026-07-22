@@ -137,4 +137,3 @@ class TestValidationConfig:
         assert c["validation"]["etcdPackage"]["outPath"].startswith("/nix/store/")
         assert c["kluctl"]["script"]["outPath"].startswith("/nix/store/")
         assert c["internal"]["manifestJSONFile"]["outPath"].startswith("/nix/store/")
-        assert "generatedByPath" in c["kubernetes"]

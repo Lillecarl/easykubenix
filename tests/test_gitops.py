@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+
 from ekn.cli import _gitops_file_groups
 from ekn.gitops import GitOpsTarget, GitOpsTargetError, routed_manifests
 
@@ -26,10 +27,7 @@ def test_argo_target_routes_payload() -> None:
             }
         },
     }
-    manifests = {
-        "default": {"Deployment": {"api": _deployment()}},
-        "argocd": {"Application": {"apps": application}},
-    }
+    manifests = [_deployment(), application]
     routing = {
         "default": {
             "Deployment": {
@@ -65,13 +63,7 @@ def test_flux_target_routes_payload() -> None:
             "sourceRef": {"kind": "GitRepository", "name": "platform"},
         },
     }
-    manifests = {
-        "default": {"Deployment": {"api": _deployment()}},
-        "flux-system": {
-            "GitRepository": {"platform": source},
-            "Kustomization": {"apps": kustomization},
-        },
-    }
+    manifests = [_deployment(), source, kustomization]
     routing = {
         "default": {
             "Deployment": {
@@ -89,7 +81,7 @@ def test_flux_target_routes_payload() -> None:
 
 
 def test_route_requires_fields() -> None:
-    manifests = {"default": {"Deployment": {"api": _deployment()}}}
+    manifests = [_deployment()]
     routing = {"default": {"Deployment": {"api": [{}]}}}
 
     with pytest.raises(GitOpsTargetError, match="branch"):
@@ -112,10 +104,7 @@ def test_file_groups_use_target_branch_and_path() -> None:
     result = {
         "config": {
             "kubernetes": {
-                "generatedByPath": {
-                    "default": {"Deployment": {"api": _deployment()}},
-                    "argocd": {"Application": {"apps": application}},
-                },
+                "generated": [_deployment(), application],
                 "eknByPath": {
                     "default": {
                         "Deployment": {
