@@ -4,12 +4,12 @@
   config,
   lib,
   pkgs,
+  ekn,
   ...
 }:
 with lib;
 let
   cfg = config.helm;
-  settingsFormat = pkgs.formats.json { };
   globalConfig = config;
 in
 {
@@ -41,7 +41,7 @@ in
               };
               values = mkOption {
                 description = "Values to pass to chart";
-                type = settingsFormat.type;
+                type = ekn.lib.kubeValueType;
                 default = { };
               };
               kubeVersion = mkOption {
@@ -51,7 +51,7 @@ in
               };
               overrides = mkOption {
                 description = "Overrides to apply to all chart objects, don't do namespace here";
-                type = lib.types.listOf (types.functionTo settingsFormat.type);
+                type = lib.types.listOf (types.functionTo ekn.lib.kubeValueType);
                 default = [ ];
               };
               convertLists = mkOption {
@@ -98,7 +98,7 @@ in
 
               objects = mkOption {
                 description = "Generated kubernetes objects";
-                type = types.listOf settingsFormat.type;
+                type = types.listOf ekn.lib.kubeValueType;
                 default = [ ];
               };
             };

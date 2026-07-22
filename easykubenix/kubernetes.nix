@@ -2,11 +2,11 @@
   config,
   pkgs,
   lib,
+  ekn,
   ...
 }:
 let
   cfg = config.kubernetes;
-  settingsFormat = pkgs.formats.json { };
   # Type for a single top-level `metadata.labels`/`metadata.annotations`
   # value: real strings pass straight through; when coercion is enabled,
   # `lib.types.coercedTo` handles bool/int conversion (and gives a proper
@@ -18,7 +18,7 @@ let
   # submodule to hook a type into, and are deliberately NOT covered: giving
   # those the same treatment would mean walking/typing arbitrary depth of
   # every object on every eval, which is exactly the per-leaf
-  # `settingsFormat.type` cost `kubernetes.crds` exists to avoid, for a case
+  # `ekn.lib.kubeValueType` cost `kubernetes.crds` exists to avoid, for a case
   # (nested labels/annotations with a stray bool/int) that hasn't come up in
   # practice.
   labelValueType =
@@ -28,6 +28,13 @@ let
       )
     else
       lib.types.str;
+  # Rendered Helm charts commonly emit `annotations: null`/`labels: null`
+  # (a YAML/Helm convention for "none set", rather than omitting the key
+  # or emitting `{}`) -- coerce that to an empty attrset rather than
+  # rejecting it outright.
+  labelsAnnotationsType = lib.types.coercedTo (lib.types.enum [ null ]) (_: { }) (
+    lib.types.attrsOf labelValueType
+  );
   # `metadata.labels`/`metadata.annotations` (the typed options above)
   # default to `{ }` so an object that never sets either doesn't throw when
   # serialized -- strip them back out here when still empty, so an object
@@ -108,7 +115,7 @@ in
     package = lib.mkPackageOption pkgs "kubernetes" { };
 
     templates = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.functionTo settingsFormat.type);
+      type = lib.types.attrsOf (lib.types.functionTo ekn.lib.kubeValueType);
       default = { };
       description = "Typed resource template functions, usually created with the Adios-backed `template` helper.";
     };
@@ -132,7 +139,7 @@ in
                     lib.types.submodule (
                       { name, ... }:
                       {
-                        freeformType = settingsFormat.type;
+                        freeformType = ekn.lib.kubeValueType;
                         options = {
                           ekn = lib.mkOption {
                             type = lib.types.submodule {
@@ -166,18 +173,18 @@ in
                           };
                           metadata = lib.mkOption {
                             type = lib.types.submodule {
-                              freeformType = settingsFormat.type;
+                              freeformType = ekn.lib.kubeValueType;
                               options = {
                                 name = lib.mkOption {
                                   type = lib.types.str;
                                   default = name;
                                 };
                                 labels = lib.mkOption {
-                                  type = lib.types.attrsOf labelValueType;
+                                  type = labelsAnnotationsType;
                                   default = { };
                                 };
                                 annotations = lib.mkOption {
-                                  type = lib.types.attrsOf labelValueType;
+                                  type = labelsAnnotationsType;
                                   default = { };
                                 };
                               };
@@ -217,7 +224,7 @@ in
     crds = lib.mkOption {
       # `types.attrs` never recurses into a value's content (just checks
       # `isAttrs` on each list element) -- unlike `kubernetes.objects`'
-      # per-object submodule, whose freeformType is settingsFormat.type (a
+      # per-object submodule, whose freeformType is ekn.lib.kubeValueType (a
       # real recursive JSON-schema-shaped type: nullOr(oneOf[bool int float
       # str path (attrsOf ...) (listOf ...)])). Profiling `ekn render` on a
       # CRD-heavy environment showed nixpkgs lib.types' `either`/`oneOf`
@@ -239,7 +246,7 @@ in
         Pre-rendered, already-complete Kubernetes objects (typically
         CustomResourceDefinitions from Nix-rendered Helm charts) that bypass
         `kubernetes.objects`' per-object submodule and its expensive
-        settingsFormat.type value-checking entirely. Still passes through
+        ekn.lib.kubeValueType value-checking entirely. Still passes through
         `ekn.gitOpsTarget` GitOps routing and the final YAML render, just
         skips generators/transformers/filters and the auto-defaulting
         `kubernetes.objects` provides.
@@ -376,7 +383,7 @@ in
 
     # generated/generatedByPath/generatedWithEkn/gitopsTargets are readOnly, fully-computed
     # outputs -- there is nothing left to override/merge on them, so
-    # settingsFormat.type's recursive per-leaf JSON-schema-style validation
+    # ekn.lib.kubeValueType's recursive per-leaf JSON-schema-style validation
     # buys nothing here and would re-force the exact same expensive
     # either/oneOf machinery `kubernetes.crds` was added to avoid (Nix's
     # laziness means forcing these option *values* re-enters that machinery

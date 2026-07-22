@@ -2,11 +2,11 @@
   config,
   pkgs,
   lib,
+  ekn,
   ...
 }:
 let
   cfg = config.validation;
-  settingsFormat = pkgs.formats.json { };
   debugpipe = if (!cfg.debug) then "&>/dev/null" else "";
 in
 {
@@ -15,7 +15,7 @@ in
     etcdPackage = lib.mkPackageOption pkgs "etcd" { };
     kubeconformPackage = lib.mkPackageOption pkgs "kubeconform" { };
     kubeadmConfig = lib.mkOption {
-      type = settingsFormat.type;
+      type = ekn.lib.kubeValueType;
     };
     podSubnet = lib.mkOption {
       type = lib.types.str;

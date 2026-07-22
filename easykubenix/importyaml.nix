@@ -2,12 +2,12 @@
   config,
   pkgs,
   lib,
+  ekn,
   ...
 }:
 with lib;
 let
   cfg = config.importyaml;
-  settingsFormat = pkgs.formats.json { };
   globalConfig = config;
 
   importyaml = types.submodule (
@@ -23,7 +23,7 @@ let
         };
         overrides = mkOption {
           description = "Overrides to apply to all chart objects, don't do namespace here";
-          type = lib.types.listOf (types.functionTo settingsFormat.type);
+          type = lib.types.listOf (types.functionTo ekn.lib.kubeValueType);
           default = [ ];
         };
         convertLists = mkOption {

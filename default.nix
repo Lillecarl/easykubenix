@@ -55,6 +55,15 @@ let
             # `values`) stays overridable leaf-by-leaf instead of a caller's
             # single definition replacing the whole thing.
             mkDefaults = lib.mapAttrsRecursive (_: v: lib.mkDefault v);
+            lib = {
+              # Recursive JSON-ish value type (drop-in replacement for
+              # `pkgs.formats.json{}.type`/`settingsFormat.type`) that also
+              # accepts an attrset-keyed-by-`name` shorthand anywhere a list
+              # of named things (containers, ownerReferences, ...) would go,
+              # merged via ordinary `attrsOf` semantics and always emitted
+              # back out as a real list. See kubeValueType.nix.
+              kubeValueType = import ./easykubenix/lib/kubeValueType.nix { inherit lib; };
+            };
           };
         };
       }
@@ -88,7 +97,12 @@ in
   deploymentScript = eval.config.kluctl.script;
   validationScript = eval.config.validation.script;
   passthru = {
-    inherit (nanopynix) nanopynix nanopynix-bindings nanopynix-helpers grpclib-transports;
+    inherit (nanopynix)
+      nanopynix
+      nanopynix-bindings
+      nanopynix-helpers
+      grpclib-transports
+      ;
     inherit
       inputs
       pkgs

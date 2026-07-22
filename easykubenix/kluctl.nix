@@ -2,11 +2,11 @@
   config,
   pkgs,
   lib,
+  ekn,
   ...
 }:
 let
   cfg = config.kluctl;
-  settingsFormat = pkgs.formats.json { };
 
   # Objects routed (via kubernetes.gitopsTargets / ekn.gitOpsTarget) to one of
   # cfg.excludeGitopsTargets already have their own deployment path -- an
@@ -17,16 +17,19 @@ let
   # resets). Everything NOT in excludeGitopsTargets -- including objects
   # routed to GitOps targets that aren't live yet -- keeps deploying via
   # kluctl as before, so a GitOps migration can move one target at a time.
-  excludedGitopsKeys = lib.genAttrs (
-    lib.concatMap (
-      name:
-      map (
-        object: "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}"
-      ) config.kubernetes.gitopsTargets.${name}.objects
-    ) (lib.filter (name: config.kubernetes.gitopsTargets ? ${name}) cfg.excludeGitopsTargets)
-  ) (_: true);
+  excludedGitopsKeys =
+    lib.genAttrs
+      (lib.concatMap (
+        name:
+        map (
+          object: "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}"
+        ) config.kubernetes.gitopsTargets.${name}.objects
+      ) (lib.filter (name: config.kubernetes.gitopsTargets ? ${name}) cfg.excludeGitopsTargets))
+      (_: true);
   isExcludedFromKluctl =
-    object: excludedGitopsKeys ? "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}";
+    object:
+    excludedGitopsKeys
+    ? "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}";
   kluctlGenerated = lib.filter (object: !(isExcludedFromKluctl object)) config.kubernetes.generated;
 in
 {
@@ -72,7 +75,7 @@ in
         default = "";
       };
       project = lib.mkOption {
-        type = settingsFormat.type;
+        type = ekn.lib.kubeValueType;
         description = "Anything to be rendered into .kluctl.yaml";
         default = {
           targets = [ { name = "local"; } ];
@@ -127,7 +130,7 @@ in
         };
       };
       deployment = lib.mkOption {
-        type = settingsFormat.type;
+        type = ekn.lib.kubeValueType;
         description = "Anything to be rendered into deployment.yaml";
         default = { };
       };
@@ -188,9 +191,7 @@ in
           content = builtins.toJSON {
             apiVersion = "v1";
             kind = "List";
-            items = lib.filter (
-              v: !lib.elem v.kind (lib.attrNames cfg.resourcePriority)
-            ) kluctlGenerated;
+            items = lib.filter (v: !lib.elem v.kind (lib.attrNames cfg.resourcePriority)) kluctlGenerated;
           };
         };
       }
