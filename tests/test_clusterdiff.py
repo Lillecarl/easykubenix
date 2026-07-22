@@ -53,12 +53,31 @@ class FakeApi:
         yield _FakeResponse(result)
 
     async def async_lookup_kind(self, lookup: str) -> tuple[str, str, bool]:
-        raise NotImplementedError("only builtin kinds are used in these tests")
+        # Mirrors kr8s's own async_lookup_kind: raises ValueError for a
+        # kind it can't resolve to a plural/namespaced REST endpoint (e.g.
+        # a CRD that hasn't been applied to the cluster yet).
+        raise ValueError(f"Kind {lookup.split('.', 1)[0].lower()} not found.")
 
 
 def _not_found() -> kr8s.ServerError:
     response = httpx.Response(404, request=httpx.Request("GET", "http://x/"))
     return kr8s.ServerError("not found", response=response)
+
+
+def _missing_namespace(namespace: str) -> kr8s.ServerError:
+    response = httpx.Response(
+        404,
+        request=httpx.Request("PATCH", "http://x/"),
+        json={
+            "kind": "Status",
+            "status": "Failure",
+            "message": f'namespaces "{namespace}" not found',
+            "reason": "NotFound",
+            "details": {"name": namespace, "kind": "namespaces"},
+            "code": 404,
+        },
+    )
+    return kr8s.ServerError(f'namespaces "{namespace}" not found', response=response)
 
 
 def _config_map(name: str, data: dict[str, str]) -> dict[str, Any]:
@@ -141,3 +160,42 @@ class TestClusterDiff:
 
         assert "-  key: old" in result
         assert "+  key: updated" in result
+
+    async def test_missing_namespace_shows_as_full_addition(self) -> None:
+        spec = _config_map("argocd-cm", {"key": "value"})
+        spec["metadata"]["namespace"] = "argocd"
+        api = FakeApi(
+            {
+                ("GET", "configmaps/argocd-cm"): _not_found(),
+                ("PATCH", "configmaps/argocd-cm"): _missing_namespace("argocd"),
+            }
+        )
+
+        result = await cluster_diff([spec], api=api)  # type: ignore[arg-type]
+
+        assert "argocd/ConfigMap/argocd-cm" in result
+        assert "+data:" in result
+        assert "+  key: value" in result
+
+    async def test_unregistered_kind_is_reported_not_crashed(self) -> None:
+        application = {
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "Application",
+            "metadata": {"name": "bootstrap", "namespace": "argocd"},
+            "spec": {},
+        }
+        cfg = _config_map("cfg", {"key": "value"})
+        api = FakeApi(
+            {
+                ("GET", "configmaps/cfg"): cfg,
+                ("PATCH", "configmaps/cfg"): cfg,
+            }
+        )
+
+        result = await cluster_diff([application, cfg], api=api)  # type: ignore[arg-type]
+
+        assert "argocd/Application/bootstrap" in result
+        assert "not yet registered" in result
+        # The one resolvable object still gets a real (empty, matching) diff --
+        # one bad kind doesn't abort the whole run.
+        assert result.count("#") == 1

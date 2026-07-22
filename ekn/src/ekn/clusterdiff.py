@@ -57,6 +57,24 @@ def _object_label(spec: dict[str, Any]) -> str:
     return f"{namespace}/{kind}/{name}"
 
 
+def _is_missing_namespace_error(exc: kr8s.ServerError) -> bool:
+    """True for the specific 404 a dry-run apply gets when the object's own
+    *namespace* doesn't exist yet -- e.g. a fresh bootstrap target where the
+    Namespace object is itself one of the objects being diffed/applied.
+    Distinct from the object itself being 404 (kr8s.NotFoundError, from
+    async_refresh) -- this one comes from the raw dry-run PATCH, which
+    doesn't get that translation.
+    """
+    response = exc.response
+    if response is None or response.status_code != 404:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("details", {}).get("kind") == "namespaces"
+
+
 async def cluster_diff(
     objects: list[dict[str, Any]],
     *,
@@ -73,7 +91,21 @@ async def cluster_diff(
     for spec in sorted(objects, key=_object_label):
         label = _object_label(spec)
 
-        live_obj = await _build_object(spec, api)
+        # A kind whose CRD hasn't landed on this cluster yet (e.g. a fresh
+        # bootstrap target that hasn't been applied yet) can't be resolved
+        # to a plural/namespaced REST endpoint at all -- kr8s's own
+        # discovery raises ValueError for it, distinct from the object
+        # itself just not existing (kr8s.NotFoundError, handled below).
+        # Surface this per-object instead of aborting the whole diff.
+        try:
+            live_obj = await _build_object(spec, api)
+        except ValueError as exc:
+            chunks.append(
+                f"# {label}: cannot diff -- {exc} (kind not yet registered on "
+                "this cluster; its CRD would need to apply first)\n"
+            )
+            continue
+
         try:
             await live_obj.async_refresh()
             live_yaml = _dump(live_obj.raw)
@@ -81,7 +113,16 @@ async def cluster_diff(
             live_yaml = ""
 
         desired_obj = await _build_object(spec, api)
-        predicted = await ssa_apply(desired_obj, field_manager=field_manager, dry_run=True)
+        try:
+            predicted = await ssa_apply(desired_obj, field_manager=field_manager, dry_run=True)
+        except kr8s.ServerError as exc:
+            if not _is_missing_namespace_error(exc):
+                raise
+            # The server can't compute a merged/defaulted result against a
+            # namespace that doesn't exist yet -- fall back to the desired
+            # spec itself so this still reads as "would be newly created"
+            # (matching the plain new-object case) instead of aborting.
+            predicted = spec
         predicted_yaml = _dump(predicted)
 
         if live_yaml == predicted_yaml:
