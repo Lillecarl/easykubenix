@@ -7,8 +7,9 @@ import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path as _Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import kr8s.asyncio
 import rich.traceback
@@ -16,6 +17,9 @@ import structlog
 from anyio import Path
 from clypi import Command, Positional, arg
 from nanopynix import NixError
+from nanopynix.models import JsonValue
+from nanopynix.primops import from_yaml11_stream, from_yaml_stream, to_yaml
+from pydantic import TypeAdapter, ValidationError
 
 from ekn.apply import apply_and_prune
 from ekn.eval import (
@@ -510,9 +514,72 @@ class SplitManifest(Command):
             await dest.write_text(content)
 
 
+_json_value_adapter: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
+_json_value_list_adapter: TypeAdapter[list[JsonValue]] = TypeAdapter(list[JsonValue])
+
+_YAML_STREAM_PARSERS: dict[str, Callable[[str], list[JsonValue]]] = {
+    "yaml11": from_yaml11_stream,
+    "yaml12": from_yaml_stream,
+}
+
+
+class YamlToJson(Command):
+    """Parse a YAML document stream on stdin and dump it as a JSON array on stdout.
+
+    Internal: the IFD-derivation fallback importyaml.nix shells out to when
+    nanopynix's fromYAML11Stream/fromYAMLStream primops aren't registered
+    (plain `nix build`/`nix eval`, no ekn worker attached). Reuses the exact
+    same nanopynix.primops YAML-parsing code the in-process primop path
+    uses, so both paths agree on YAML 1.1 vs 1.2 scalar semantics (e.g. a
+    volume's `defaultMode: 0644` as octal) -- unlike the `yq`-based approach
+    this replaced. Not intended for interactive use.
+    """
+    yaml_version: Literal["yaml11", "yaml12"] = arg(
+        "yaml12", help="YAML version to parse the input stream with."
+    )
+
+    @classmethod
+    def prog(cls) -> str:
+        return "_yamlToJson"
+
+    async def run(self) -> None:
+        source = sys.stdin.read()
+        try:
+            docs = _YAML_STREAM_PARSERS[self.yaml_version](source)
+        except ValueError as exc:
+            _log.error(str(exc))
+            raise SystemExit(1) from exc
+        sys.stdout.buffer.write(_json_value_list_adapter.dump_json(docs))
+
+
+class JsonToYaml(Command):
+    """Parse a JSON value on stdin and dump it as YAML on stdout.
+
+    Internal: the reverse of `_yamlToJson`, reusing nanopynix's `to_yaml`
+    (root lists render as a `---`-separated document stream) so a
+    derivation-fallback path stays byte-for-byte consistent with the
+    in-process `toYAML` primop. Not intended for interactive use.
+    """
+
+    @classmethod
+    def prog(cls) -> str:
+        return "_jsonToYAML"
+
+    async def run(self) -> None:
+        data = sys.stdin.buffer.read()
+        try:
+            value = _json_value_adapter.validate_json(data)
+        except ValidationError as exc:
+            _log.error(str(exc))
+            raise SystemExit(1) from exc
+        sys.stdout.write(to_yaml(value))
+
+
 class Ekn(Command):
     """easykubenix CLI — evaluate Nix and manage GitOps release branches."""
-    subcommand: Deploy | Eval | Render | Diff | Commit | Validate | SplitManifest | None = None
+    subcommand: (
+        Deploy | Eval | Render | Diff | Commit | Validate | SplitManifest | YamlToJson | JsonToYaml | None
+    ) = None
     file: _Path | None = arg(None, short="f", help="Nix file to evaluate.")
     flake: str | None = arg(None, help="Flake reference (e.g. '.#myconfig'). Evaluates outputs.eknConfig.<system>.<attr>.")
     attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from ekn.cli import Commit, Deploy, Validate, _gitops_path
+from ekn.cli import Commit, Deploy, JsonToYaml, Validate, YamlToJson, _gitops_path
 from ekn.eval import evaluate_file, evaluate_flake_ekn
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests
 
@@ -143,6 +146,127 @@ class TestDiff:
         assert diff_out is not None
         assert "clusters/demo/none/Namespace/demo.yaml" in diff_out
         assert "flake.nix" not in diff_out
+
+
+class _FakeStdin:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self.buffer = io.BytesIO(data)
+
+    def read(self) -> str:
+        return self._data.decode()
+
+
+class _FakeStdout:
+    def __init__(self) -> None:
+        self.buffer = io.BytesIO()
+        self._text_parts: list[str] = []
+
+    def write(self, text: str) -> None:
+        self._text_parts.append(text)
+
+    @property
+    def text(self) -> str:
+        return "".join(self._text_parts)
+
+
+class TestYamlJsonConversion:
+    """`ekn _yamlToJson`/`ekn _jsonToYAML` -- the hidden CLI subcommands
+    importyaml.nix's derivation fallback shells out to instead of `yq`, so
+    that path shares nanopynix's YAML-parsing code (and its yaml11/yaml12
+    scalar-resolution differences) instead of yq's."""
+
+    async def test_yaml_to_json_defaults_to_yaml12_decimal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stdout = _FakeStdout()
+        monkeypatch.setattr(sys, "stdin", _FakeStdin(b"mode: 0644\n"))
+        monkeypatch.setattr(sys, "stdout", stdout)
+        cmd = object.__new__(YamlToJson)
+        cmd.yaml_version = "yaml12"
+
+        await YamlToJson.run(cmd)
+
+        assert json.loads(stdout.buffer.getvalue()) == [{"mode": 644}]
+
+    async def test_yaml_to_json_yaml11_resolves_octal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stdout = _FakeStdout()
+        monkeypatch.setattr(sys, "stdin", _FakeStdin(b"mode: 0644\n"))
+        monkeypatch.setattr(sys, "stdout", stdout)
+        cmd = object.__new__(YamlToJson)
+        cmd.yaml_version = "yaml11"
+
+        await YamlToJson.run(cmd)
+
+        assert json.loads(stdout.buffer.getvalue()) == [{"mode": 420}]
+
+    async def test_yaml_to_json_multi_document_stream(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stdout = _FakeStdout()
+        monkeypatch.setattr(sys, "stdin", _FakeStdin(b"a: 1\n---\nb: 2\n"))
+        monkeypatch.setattr(sys, "stdout", stdout)
+        cmd = object.__new__(YamlToJson)
+        cmd.yaml_version = "yaml12"
+
+        await YamlToJson.run(cmd)
+
+        assert json.loads(stdout.buffer.getvalue()) == [{"a": 1}, {"b": 2}]
+
+    async def test_yaml_to_json_preserves_empty_documents_as_null(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `_yamlToJson` dumps the raw parsed document stream -- dropping
+        # empty/null documents (e.g. a leading `---` in a K8s manifest
+        # bundle) is importyaml.nix's job, applied uniformly to both the
+        # in-process primop path and this CLI fallback, same as
+        # renderChart.nix's `rendered = lib.filter (object: object != null)`.
+        stdout = _FakeStdout()
+        monkeypatch.setattr(sys, "stdin", _FakeStdin(b"---\n---\na: 1\n"))
+        monkeypatch.setattr(sys, "stdout", stdout)
+        cmd = object.__new__(YamlToJson)
+        cmd.yaml_version = "yaml12"
+
+        await YamlToJson.run(cmd)
+
+        assert json.loads(stdout.buffer.getvalue()) == [None, {"a": 1}]
+
+    async def test_json_to_yaml_renders_a_document_stream(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stdout = _FakeStdout()
+        payload = json.dumps([{"kind": "ConfigMap", "metadata": {"name": "foo"}}]).encode()
+        monkeypatch.setattr(sys, "stdin", _FakeStdin(payload))
+        monkeypatch.setattr(sys, "stdout", stdout)
+        cmd = object.__new__(JsonToYaml)
+
+        await JsonToYaml.run(cmd)
+
+        assert stdout.text.startswith("---\n")
+        assert "kind: ConfigMap" in stdout.text
+        assert "name: foo" in stdout.text
+
+    async def test_yaml_to_json_to_yaml_round_trips(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        source = b"kind: ConfigMap\nmetadata:\n  name: foo\ndata:\n  mode: 0644\n"
+        to_json_stdout = _FakeStdout()
+        monkeypatch.setattr(sys, "stdin", _FakeStdin(source))
+        monkeypatch.setattr(sys, "stdout", to_json_stdout)
+        to_json = object.__new__(YamlToJson)
+        to_json.yaml_version = "yaml11"
+        await YamlToJson.run(to_json)
+        [parsed] = json.loads(to_json_stdout.buffer.getvalue())
+        assert parsed == {"kind": "ConfigMap", "metadata": {"name": "foo"}, "data": {"mode": 420}}
+
+        to_yaml_stdout = _FakeStdout()
+        monkeypatch.setattr(sys, "stdin", _FakeStdin(json.dumps(parsed).encode()))
+        monkeypatch.setattr(sys, "stdout", to_yaml_stdout)
+        to_yaml_cmd = object.__new__(JsonToYaml)
+        await JsonToYaml.run(to_yaml_cmd)
+        assert "mode: 420" in to_yaml_stdout.text
 
 
 class TestCommit:

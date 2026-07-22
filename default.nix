@@ -63,6 +63,14 @@ let
               # merged via ordinary `attrsOf` semantics and always emitted
               # back out as a real list. See kubeValueType.nix.
               kubeValueType = import ./easykubenix/lib/kubeValueType.nix { inherit lib; };
+              # Shared YAML-stream parser (primop path + `ekn _yamlToJson`
+              # derivation fallback) used by importyaml.nix and helm.nix so
+              # neither hand-rolls the primop-vs-CLI-fallback dispatch. See
+              # parseYamlStream.nix.
+              parseYAMLStream = import ./easykubenix/lib/parseYamlStream.nix {
+                inherit lib pkgs;
+                eknPackage = ekn;
+              };
             };
           };
         };

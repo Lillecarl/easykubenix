@@ -50,20 +50,20 @@ let
   # executed as a derivation is a one-time cost; parsing its cached output
   # then happens entirely in-process (see `parsed` below), no subprocess/RPC
   # hop at all.
-  resourcesYaml =
-    runCommand "${name}-rendered.yaml" { nativeBuildInputs = [ kubernetes-helm ]; }
-      ''
-        helm template "${name}" \
-          --namespace "${namespace}" \
-          --include-crds \
-          ${lib.optionalString (values != { }) "-f ${valuesJsonFile}"} \
-          ${lib.optionalString (kubeVersion != null) "--kube-version ${kubeVersion}"} \
-          ${lib.optionalString noHooks "--no-hooks"} \
-          ${lib.optionalString (
-            apiVersions != null && apiVersions != [ ]
-          ) "--api-versions ${lib.concatStringsSep "," apiVersions}"} \
-          ${chartDrv} > $out
-      '';
+  resourcesYaml = runCommand "${name}-rendered.yaml" { nativeBuildInputs = [ kubernetes-helm ]; } ''
+    helm template "${name}" \
+      --namespace "${namespace}" \
+      --include-crds \
+      ${lib.optionalString (values != { }) "-f ${valuesJsonFile}"} \
+      ${lib.optionalString (kubeVersion != null) "--kube-version ${kubeVersion}"} \
+      ${lib.optionalString noHooks "--no-hooks"} \
+      ${
+        lib.optionalString (
+          apiVersions != null && apiVersions != [ ]
+        ) "--api-versions ${lib.concatStringsSep "," apiVersions}"
+      } \
+      ${chartDrv} > $out
+  '';
   # `fromYAML11Stream` is a nanopynix primop (registered per-Session via
   # `yaml_primops()`, not a stock Nix builtin), only present when this is
   # evaluated through `ekn`'s worker. It parses YAML with 1.1 semantics --
@@ -74,11 +74,15 @@ let
   #
   # Falling back to plain Nix (`nix build`/`nix eval` with no nanopynix
   # primops registered, or any other consumer of this file/easykubenix that
-  # isn't going through `ekn`) uses the older approach already established
-  # by `chart2json.nix`/`importyaml.nix` in this repo: convert YAML to JSON
-  # with `yq` in a separate derivation, then parse with `builtins.fromJSON`
-  # (a real, universal Nix builtin). This path does NOT get the YAML 1.1
-  # octal fix -- same known limitation `chart2json.nix` already has.
+  # isn't going through `ekn`) uses `yq` in a separate derivation to convert
+  # YAML to JSON, then parses with `builtins.fromJSON` (a real, universal
+  # Nix builtin). This path does NOT get the YAML 1.1 octal fix. Unlike this
+  # file, importyaml.nix/helm.nix's equivalent fallback shells out to ekn's
+  # own hidden `_yamlToJson` CLI subcommand instead of `yq` (see
+  # `ekn.lib.parseYAMLStream` in parseYamlStream.nix) so their fallback path
+  # DOES get correct yaml11/yaml12 semantics -- this file can't do the same
+  # since it's a plain `pkgs.callPackage` derivation, not a NixOS module, so
+  # it has no access to `_module.args.eknPackage`/`ekn.lib`.
   parsed =
     if builtins ? fromYAML11Stream then
       builtins.fromYAML11Stream (builtins.readFile resourcesYaml)

@@ -35,6 +35,22 @@ let
           type = types.bool;
           default = true;
         };
+        yamlVersion = mkOption {
+          description = ''
+            YAML version to parse `src` with -- matches nanopynix's
+            fromYAML11Stream/fromYAMLStream primops (in-process path) and
+            ekn's hidden `_yamlToJson --yaml-version` CLI fallback
+            (derivation path, used when those primops aren't registered).
+            "yaml11" resolves bare leading-zero numbers as octal (e.g. a
+            volume's `defaultMode: 0644` means 420, the Unix file-mode
+            convention); "yaml12" reads the same literal as decimal 644.
+          '';
+          type = types.enum [
+            "yaml11"
+            "yaml12"
+          ];
+          default = "yaml12";
+        };
         objects = mkOption {
           description = "Generated kubernetes objects";
           type = types.listOf types.attrs;
@@ -61,12 +77,10 @@ let
                   url = yamlConfig.src;
                 };
 
-            list = lib.importJSON (
-              pkgs.runCommand "yaml2json" { } # bash
-                ''
-                  ${pkgs.yq}/bin/yq -Scs '.' ${src} >$out
-                ''
-            );
+            list = ekn.lib.parseYAMLStream {
+              inherit src;
+              yamlVersion = yamlConfig.yamlVersion;
+            };
           in
           list;
       };
