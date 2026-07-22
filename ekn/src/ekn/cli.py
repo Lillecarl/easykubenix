@@ -10,12 +10,14 @@ import tempfile
 from pathlib import Path as _Path
 from typing import Any, cast
 
+import kr8s.asyncio
 import rich.traceback
 import structlog
 from anyio import Path
 from clypi import Command, Positional, arg
 from nanopynix import NixError
 
+from ekn.apply import apply_and_prune
 from ekn.eval import (
     evaluate_file,
     evaluate_flake,
@@ -269,7 +271,6 @@ class Validate(Command):
 
         k8s_bin = c["kubernetes"]["package"]["outPath"] + "/bin"
         etcd_bin = c["validation"]["etcdPackage"]["outPath"] + "/bin"
-        kluctl_exe = c["kluctl"]["script"]["outPath"] + "/bin/kubenixDeploy"
         manifest_path = c["internal"]["manifestJSONFile"]["outPath"]
 
         subnet = c["validation"]["serviceSubnet"]
@@ -400,10 +401,19 @@ class Validate(Command):
                 raise SystemExit(1)
 
             _log.info("applying manifests")
-            rc, _, err = await _exec(kluctl_exe, "--yes", "--no-wait", env=env)
-            if rc != 0:
-                _log.error("kluctl deploy failed\n%s", err)
-                raise SystemExit(1)
+            manifest_list = json.loads(await Path(manifest_path).read_text())
+            objects = manifest_list["items"] if isinstance(manifest_list, dict) else manifest_list
+            kr8s_api = await kr8s.asyncio.api(kubeconfig=kubeconfig)
+            try:
+                await apply_and_prune(
+                    objects,
+                    api=kr8s_api,
+                    discriminator=c["kluctl"]["discriminator"],
+                    resource_priority=c["kluctl"]["resourcePriority"],
+                )
+            except Exception as exc:
+                _log.error("apply failed\n%s", exc)
+                raise SystemExit(1) from exc
 
             _log.info("dumping OpenAPI schema")
             rc, out, err = await _exec(

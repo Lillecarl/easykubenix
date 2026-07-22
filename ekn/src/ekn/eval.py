@@ -259,9 +259,14 @@ async def _validation_config(proxy: Any) -> dict:
     debug = await v.attr("debug").force_json()
     k8s_version = await proxy.attr("kubernetes").attr("package").attr("version").force_json()
 
+    # kluctl.resourcePriority/discriminator are plain data (no build), used
+    # by Validate.run()'s kr8s-based apply_and_prune instead of shelling out
+    # to `kluctl deploy` -- see apply.py.
+    resource_priority = await proxy.attr("kluctl").attr("resourcePriority").force_json()
+    discriminator = await proxy.attr("kluctl").attr("discriminator").force_json()
+
     etcd_out = (await v.attr("etcdPackage").build()).get("out")
     k8s_out = (await proxy.attr("kubernetes").attr("package").build()).get("out")
-    kluctl_out = (await proxy.attr("kluctl").attr("script").build()).get("out")
     manifest_out = (await proxy.attr("internal").attr("manifestJSONFile").build()).get("out")
 
     return {
@@ -276,7 +281,10 @@ async def _validation_config(proxy: Any) -> dict:
                 "debug": debug,
                 "etcdPackage": {"outPath": etcd_out},
             },
-            "kluctl": {"script": {"outPath": kluctl_out}},
+            "kluctl": {
+                "resourcePriority": resource_priority,
+                "discriminator": discriminator,
+            },
             "internal": {"manifestJSONFile": {"outPath": manifest_out}},
         }
     }

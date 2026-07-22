@@ -17,9 +17,10 @@ let
   adios = (import inputs.adios).adios;
   template = definition: adios definition { };
   clypi = pkgs.python3Packages.callPackage ./nix/clypi.nix { };
+  kr8s = pkgs.python3Packages.callPackage ./nix/kr8s.nix { };
   ekn = pkgs.python3Packages.callPackage ./ekn {
     inherit (nanopynix) nanopynix nanopynix-helpers;
-    inherit clypi;
+    inherit clypi kr8s;
   };
   easykubenix-docs = pkgs.python3Packages.callPackage ./nix/docs.nix { };
 
@@ -96,6 +97,7 @@ in
       eval
       ekn
       clypi
+      kr8s
       easykubenix-docs
       ;
   };

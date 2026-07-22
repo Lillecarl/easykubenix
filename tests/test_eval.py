@@ -133,5 +133,6 @@ class TestValidationConfig:
         assert c["kubernetes"]["package"]["version"]
         assert c["kubernetes"]["package"]["outPath"].startswith("/nix/store/")
         assert c["validation"]["etcdPackage"]["outPath"].startswith("/nix/store/")
-        assert c["kluctl"]["script"]["outPath"].startswith("/nix/store/")
+        assert isinstance(c["kluctl"]["resourcePriority"], dict)
+        assert c["kluctl"]["discriminator"]
         assert c["internal"]["manifestJSONFile"]["outPath"].startswith("/nix/store/")

@@ -16,6 +16,7 @@ dependencies = [
     "pygit2",
     "pyyaml",
     "clypi",
+    "kr8s",
     "anyio",
     "structlog",
     "rich",

@@ -9,6 +9,7 @@
   pygit2,
   pyyaml,
   clypi,
+  kr8s,
   anyio,
   structlog,
   rich,
@@ -32,6 +33,7 @@ buildPythonApplication (finalAttrs: {
     pygit2
     pyyaml
     clypi
+    kr8s
     anyio
     structlog
     rich
