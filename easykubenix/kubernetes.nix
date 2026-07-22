@@ -513,7 +513,12 @@ in
               ekn.gitOpsTarget references unknown GitOps target "${name}".
               Declared targets: ${lib.concatStringsSep ", " (lib.attrNames config.gitops.targets)}
             '');
-          inherit objects;
+          # `ekn` belongs to the EKN compiler, not to the Kubernetes manifest
+          # -- same strip as `kubernetes.generated` above. Left in place here,
+          # it would land as a literal top-level field in every object `ekn
+          # commit` writes to the GitOps tree, permanently OutOfSync since
+          # nothing ever produces it on the live-cluster side.
+          objects = map (object: removeAttrs object [ "ekn" ]) objects;
         }
       ))
     ];
