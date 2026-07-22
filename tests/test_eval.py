@@ -90,13 +90,6 @@ class TestEknModule:
         with pytest.raises(nanopynix.NixError, match="is not of type"):
             await evaluate_file(NIX_TEST_FILE, "labelsAnnotationsCoercionDisabledThrows")
 
-    async def test_nested_labels_annotations_coercion_disabled_rejects_bool(self) -> None:
-        # Nested labels/annotations (e.g. a pod template's own metadata)
-        # live inside the freeform spec blob, so it's
-        # coerceOrVerifyLabelsAnnotations's manual throw that rejects it.
-        with pytest.raises(nanopynix.NixError, match="coerceLabelsAndAnnotations"):
-            await evaluate_file(NIX_TEST_FILE, "nestedLabelsAnnotationsCoercionDisabledThrows")
-
     async def test_init_containers_preserve_order(self) -> None:
         result = await evaluate_file(NIX_TEST_FILE, "initContainersOrder")
         assert isinstance(result, list)

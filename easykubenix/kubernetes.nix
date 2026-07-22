@@ -15,11 +15,12 @@ let
   # `throw`. This only covers the one *explicit* `metadata` submodule each
   # object has -- nested labels/annotations (pod templates, job templates,
   # PVC templates, etc.) live inside the freeform `spec` blob with no
-  # submodule to hook a type into, and stay covered by
-  # `coerceOrVerifyLabelsAnnotations` below instead. Modeling those
-  # structurally too would mean giving much more of the Kubernetes schema a
-  # real Nix type, which is exactly the per-leaf `settingsFormat.type` cost
-  # `kubernetes.crds` exists to avoid.
+  # submodule to hook a type into, and are deliberately NOT covered: giving
+  # those the same treatment would mean walking/typing arbitrary depth of
+  # every object on every eval, which is exactly the per-leaf
+  # `settingsFormat.type` cost `kubernetes.crds` exists to avoid, for a case
+  # (nested labels/annotations with a stray bool/int) that hasn't come up in
+  # practice.
   labelValueType =
     if cfg.coerceLabelsAndAnnotations then
       lib.types.coercedTo lib.types.bool lib.boolToString (
@@ -27,44 +28,6 @@ let
       )
     else
       lib.types.str;
-  # Kubernetes `labels`/`annotations` are strictly `map[string]string` --
-  # every value must already be a string. A bare Nix bool/int there
-  # serializes fine as JSON, which client-side apply/merge-patch (kluctl)
-  # tolerates silently, but real server-side apply's structured-merge-diff
-  # rejects it with an opaque 500 while building the typed patch (it can't
-  # reconcile a JSON bool/number against a map[string]string schema). This
-  # walks every object looking for a `labels`/`annotations` attrset at *any*
-  # depth (not just top-level `metadata` -- pod templates, job templates,
-  # PVC templates etc. each carry their own) and coerces/verifies its
-  # values. Built on `lib.walkWithPath` (plain attrset recursion) rather
-  # than a typed option, so it stays outside the expensive
-  # settingsFormat.type per-leaf validation machinery `kubernetes.crds`
-  # exists to avoid -- see that option's doc comment.
-  coerceOrVerifyLabelsAnnotations =
-    path: value:
-    let
-      key = if path == [ ] then null else lib.last path;
-    in
-    if (key == "labels" || key == "annotations") && lib.isAttrs value then
-      lib.mapAttrs (
-        labelKey: labelValue:
-        if builtins.isString labelValue then
-          labelValue
-        else if cfg.coerceLabelsAndAnnotations && builtins.isBool labelValue then
-          lib.boolToString labelValue
-        else if cfg.coerceLabelsAndAnnotations && builtins.isInt labelValue then
-          builtins.toString labelValue
-        else
-          throw ''
-            kubernetes object ${lib.concatStringsSep "." path}."${labelKey}": ${key} values must be strings (Kubernetes labels/annotations are map[string]string); got ${builtins.typeOf labelValue}: ${builtins.toJSON labelValue}.${
-              lib.optionalString
-                (!cfg.coerceLabelsAndAnnotations && (builtins.isBool labelValue || builtins.isInt labelValue))
-                " kubernetes.coerceLabelsAndAnnotations is currently disabled, which is why this wasn't auto-converted."
-            }
-          ''
-      ) value
-    else
-      value;
   # `metadata.labels`/`metadata.annotations` (the typed options above)
   # default to `{ }` so an object that never sets either doesn't throw when
   # serialized -- strip them back out here when still empty, so an object
@@ -125,7 +88,6 @@ let
     # when we want to override things in the Kubernetes containers list for
     # example.
     (map (lib.walkWithPath lib.kubeAttrsToLists))
-    (map (lib.walkWithPath coerceOrVerifyLabelsAnnotations))
     (map stripEmptyTopLevelLabelsAnnotations)
   ];
   # cfg.crds objects deliberately don't flow through generatedWithEkn's

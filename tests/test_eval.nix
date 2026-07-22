@@ -43,8 +43,7 @@ let
   };
   # Top-level `metadata.labels`/`metadata.annotations` are the typed
   # `labelValueType` option -- with coercion disabled that's plain
-  # `types.str`, so a bool there is rejected by the module system itself
-  # (before `coerceOrVerifyLabelsAnnotations` ever runs).
+  # `types.str`, so a bool there is rejected by the module system itself.
   easyCoercionDisabledThrows = import ../. {
     inherit pkgs;
     modules = [
@@ -53,22 +52,6 @@ let
         kubernetes.objects.default.ConfigMap.uncoerced = {
           metadata.labels.enabled = true;
           data.key = "value";
-        };
-      }
-    ];
-  };
-  # Nested labels/annotations (e.g. a Pod template's own metadata) live
-  # inside the freeform `spec` blob with no submodule type to enforce
-  # anything -- `coerceOrVerifyLabelsAnnotations`'s manual throw is what
-  # rejects a bool there when coercion is disabled.
-  easyNestedCoercionDisabledThrows = import ../. {
-    inherit pkgs;
-    modules = [
-      {
-        kubernetes.coerceLabelsAndAnnotations = false;
-        kubernetes.objects.default.Deployment.uncoerced = {
-          apiVersion = "apps/v1";
-          spec.template.metadata.labels.enabled = true;
         };
       }
     ];
@@ -115,7 +98,5 @@ in
   labelsAnnotationsCoercion = easyCoercion.config.kubernetes.generated;
   labelsAnnotationsCoercionDisabled = easyCoercionDisabled.config.kubernetes.generated;
   labelsAnnotationsCoercionDisabledThrows = easyCoercionDisabledThrows.config.kubernetes.generated;
-  nestedLabelsAnnotationsCoercionDisabledThrows =
-    easyNestedCoercionDisabledThrows.config.kubernetes.generated;
   initContainersOrder = easyInitContainers.config.kubernetes.generated;
 }
