@@ -22,6 +22,7 @@ from nanopynix.primops import from_yaml11_stream, from_yaml_stream, to_yaml
 from pydantic import TypeAdapter, ValidationError
 
 from ekn.apply import apply_and_prune
+from ekn.clusterdiff import cluster_diff
 from ekn.eval import (
     evaluate_file,
     evaluate_flake,
@@ -547,6 +548,49 @@ class KubeApply(Command):
             raise SystemExit(1) from exc
 
 
+class ClusterDiff(Command):
+    """Diff Kubernetes objects against the live cluster.
+
+    Unlike `ekn diff` (which compares against the previous GitOps commit),
+    this compares against the cluster's actual current state -- for each
+    object, a server-side-apply dry run shows what `ekn kubeapply`/
+    `ekn validate` would really change right now, including drift from
+    manual kubectl edits or other controllers. Read-only: nothing is
+    applied, pruned, or waited on.
+    """
+    @classmethod
+    def prog(cls) -> str:
+        return "clusterdiff"
+
+    file: _Path | None = arg(None, short="f", inherited=True)
+    flake: str | None = arg(None, inherited=True)
+    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
+    target: str | None = arg(
+        None,
+        help="Diff only this GitOps target's objects (kubernetes.gitopsTargets). Omit for the full kubernetes.generated set.",
+    )
+
+    async def run(self) -> None:
+        uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
+        try:
+            cfg = await evaluate_kubeapply_config(self.file, uri, customer, self.attr, self.target)
+        except NixError as exc:
+            _log.error(exc.msg_without_ansi)
+            raise SystemExit(1) from exc
+        objects = [await maybe_decrypt(obj) for obj in cfg["objects"]]
+        api = await kr8s.asyncio.api()
+        try:
+            diff_output = await cluster_diff(objects, api=api)
+        except kr8s.ServerError as exc:
+            body = exc.response.text if exc.response is not None else None
+            _log.error("clusterdiff failed\n%s\nresponse body: %s", exc, body)
+            raise SystemExit(1) from exc
+        if diff_output:
+            sys.stdout.write(diff_output)
+        else:
+            _log.info("no differences")
+
+
 class SplitManifest(Command):
     """Split a JSON manifest list into a namespace/kind/name.yaml directory tree.
 
@@ -640,6 +684,7 @@ class Ekn(Command):
         | Commit
         | Validate
         | KubeApply
+        | ClusterDiff
         | SplitManifest
         | YamlToJson
         | JsonToYaml
@@ -668,6 +713,7 @@ class Ekn(Command):
             print("  commit        Render manifests and write them to the GitOps branch.")
             print("  validate      Boot real etcd+kube-apiserver, apply manifests, run kubeconform.")
             print("  kubeapply     Apply Kubernetes objects directly against the current kubeconfig context.")
+            print("  clusterdiff   Diff Kubernetes objects against the live cluster's actual current state.")
             raise SystemExit(0)
         result = await _evaluate(self.file, self.flake, self.attr)
         json.dump(result, sys.stdout, indent=2, default=str)

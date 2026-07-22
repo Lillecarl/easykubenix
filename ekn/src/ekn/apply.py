@@ -53,16 +53,26 @@ async def _build_object(spec: dict[str, Any], api: Api) -> APIObject:
     return cls(spec, api=api)
 
 
-async def ssa_apply(obj: APIObject, *, field_manager: str, force: bool = True) -> None:
+async def ssa_apply(
+    obj: APIObject, *, field_manager: str, force: bool = True, dry_run: bool = False
+) -> dict[str, Any]:
     """Server-side apply.
 
     kr8s's `.patch()` only supports merge-patch/json-patch content types --
     issue the PATCH ourselves with the `application/apply-patch+yaml`
     content type `kubectl apply --server-side` uses, which the API server
     accepts with a plain JSON body just as well as YAML.
+
+    `dry_run=True` (used by `ekn clusterdiff`) asks the API server to
+    compute and return the would-be-merged object without persisting
+    anything -- `obj.raw` is left untouched in that case, since it isn't a
+    real apply.
     """
     api = obj.api
     assert api is not None
+    params = {"fieldManager": field_manager, "force": "true" if force else "false"}
+    if dry_run:
+        params["dryRun"] = "All"
     async with api.call_api(
         "PATCH",
         version=obj.version,
@@ -70,9 +80,12 @@ async def ssa_apply(obj: APIObject, *, field_manager: str, force: bool = True) -
         namespace=obj.namespace,
         content=json.dumps(dict(obj.raw)),
         headers={"Content-Type": "application/apply-patch+yaml"},
-        params={"fieldManager": field_manager, "force": "true" if force else "false"},
+        params=params,
     ) as resp:
-        obj.raw = resp.json()
+        result = resp.json()
+    if not dry_run:
+        obj.raw = result
+    return result
 
 
 def _object_key(obj: APIObject) -> tuple[str, str, str]:
