@@ -7,6 +7,44 @@
 let
   cfg = config.kubernetes;
   settingsFormat = pkgs.formats.json { };
+  # Kubernetes `labels`/`annotations` are strictly `map[string]string` --
+  # every value must already be a string. A bare Nix bool/int there
+  # serializes fine as JSON, which client-side apply/merge-patch (kluctl)
+  # tolerates silently, but real server-side apply's structured-merge-diff
+  # rejects it with an opaque 500 while building the typed patch (it can't
+  # reconcile a JSON bool/number against a map[string]string schema). This
+  # walks every object looking for a `labels`/`annotations` attrset at *any*
+  # depth (not just top-level `metadata` -- pod templates, job templates,
+  # PVC templates etc. each carry their own) and coerces/verifies its
+  # values. Built on `lib.walkWithPath` (plain attrset recursion) rather
+  # than a typed option, so it stays outside the expensive
+  # settingsFormat.type per-leaf validation machinery `kubernetes.crds`
+  # exists to avoid -- see that option's doc comment.
+  coerceOrVerifyLabelsAnnotations =
+    path: value:
+    let
+      key = if path == [ ] then null else lib.last path;
+    in
+    if (key == "labels" || key == "annotations") && lib.isAttrs value then
+      lib.mapAttrs (
+        labelKey: labelValue:
+        if builtins.isString labelValue then
+          labelValue
+        else if cfg.coerceLabelsAndAnnotations && builtins.isBool labelValue then
+          lib.boolToString labelValue
+        else if cfg.coerceLabelsAndAnnotations && builtins.isInt labelValue then
+          builtins.toString labelValue
+        else
+          throw ''
+            kubernetes object ${lib.concatStringsSep "." path}."${labelKey}": ${key} values must be strings (Kubernetes labels/annotations are map[string]string); got ${builtins.typeOf labelValue}: ${builtins.toJSON labelValue}.${
+              lib.optionalString
+                (!cfg.coerceLabelsAndAnnotations && (builtins.isBool labelValue || builtins.isInt labelValue))
+                " kubernetes.coerceLabelsAndAnnotations is currently disabled, which is why this wasn't auto-converted."
+            }
+          ''
+      ) value
+    else
+      value;
   generatedWithEkn = lib.pipe cfg.objects [
     # Convert kubernetes.objects.namespace.kind.name into a list of objects
     (lib.collect (x: x ? apiVersion && x ? kind && x ? metadata))
@@ -15,27 +53,23 @@ let
       objects:
       objects
       ++ lib.pipe objects [
-        (
-          lib.concatMap (
-            object:
-            lib.pipe (map (generator: generator object) cfg.generators) [
-              # A generator declining to fire returns `{ }` -- filter it out
-              # here, before merging in a default `ekn`, otherwise the merge
-              # below turns it into a non-empty `{ ekn = ...; }` stub with no
-              # kind/apiVersion/metadata that survives downstream.
-              (lib.filter (generated: generated != { }))
-              (
-                map (
-                  generated:
-                  generated
-                  // lib.optionalAttrs (!(generated ? ekn)) {
-                    ekn = object.ekn or { };
-                  }
-                )
-              )
-            ]
-          )
-        )
+        (lib.concatMap (
+          object:
+          lib.pipe (map (generator: generator object) cfg.generators) [
+            # A generator declining to fire returns `{ }` -- filter it out
+            # here, before merging in a default `ekn`, otherwise the merge
+            # below turns it into a non-empty `{ ekn = ...; }` stub with no
+            # kind/apiVersion/metadata that survives downstream.
+            (lib.filter (generated: generated != { }))
+            (map (
+              generated:
+              generated
+              // lib.optionalAttrs (!(generated ? ekn)) {
+                ekn = object.ekn or { };
+              }
+            ))
+          ]
+        ))
       ]
     )
     # Run a transformation pass over all objects
@@ -46,6 +80,7 @@ let
     # when we want to override things in the Kubernetes containers list for
     # example.
     (map (lib.walkWithPath lib.kubeAttrsToLists))
+    (map (lib.walkWithPath coerceOrVerifyLabelsAnnotations))
   ];
   # cfg.crds objects deliberately don't flow through generatedWithEkn's
   # pipeline above (generators/transformers/filters/kubeAttrsToLists) -- that
@@ -276,6 +311,24 @@ in
       description = "List of functions that filter objects";
     };
 
+    coerceLabelsAndAnnotations = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Kubernetes `labels`/`annotations` are strictly `map[string]string` --
+        every value must be a string, anywhere a `labels` or `annotations`
+        attrset appears (not just top-level `metadata`: pod templates, job
+        templates, PVC templates etc. each carry their own).
+
+        When enabled (the default), Nix `bool` values are converted via
+        `lib.boolToString` and `int` values via `builtins.toString`
+        automatically. Values are always verified to be strings regardless
+        of this setting -- disabling it only turns bools/ints from
+        "auto-fixed" into "hard error at eval time", it never disables the
+        check itself.
+      '';
+    };
+
     apiMappings = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = { };
@@ -369,8 +422,7 @@ in
       (lib.filter (object: (object.ekn.gitOpsTarget or null) != null))
       (lib.groupBy (object: object.ekn.gitOpsTarget))
       (lib.mapAttrs (
-        name: objects:
-        {
+        name: objects: {
           target =
             config.gitops.targets.${name} or (throw ''
               ekn.gitOpsTarget references unknown GitOps target "${name}".

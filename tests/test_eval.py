@@ -71,6 +71,22 @@ class TestEknModule:
         assert target["target"] == {"branch": "deploy", "path": "clusters/home/apps"}
         assert target["objects"][0]["metadata"]["name"] == "api"
 
+    async def test_labels_annotations_are_coerced_by_default(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "labelsAnnotationsCoercion")
+        assert isinstance(result, list)
+        metadata = result[0]["metadata"]
+        assert metadata["labels"] == {"enabled": "true", "replicas": "3"}
+        assert metadata["annotations"] == {"disabled": "false"}
+
+    async def test_labels_annotations_coercion_can_be_disabled(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "labelsAnnotationsCoercionDisabled")
+        assert isinstance(result, list)
+        assert result[0]["metadata"]["labels"] == {"enabled": "true"}
+
+    async def test_labels_annotations_coercion_disabled_rejects_bool(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="coerceLabelsAndAnnotations"):
+            await evaluate_file(NIX_TEST_FILE, "labelsAnnotationsCoercionDisabledThrows")
+
     async def test_generated_by_path(self, ekn_root: str) -> None:
         nix = f"""
         let
