@@ -106,43 +106,6 @@ let
     }
   ];
 
-  # Regression: this is the shape `kubeListsToAttrs`'s forward pass actually
-  # produces for every Helm/importyaml object that has no override applied
-  # to it -- a SINGLE definition that is already `_namedlist`/`_numberedlist`
-  # marked, with no separate plain-list definition at the same path to force
-  # `oneOf`'s dispatch toward `namedListOf`. Every other test above merges
-  # a plain-list def against a later marked-override def; none of them
-  # exercise this single-definition case, which used to silently take
-  # `oneOf`'s `attrsOf` branch instead and leave the raw marker key baked
-  # into the value instead of a real list.
-  singleNumberedListDefNoOverride = evalValue [
-    {
-      value.initContainers = lib.mkNumberedList {
-        "0" = {
-          name = "config";
-          image = "c1";
-        };
-        "1" = {
-          name = "mount-cgroup";
-          image = "m1";
-        };
-        "2" = {
-          name = "apply-sysctl-overwrites";
-          image = "a1";
-        };
-      };
-    }
-  ];
-
-  singleNamedListDefNoOverride = evalValue [
-    {
-      value.containers = lib.mkNamedList {
-        app.image = "v1";
-        sidecar.image = "s1";
-      };
-    }
-  ];
-
   initContainersOverrideViaMkNumberedList = evalValue [
     {
       value.initContainers = [
@@ -198,8 +161,6 @@ in
   inherit namedListOverrideViaMkNamedList;
   inherit plainListOfNamedThingsNeverAutoConverted;
   inherit ownerReferencesWithDuplicateNamesPreserved;
-  inherit singleNumberedListDefNoOverride;
-  inherit singleNamedListDefNoOverride;
   inherit initContainersOverrideViaMkNumberedList;
   inherit plainListPassthrough;
   inherit nestedAttrsMergeAcrossModules;

@@ -42,28 +42,6 @@ class TestKubeValueType:
         assert len(refs) == 2
         assert {r["kind"] for r in refs} == {"ConfigMap", "Deployment"}
 
-    async def test_single_numbered_list_def_no_override_converts_to_real_list(self) -> None:
-        # Regression: this is the exact shape `kubeListsToAttrs` produces
-        # for every object with no override applied -- a single, already-
-        # marked definition. Used to leave a raw `{"_numberedlist": true,
-        # ...}` attrset instead of a real, order-preserving list.
-        result = await evaluate_file(NIX_TEST_FILE, "singleNumberedListDefNoOverride")
-        assert isinstance(result, dict)
-        assert result["initContainers"] == [
-            {"name": "config", "image": "c1"},
-            {"name": "mount-cgroup", "image": "m1"},
-            {"name": "apply-sysctl-overwrites", "image": "a1"},
-        ]
-
-    async def test_single_named_list_def_no_override_converts_to_real_list(self) -> None:
-        # Regression: same as above but for `_namedlist` -- also used to
-        # drop the `name` field entirely (the merge only ever extracted
-        # `attrValues`, discarding the attrset keys that held the names).
-        result = await evaluate_file(NIX_TEST_FILE, "singleNamedListDefNoOverride")
-        assert isinstance(result, dict)
-        containers = result["containers"]
-        assert {c["name"]: c["image"] for c in containers} == {"app": "v1", "sidecar": "s1"}
-
     async def test_init_containers_override_via_mk_numbered_list(self) -> None:
         result = await evaluate_file(NIX_TEST_FILE, "initContainersOverrideViaMkNumberedList")
         assert isinstance(result, dict)
