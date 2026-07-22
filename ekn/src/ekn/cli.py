@@ -13,7 +13,7 @@ from typing import Any, cast
 import rich.traceback
 import structlog
 from anyio import Path
-from clypi import Command, arg
+from clypi import Command, Positional, arg
 from nanopynix import NixError
 
 from ekn.eval import (
@@ -463,9 +463,31 @@ class Deploy(Commit):
         await super().run()
 
 
+class SplitManifest(Command):
+    """Split a JSON manifest list into a namespace/kind/name.yaml directory tree.
+
+    Internal: used by easykubenix's `manifestYAMLDir` derivation so the whole
+    GitOps tree renders as a single build instead of one derivation per
+    object. Not intended for interactive use.
+    """
+    json_file: Positional[_Path]
+    out_dir: Positional[_Path]
+
+    async def run(self) -> None:
+        data = json.loads(await Path(str(self.json_file)).read_text())
+        if not isinstance(data, list):
+            _log.error("expected a JSON list, got %s", type(data).__name__)
+            raise SystemExit(1)
+        out_dir = Path(str(self.out_dir))
+        for rel_path, content in flatten_manifests(data):
+            dest = out_dir / rel_path
+            await dest.parent.mkdir(parents=True, exist_ok=True)
+            await dest.write_text(content)
+
+
 class Ekn(Command):
     """easykubenix CLI — evaluate Nix and manage GitOps release branches."""
-    subcommand: Deploy | Eval | Render | Diff | Commit | Validate | None = None
+    subcommand: Deploy | Eval | Render | Diff | Commit | Validate | SplitManifest | None = None
     file: _Path | None = arg(None, short="f", help="Nix file to evaluate.")
     flake: str | None = arg(None, help="Flake reference (e.g. '.#myconfig'). Evaluates outputs.eknConfig.<system>.<attr>.")
     attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")

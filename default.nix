@@ -34,15 +34,20 @@ let
         _module.args = {
           inherit pkgs;
           inherit (pkgs) lib;
+          # The `ekn` CLI package itself, under a distinct name so it can't
+          # be conflated with the `ekn` module-arg below (GitOps helpers) or
+          # `object.ekn` (GitOps-routing metadata, see kubernetes.nix's
+          # `ekn.argo`/`ekn.flux`/`eknByPath`) -- same word, three unrelated
+          # meanings in this codebase, kept in separate namespaces.
+          eknPackage = ekn;
           # Helper functions for consuming modules, distinct from `object.ekn`
           # (GitOps-routing metadata on rendered Kubernetes objects, see
           # kubernetes.nix's `ekn.argo`/`ekn.flux`/`eknByPath`) and the
           # top-level `ekn` CLI package bound above (exposed via
-          # `passthru.ekn`, never visible to modules) -- same word, three
-          # unrelated meanings in this codebase, kept in separate namespaces
-          # by construction (module function-arg vs. object attrset field
-          # vs. outer let-binding), but worth this note so nobody conflates
-          # them.
+          # `passthru.ekn`/`eknPackage`) -- same word, three unrelated
+          # meanings in this codebase, kept in separate namespaces by
+          # construction (module function-arg vs. object attrset field vs.
+          # outer let-binding), but worth this note so nobody conflates them.
           ekn = {
             # Recursively wrap every leaf of an attrset in `lib.mkDefault`,
             # so a module's baked-in option value (e.g. a Helm chart's
@@ -74,6 +79,7 @@ in
     manifestYAMLFile
     manifestYAMLList
     manifestYAMLFileList
+    manifestYAMLDir
     ;
 
   inherit (eval) config;

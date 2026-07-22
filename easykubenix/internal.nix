@@ -2,6 +2,7 @@
   config,
   pkgs,
   lib,
+  eknPackage,
   ...
 }:
 {
@@ -101,6 +102,32 @@
     };
     manifestJSON = builtins.toJSON manifestAttrs;
     manifestJSONFile = pkgs.writeText "manifest.json" manifestJSON;
+
+    # A single derivation for the whole namespace/kind/name.yaml tree --
+    # one `runCommand` instead of one derivation per object (the previous
+    # `linkFarm`-of-writeTexts approach), which was slow to both evaluate
+    # and cache at hundreds of objects. `builtins.toJSON` accumulates string
+    # context from every embedded derivation across the whole list into one
+    # string; `passAsFile` hands that string to the builder as a file
+    # without creating a derivation of its own, so Nix still builds and
+    # substitutes any referenced derivations as real inputs of *this*
+    # derivation before `ekn split-manifest` runs. The splitting/formatting
+    # itself (namespace/kind/name.yaml layout, pretty YAML) is done by ekn's
+    # `split-manifest` subcommand, reusing the same flatten_manifests logic
+    # as ekn/src/ekn/git.py -- so this works identically for ekn users and
+    # plain `nix build` users, no fast/slow-path split needed.
+    manifestYAMLDir =
+      pkgs.runCommand "manifest-yaml-dir"
+        {
+          nativeBuildInputs = [ eknPackage ];
+          json = builtins.toJSON generatedOrdered;
+          passAsFile = [ "json" ];
+        }
+        ''
+          mkdir -p "$out"
+          ekn split-manifest "$jsonPath" "$out"
+        '';
+
     # Beware that YAML rendering requires IFD
     manifestYAMLList = builtins.readFile manifestYAMLFile;
     manifestYAMLFileList =
