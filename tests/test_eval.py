@@ -84,8 +84,24 @@ class TestEknModule:
         assert result[0]["metadata"]["labels"] == {"enabled": "true"}
 
     async def test_labels_annotations_coercion_disabled_rejects_bool(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="coerceLabelsAndAnnotations"):
+        # Top-level metadata.labels/annotations are the typed labelValueType
+        # option -- with coercion disabled, that's plain types.str, so the
+        # module system itself rejects the bool.
+        with pytest.raises(nanopynix.NixError, match="is not of type"):
             await evaluate_file(NIX_TEST_FILE, "labelsAnnotationsCoercionDisabledThrows")
+
+    async def test_nested_labels_annotations_coercion_disabled_rejects_bool(self) -> None:
+        # Nested labels/annotations (e.g. a pod template's own metadata)
+        # live inside the freeform spec blob, so it's
+        # coerceOrVerifyLabelsAnnotations's manual throw that rejects it.
+        with pytest.raises(nanopynix.NixError, match="coerceLabelsAndAnnotations"):
+            await evaluate_file(NIX_TEST_FILE, "nestedLabelsAnnotationsCoercionDisabledThrows")
+
+    async def test_init_containers_preserve_order(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "initContainersOrder")
+        assert isinstance(result, list)
+        names = [c["name"] for c in result[0]["spec"]["initContainers"]]
+        assert names == ["first", "second", "third"]
 
     async def test_generated_by_path(self, ekn_root: str) -> None:
         nix = f"""

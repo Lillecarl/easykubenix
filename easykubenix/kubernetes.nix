@@ -7,6 +7,26 @@
 let
   cfg = config.kubernetes;
   settingsFormat = pkgs.formats.json { };
+  # Type for a single top-level `metadata.labels`/`metadata.annotations`
+  # value: real strings pass straight through; when coercion is enabled,
+  # `lib.types.coercedTo` handles bool/int conversion (and gives a proper
+  # module-system error, pointing at the exact option path, for anything
+  # else) via the module system's own merge machinery instead of a manual
+  # `throw`. This only covers the one *explicit* `metadata` submodule each
+  # object has -- nested labels/annotations (pod templates, job templates,
+  # PVC templates, etc.) live inside the freeform `spec` blob with no
+  # submodule to hook a type into, and stay covered by
+  # `coerceOrVerifyLabelsAnnotations` below instead. Modeling those
+  # structurally too would mean giving much more of the Kubernetes schema a
+  # real Nix type, which is exactly the per-leaf `settingsFormat.type` cost
+  # `kubernetes.crds` exists to avoid.
+  labelValueType =
+    if cfg.coerceLabelsAndAnnotations then
+      lib.types.coercedTo lib.types.bool lib.boolToString (
+        lib.types.coercedTo lib.types.int builtins.toString lib.types.str
+      )
+    else
+      lib.types.str;
   # Kubernetes `labels`/`annotations` are strictly `map[string]string` --
   # every value must already be a string. A bare Nix bool/int there
   # serializes fine as JSON, which client-side apply/merge-patch (kluctl)
@@ -45,6 +65,31 @@ let
       ) value
     else
       value;
+  # `metadata.labels`/`metadata.annotations` (the typed options above)
+  # default to `{ }` so an object that never sets either doesn't throw when
+  # serialized -- strip them back out here when still empty, so an object
+  # that never set labels/annotations doesn't gain a gratuitous, always
+  # present `"labels":{}`/`"annotations":{}` in the rendered manifest.
+  # Kubernetes treats "absent" and "empty map" identically; only the
+  # rendered-YAML noise differs.
+  stripEmptyTopLevelLabelsAnnotations =
+    object:
+    if object ? metadata && lib.isAttrs object.metadata then
+      object
+      // {
+        metadata = lib.filterAttrs (
+          k: v:
+          !(
+            lib.elem k [
+              "labels"
+              "annotations"
+            ]
+            && v == { }
+          )
+        ) object.metadata;
+      }
+    else
+      object;
   generatedWithEkn = lib.pipe cfg.objects [
     # Convert kubernetes.objects.namespace.kind.name into a list of objects
     (lib.collect (x: x ? apiVersion && x ? kind && x ? metadata))
@@ -81,6 +126,7 @@ let
     # example.
     (map (lib.walkWithPath lib.kubeAttrsToLists))
     (map (lib.walkWithPath coerceOrVerifyLabelsAnnotations))
+    (map stripEmptyTopLevelLabelsAnnotations)
   ];
   # cfg.crds objects deliberately don't flow through generatedWithEkn's
   # pipeline above (generators/transformers/filters/kubeAttrsToLists) -- that
@@ -159,9 +205,19 @@ in
                           metadata = lib.mkOption {
                             type = lib.types.submodule {
                               freeformType = settingsFormat.type;
-                              options.name = lib.mkOption {
-                                type = lib.types.str;
-                                default = name;
+                              options = {
+                                name = lib.mkOption {
+                                  type = lib.types.str;
+                                  default = name;
+                                };
+                                labels = lib.mkOption {
+                                  type = lib.types.attrsOf labelValueType;
+                                  default = { };
+                                };
+                                annotations = lib.mkOption {
+                                  type = lib.types.attrsOf labelValueType;
+                                  default = { };
+                                };
                               };
                             };
                             default = { };

@@ -41,6 +41,10 @@ let
       }
     ];
   };
+  # Top-level `metadata.labels`/`metadata.annotations` are the typed
+  # `labelValueType` option -- with coercion disabled that's plain
+  # `types.str`, so a bool there is rejected by the module system itself
+  # (before `coerceOrVerifyLabelsAnnotations` ever runs).
   easyCoercionDisabledThrows = import ../. {
     inherit pkgs;
     modules = [
@@ -53,6 +57,56 @@ let
       }
     ];
   };
+  # Nested labels/annotations (e.g. a Pod template's own metadata) live
+  # inside the freeform `spec` blob with no submodule type to enforce
+  # anything -- `coerceOrVerifyLabelsAnnotations`'s manual throw is what
+  # rejects a bool there when coercion is disabled.
+  easyNestedCoercionDisabledThrows = import ../. {
+    inherit pkgs;
+    modules = [
+      {
+        kubernetes.coerceLabelsAndAnnotations = false;
+        kubernetes.objects.default.Deployment.uncoerced = {
+          apiVersion = "apps/v1";
+          spec.template.metadata.labels.enabled = true;
+        };
+      }
+    ];
+  };
+  # Regression test: kubeListsToAttrs's `initContainers` order-preservation
+  # exclusion was silently dead (`currentKey` always evaluated to `null`).
+  # Mirrors how helm.nix/importyaml.nix actually feed raw chart/manifest
+  # output through kubeListsToAttrs as a transformer, before kubeAttrsToLists
+  # (always run at the end of generatedWithEkn) converts it back to a list.
+  easyInitContainers = import ../. {
+    inherit pkgs;
+    modules = [
+      (
+        { lib, ... }:
+        {
+          kubernetes.transformers = [
+            (object: (lib.walkWithPath (lib.kubeListsToAttrs object)) object)
+          ];
+          kubernetes.objects.default.Pod.test = {
+            spec.initContainers = [
+              {
+                name = "first";
+                image = "a";
+              }
+              {
+                name = "second";
+                image = "b";
+              }
+              {
+                name = "third";
+                image = "c";
+              }
+            ];
+          };
+        }
+      )
+    ];
+  };
 in
 {
   eknRouting = {
@@ -61,4 +115,7 @@ in
   labelsAnnotationsCoercion = easyCoercion.config.kubernetes.generated;
   labelsAnnotationsCoercionDisabled = easyCoercionDisabled.config.kubernetes.generated;
   labelsAnnotationsCoercionDisabledThrows = easyCoercionDisabledThrows.config.kubernetes.generated;
+  nestedLabelsAnnotationsCoercionDisabledThrows =
+    easyNestedCoercionDisabledThrows.config.kubernetes.generated;
+  initContainersOrder = easyInitContainers.config.kubernetes.generated;
 }
