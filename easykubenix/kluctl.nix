@@ -28,8 +28,14 @@ let
       (_: true);
   isExcludedFromKluctl =
     object:
-    excludedGitopsKeys
-    ? "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}";
+    (excludedGitopsKeys ? "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}")
+    # kluctl has no SOPS awareness at all -- it would apply the raw,
+    # still-encrypted `sops:` blob as the object's literal content. Any
+    # object carrying one is meant for a ksops/`ekn kubeapply`-style
+    # decrypt-at-apply path instead, regardless of which GitOps target
+    # it's routed to, so exclude it here unconditionally rather than
+    # requiring it to live in an already-excluded target.
+    || (object.sops or null) != null;
   kluctlGenerated = lib.filter (object: !(isExcludedFromKluctl object)) config.kubernetes.generated;
 in
 {
