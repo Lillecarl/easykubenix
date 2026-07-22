@@ -13,6 +13,7 @@ in
   options.validation = {
     debug = lib.mkEnableOption "validation debugging";
     etcdPackage = lib.mkPackageOption pkgs "etcd" { };
+    kubeconformPackage = lib.mkPackageOption pkgs "kubeconform" { };
     kubeadmConfig = lib.mkOption {
       type = settingsFormat.type;
     };
@@ -159,7 +160,7 @@ in
             echo "dumping openapiv2 schema from apiserver"
             kubectl get --raw /openapi/v2 > $TMPDIR/k8s-schema.json
             echo "running kubeconform"
-            ${lib.getExe pkgs.kubeconform} -schema-location $TMPDIR/k8s-schema.json -summary < ${config.internal.manifestJSONFile} || begin
+            ${lib.getExe cfg.kubeconformPackage} -schema-location $TMPDIR/k8s-schema.json -summary < ${config.internal.manifestJSONFile} || begin
               echo "kubeconform verification failed"
               exit 1
             end

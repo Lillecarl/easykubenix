@@ -266,6 +266,7 @@ async def _validation_config(proxy: Any) -> dict:
     discriminator = await proxy.attr("kluctl").attr("discriminator").force_json()
 
     etcd_out = (await v.attr("etcdPackage").build()).get("out")
+    kubeconform_out = (await v.attr("kubeconformPackage").build()).get("out")
     k8s_out = (await proxy.attr("kubernetes").attr("package").build()).get("out")
     manifest_out = (await proxy.attr("internal").attr("manifestJSONFile").build()).get("out")
 
@@ -280,6 +281,7 @@ async def _validation_config(proxy: Any) -> dict:
                 "serviceSubnet": service_subnet,
                 "debug": debug,
                 "etcdPackage": {"outPath": etcd_out},
+                "kubeconformPackage": {"outPath": kubeconform_out},
             },
             "kluctl": {
                 "resourcePriority": resource_priority,

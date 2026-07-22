@@ -271,6 +271,7 @@ class Validate(Command):
 
         k8s_bin = c["kubernetes"]["package"]["outPath"] + "/bin"
         etcd_bin = c["validation"]["etcdPackage"]["outPath"] + "/bin"
+        kubeconform_bin = c["validation"]["kubeconformPackage"]["outPath"] + "/bin"
         manifest_path = c["internal"]["manifestJSONFile"]["outPath"]
 
         subnet = c["validation"]["serviceSubnet"]
@@ -289,9 +290,23 @@ class Validate(Command):
 
         try:
             await Path(cert_dir).mkdir(parents=True)
-            await Path(kubeadm_cfg).write_text(json.dumps(c["validation"]["kubeadmConfig"]))
+            # kubeadmConfig carries literal $BIND_ADDRESS/$KUBERNETES_PORT
+            # placeholders (see easykubenix/validation.nix's
+            # controlPlaneEndpoint) -- the older fish-script validationScript
+            # substituted these via the shell before handing the config to
+            # kubeadm; kubeadm itself does no env-var expansion on its config
+            # files, so do the same substitution here.
+            kubeadm_config_text = (
+                json.dumps(c["validation"]["kubeadmConfig"])
+                .replace("$BIND_ADDRESS", bind)
+                .replace("$KUBERNETES_PORT", str(k8s_port))
+                .replace("$CERT_DIR", cert_dir)
+            )
+            await Path(kubeadm_cfg).write_text(kubeadm_config_text)
 
-            env = os.environ | {"PATH": f"{k8s_bin}:{etcd_bin}:" + os.environ.get("PATH", "")}
+            env = os.environ | {
+                "PATH": f"{k8s_bin}:{etcd_bin}:{kubeconform_bin}:" + os.environ.get("PATH", "")
+            }
 
             rc, _, err = await _exec(
                 "kubeadm", "init", "phase", "certs", "all", f"--config={kubeadm_cfg}",
