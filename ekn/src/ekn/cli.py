@@ -28,11 +28,13 @@ from ekn.eval import (
     evaluate_flake_ekn,
     evaluate_generated_manifests,
     evaluate_gitops_manifests,
+    evaluate_kubeapply_config,
     evaluate_validation_config,
     evaluate_validation_file,
 )
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests, try_jj_status
 from ekn.gitops import GitOpsTargetError, resolved_targets
+from ekn.sops import maybe_decrypt
 
 _log = structlog.get_logger()
 
@@ -140,7 +142,7 @@ def _gitops_file_groups(result: dict[str, Any]) -> dict[str, list[tuple[str, str
     groups: dict[str, dict[str, str]] = {}
     for target, target_manifests in routed.items():
         branch_files = groups.setdefault(target.branch, {})
-        for path, content in flatten_manifests(target_manifests, target.path):
+        for path, content in flatten_manifests(target_manifests, target.path, kustomize=True):
             existing = branch_files.get(path)
             if existing is not None and existing != content:
                 raise GitOpsTargetError(
@@ -422,6 +424,7 @@ class Validate(Command):
             _log.info("applying manifests")
             manifest_list = json.loads(await Path(manifest_path).read_text())
             objects = manifest_list["items"] if isinstance(manifest_list, dict) else manifest_list
+            objects = [await maybe_decrypt(obj) for obj in objects]
             kr8s_api = await kr8s.asyncio.api(kubeconfig=kubeconfig)
             try:
                 await apply_and_prune(
@@ -490,6 +493,58 @@ class Deploy(Commit):
         if not self.no_verify:
             await Validate.run(cast(Validate, self))
         await super().run()
+
+
+class KubeApply(Command):
+    """Apply Kubernetes objects directly against the current kubeconfig
+    context: server-side apply in barrier order, with optional pruning.
+
+    General-purpose primitive backing both scripts/bootstrap-argocd.py
+    (`--target bootstrap`, one-time -- gets ArgoCD running before it can
+    sync itself) and `ekn validate`'s ephemeral-apiserver conformance runs
+    (which apply the full `kubernetes.generated` set). Decrypts any object
+    carrying a `sops:` metadata block (see ekn.sops) before applying it --
+    SOPS-encrypted objects flow untouched through `ekn commit`'s GitOps
+    path, but a direct apply has no ArgoCD+kustomize+ksops step to do that
+    decryption for it.
+    """
+    @classmethod
+    def prog(cls) -> str:
+        return "kubeapply"
+
+    file: _Path | None = arg(None, short="f", inherited=True)
+    flake: str | None = arg(None, inherited=True)
+    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
+    target: str | None = arg(
+        None,
+        help="Apply only this GitOps target's objects (kubernetes.gitopsTargets). Omit for the full kubernetes.generated set.",
+    )
+    prune: bool = arg(
+        False,
+        help="Delete previously-applied (same discriminator) objects no longer present in this apply.",
+    )
+
+    async def run(self) -> None:
+        uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
+        try:
+            cfg = await evaluate_kubeapply_config(self.file, uri, customer, self.attr, self.target)
+        except NixError as exc:
+            _log.error(exc.msg_without_ansi)
+            raise SystemExit(1) from exc
+        objects = [await maybe_decrypt(obj) for obj in cfg["objects"]]
+        api = await kr8s.asyncio.api()
+        try:
+            await apply_and_prune(
+                objects,
+                api=api,
+                discriminator=cfg["discriminator"],
+                resource_priority=cfg["resource_priority"],
+                prune=self.prune,
+            )
+        except kr8s.ServerError as exc:
+            body = exc.response.text if exc.response is not None else None
+            _log.error("apply failed\n%s\nresponse body: %s", exc, body)
+            raise SystemExit(1) from exc
 
 
 class SplitManifest(Command):
@@ -578,7 +633,17 @@ class JsonToYaml(Command):
 class Ekn(Command):
     """easykubenix CLI — evaluate Nix and manage GitOps release branches."""
     subcommand: (
-        Deploy | Eval | Render | Diff | Commit | Validate | SplitManifest | YamlToJson | JsonToYaml | None
+        Deploy
+        | Eval
+        | Render
+        | Diff
+        | Commit
+        | Validate
+        | KubeApply
+        | SplitManifest
+        | YamlToJson
+        | JsonToYaml
+        | None
     ) = None
     file: _Path | None = arg(None, short="f", help="Nix file to evaluate.")
     flake: str | None = arg(None, help="Flake reference (e.g. '.#myconfig'). Evaluates outputs.eknConfig.<system>.<attr>.")
@@ -602,6 +667,7 @@ class Ekn(Command):
             print("  diff          Diff rendered manifests against the GitOps branch.")
             print("  commit        Render manifests and write them to the GitOps branch.")
             print("  validate      Boot real etcd+kube-apiserver, apply manifests, run kubeconform.")
+            print("  kubeapply     Apply Kubernetes objects directly against the current kubeconfig context.")
             raise SystemExit(0)
         result = await _evaluate(self.file, self.flake, self.attr)
         json.dump(result, sys.stdout, indent=2, default=str)

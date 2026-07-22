@@ -242,6 +242,79 @@ async def evaluate_gitops_manifests(
         }
 
 
+async def evaluate_kubeapply_config(
+    file: str | PathLike[str] | None,
+    flake_uri: str | None,
+    customer: str | None,
+    attr_path: str | None,
+    target: str | None,
+) -> dict[str, Any]:
+    """Resolve the object list `ekn kubeapply` should apply, plus the
+    `kluctl.discriminator`/`kluctl.resourcePriority` `apply_and_prune` needs.
+
+    `target` narrows to one `kubernetes.gitopsTargets` entry's objects (like
+    `bootstrap_objects()` in scripts/bootstrap-argocd.py does today, `.ekn`
+    routing metadata stripped); omitted, force_json's the full
+    `kubernetes.generated` instead -- never both, so this only ever forces
+    the one field it actually needs.
+    """
+    async with (
+        _session() as session,
+        session.store() as store,
+        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
+    ):
+        if flake_uri is not None:
+            outputs = await eval_.eval_flake(flake_uri)
+            if customer:
+                system = await (await eval_.string("builtins.currentSystem")).force_json()
+                proxy = outputs.attr("eknConfig").attr(str(system)).attr(customer)
+            else:
+                proxy = outputs
+        elif file is not None:
+            proxy = await (await eval_.file(str(file))).auto_call()
+        else:
+            raise ValueError("specify --file or --flake")
+
+        if attr_path:
+            for name in attr_path.split("."):
+                if not name:
+                    raise ValueError(f"empty segment in attr path: {attr_path!r}")
+                proxy = proxy.attr(name)
+
+        if await proxy.has_attr("config"):
+            proxy = proxy.attr("config")
+
+        if target:
+            gitops_targets = await proxy.attr("kubernetes").attr("gitopsTargets").force_json()
+            if not isinstance(gitops_targets, dict):
+                raise ValueError("kubernetes.gitopsTargets did not evaluate to an object")
+            resolved = gitops_targets.get(target)
+            if not isinstance(resolved, dict):
+                raise ValueError(f"unknown gitops target {target!r}")
+            resolved_objects = resolved.get("objects")
+            if not isinstance(resolved_objects, list):
+                raise ValueError(f"gitops target {target!r} has no objects list")
+            objects = [
+                {k: v for k, v in obj.items() if k != "ekn"}
+                for obj in resolved_objects
+                if isinstance(obj, dict)
+            ]
+        else:
+            generated = await proxy.attr("kubernetes").attr("generated").force_json()
+            if not isinstance(generated, list):
+                raise ValueError("kubernetes.generated did not evaluate to a list")
+            objects = generated
+
+        discriminator = await proxy.attr("kluctl").attr("discriminator").force_json()
+        resource_priority = await proxy.attr("kluctl").attr("resourcePriority").force_json()
+
+        return {
+            "objects": objects,
+            "discriminator": discriminator,
+            "resource_priority": resource_priority,
+        }
+
+
 async def _validation_config(proxy: Any) -> dict:
     if await proxy.has_attr("config"):
         proxy = proxy.attr("config")
@@ -328,6 +401,8 @@ __all__ = [
     "evaluate_flake",
     "evaluate_flake_ekn",
     "evaluate_generated_manifests",
+    "evaluate_gitops_manifests",
+    "evaluate_kubeapply_config",
     "evaluate_validation_config",
     "evaluate_validation_file",
 ]

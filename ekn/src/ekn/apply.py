@@ -100,9 +100,11 @@ async def apply_and_prune(
     resource_priority: dict[str, int] | None = None,
     field_manager: str = "ekn",
     crd_establish_timeout: int = 60,
+    prune: bool = True,
 ) -> None:
-    """Apply `objects` in barrier order, then prune anything previously
-    applied under the same discriminator that this run no longer generates.
+    """Apply `objects` in barrier order, then (if `prune`) prune anything
+    previously applied under the same discriminator that this run no longer
+    generates.
 
     Known limitation: pruning only scans kinds present in *this* apply --
     if every object of some kind is removed from the generated config in one
@@ -111,6 +113,11 @@ async def apply_and_prune(
     against; needs a kind list independent of the current apply set (e.g.
     from `kubernetes.apiMappings`) before this drives a real, persistent
     cluster.
+
+    `prune=False` (the default for `ekn kubeapply` against a real cluster,
+    e.g. a narrow `--target` slice) avoids pruning objects that are simply
+    outside the current apply's scope -- the same "two controllers fighting
+    over pruning" concern kluctl.nix's `excludeGitopsTargets` documents.
     """
     resource_priority = resource_priority or {}
     desired_keys: set[tuple[str, str, str]] = set()
@@ -130,6 +137,9 @@ async def apply_and_prune(
         crds = [obj for obj in applied if obj.kind == "CustomResourceDefinition"]
         for crd in crds:
             await crd.wait("condition=Established", timeout=crd_establish_timeout)
+
+    if not prune:
+        return
 
     for kind in kinds:
         async for obj in api.async_get(

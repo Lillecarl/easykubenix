@@ -76,5 +76,6 @@ def test_file_groups_use_target_branch_and_path() -> None:
 
     assert list(groups) == ["deploy"]
     assert [path for path, _ in groups["deploy"]] == [
-        "clusters/home/apps/default/Deployment/api.yaml"
+        "clusters/home/apps/default/Deployment/api.yaml",
+        "clusters/home/apps/kustomization.yaml",
     ]

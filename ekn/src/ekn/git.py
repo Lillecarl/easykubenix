@@ -12,7 +12,9 @@ def _repo_path(path: str | None = None) -> str:
     return os.environ.get("EKN_REPO") or path or "."
 
 
-def flatten_manifests(data: object, subdir: str = "./") -> list[tuple[str, str]]:
+def flatten_manifests(
+    data: object, subdir: str = "./", kustomize: bool = False
+) -> list[tuple[str, str]]:
     import yaml
 
     if not isinstance(data, list):
@@ -20,6 +22,8 @@ def flatten_manifests(data: object, subdir: str = "./") -> list[tuple[str, str]]
 
     base = PurePosixPath(subdir)
     files: list[tuple[str, str]] = []
+    resources: list[str] = []
+    generators: list[str] = []
 
     for manifest in data:
         if not isinstance(manifest, dict):
@@ -41,6 +45,47 @@ def flatten_manifests(data: object, subdir: str = "./") -> list[tuple[str, str]]
             manifest, default_flow_style=False, sort_keys=False, Dumper=yaml.CSafeDumper
         )
         files.append((str(path), yaml_content))
+
+        if not kustomize:
+            continue
+        rel_path = str(path.relative_to(base))
+        if isinstance(manifest.get("sops"), dict):
+            generator_path = base / namespace / kind / f"{name}.ksops-generator.yaml"
+            generator_name = f"{namespace}-{kind.lower()}-{name}-ksops"
+            generator_content = yaml.dump(
+                {
+                    "apiVersion": "viaduct.ai/v1",
+                    "kind": "ksops",
+                    "metadata": {
+                        "name": generator_name,
+                        "annotations": {
+                            "config.kubernetes.io/function": "exec:\n  path: ksops\n",
+                        },
+                    },
+                    "files": [f"{name}.yaml"],
+                },
+                default_flow_style=False,
+                sort_keys=False,
+                Dumper=yaml.CSafeDumper,
+            )
+            files.append((str(generator_path), generator_content))
+            generators.append(str(generator_path.relative_to(base)))
+        else:
+            resources.append(rel_path)
+
+    if kustomize:
+        kustomization: dict[str, Any] = {
+            "apiVersion": "kustomize.config.k8s.io/v1beta1",
+            "kind": "Kustomization",
+        }
+        if resources:
+            kustomization["resources"] = resources
+        if generators:
+            kustomization["generators"] = generators
+        kustomization_content = yaml.dump(
+            kustomization, default_flow_style=False, sort_keys=False, Dumper=yaml.CSafeDumper
+        )
+        files.append((str(base / "kustomization.yaml"), kustomization_content))
 
     return files
 
