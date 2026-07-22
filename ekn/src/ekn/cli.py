@@ -426,6 +426,15 @@ class Validate(Command):
                     discriminator=c["kluctl"]["discriminator"],
                     resource_priority=c["kluctl"]["resourcePriority"],
                 )
+            except kr8s.ServerError as exc:
+                # kr8s only extracts the JSON `message` field for 4xx errors
+                # (see kr8s._api.Api.call_api) -- for 5xx it falls back to
+                # str(httpx exception), which omits the API server's actual
+                # response body. Surface it ourselves since that body is
+                # usually the only clue for a 500.
+                body = exc.response.text if exc.response is not None else None
+                _log.error("apply failed\n%s\nresponse body: %s", exc, body)
+                raise SystemExit(1) from exc
             except Exception as exc:
                 _log.error("apply failed\n%s", exc)
                 raise SystemExit(1) from exc
