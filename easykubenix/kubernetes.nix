@@ -18,19 +18,24 @@ let
         (
           lib.concatMap (
             object:
-            map (
-              generator:
-              let
-                generated = generator object;
-              in
-              generated
-              // lib.optionalAttrs (!(generated ? ekn)) {
-                ekn = object.ekn or { };
-              }
-            ) cfg.generators
+            lib.pipe (map (generator: generator object) cfg.generators) [
+              # A generator declining to fire returns `{ }` -- filter it out
+              # here, before merging in a default `ekn`, otherwise the merge
+              # below turns it into a non-empty `{ ekn = ...; }` stub with no
+              # kind/apiVersion/metadata that survives downstream.
+              (lib.filter (generated: generated != { }))
+              (
+                map (
+                  generated:
+                  generated
+                  // lib.optionalAttrs (!(generated ? ekn)) {
+                    ekn = object.ekn or { };
+                  }
+                )
+              )
+            ]
           )
         )
-        (lib.filter (x: x != { }))
       ]
     )
     # Run a transformation pass over all objects
