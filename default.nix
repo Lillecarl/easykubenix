@@ -37,12 +37,12 @@ let
           # The `ekn` CLI package itself, under a distinct name so it can't
           # be conflated with the `ekn` module-arg below (GitOps helpers) or
           # `object.ekn` (GitOps-routing metadata, see kubernetes.nix's
-          # `ekn.argo`/`ekn.flux`/`eknByPath`) -- same word, three unrelated
+          # `ekn.gitOpsTarget`/`gitopsTargets`) -- same word, three unrelated
           # meanings in this codebase, kept in separate namespaces.
           eknPackage = ekn;
           # Helper functions for consuming modules, distinct from `object.ekn`
           # (GitOps-routing metadata on rendered Kubernetes objects, see
-          # kubernetes.nix's `ekn.argo`/`ekn.flux`/`eknByPath`) and the
+          # kubernetes.nix's `ekn.gitOpsTarget`/`gitopsTargets`) and the
           # top-level `ekn` CLI package bound above (exposed via
           # `passthru.ekn`/`eknPackage`) -- same word, three unrelated
           # meanings in this codebase, kept in separate namespaces by

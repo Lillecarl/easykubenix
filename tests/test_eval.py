@@ -67,11 +67,9 @@ class TestEknModule:
 
         deployment = result["generatedByPath"]["default"]["Deployment"]["api"]
         assert "ekn" not in deployment
-        route = result["eknByPath"]["default"]["Deployment"]["api"][0]
-        assert route == {
-            "branch": "deploy",
-            "path": "clusters/home/apps",
-        }
+        target = result["gitopsTargets"]["apps"]
+        assert target["target"] == {"branch": "deploy", "path": "clusters/home/apps"}
+        assert target["objects"][0]["metadata"]["name"] == "api"
 
     async def test_generated_by_path(self, ekn_root: str) -> None:
         nix = f"""

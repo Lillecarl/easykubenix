@@ -17,67 +17,36 @@ class GitOpsTarget:
 
 def _required_string(route: object, field: str) -> str:
     if not isinstance(route, dict):
-        raise GitOpsTargetError("GitOps route must be an attribute set")
+        raise GitOpsTargetError("GitOps target must be an attribute set")
     value = route.get(field)
     if not isinstance(value, str) or not value:
-        raise GitOpsTargetError(f"GitOps route {field} must be a non-empty string")
+        raise GitOpsTargetError(f"GitOps target {field} must be a non-empty string")
     return value
 
 
-def _index_by_path(generated: list[Any]) -> dict[tuple[str, str, str], dict[str, Any]]:
-    """Build a (namespace, kind, name) -> manifest lookup from a flat manifest list.
+def resolved_targets(gitops_targets: dict[str, Any]) -> dict[GitOpsTarget, list[dict[str, Any]]]:
+    """Turn `kubernetes.gitopsTargets` (already joined by the Nix module) into
+    `{GitOpsTarget: [manifest, ...]}`.
 
-    `kubernetes.generatedByPath` used to provide this pre-grouped shape
-    directly from Nix, but building it there costs an O(n) chain of
-    `lib.recursiveUpdate` calls over every generated object just to support
-    this one lookup -- cheaper to build the same index here in Python from
-    the flat `kubernetes.generated` list, which Nix produces as a plain
-    `map`/`++` pipeline with no extra merge step.
+    The Nix side (`kubernetes.gitopsTargets`) has already resolved each
+    object's `ekn.gitOpsTarget` name against `gitops.targets` and grouped
+    objects by target name -- there is no index/lookup left to build here,
+    just validation and a merge for the (unusual but valid) case of two
+    named targets sharing the same branch+path.
     """
-    index: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for manifest in generated:
-        if not isinstance(manifest, dict):
-            continue
-        metadata = manifest.get("metadata")
-        kind = manifest.get("kind")
-        if not isinstance(metadata, dict) or not isinstance(kind, str):
-            continue
-        namespace = metadata.get("namespace", "none")
-        name = metadata.get("name")
-        if isinstance(namespace, str) and isinstance(name, str):
-            index[(namespace, kind, name)] = manifest
-    return index
-
-
-def routed_manifests(
-    generated: list[Any], routing: dict[str, Any]
-) -> dict[GitOpsTarget, list[dict[str, Any]]]:
-    """Group manifests using normalized routes evaluated by the Nix module."""
-    index = _index_by_path(generated)
     result: defaultdict[GitOpsTarget, list[dict[str, Any]]] = defaultdict(list)
-    for namespace, kinds in routing.items():
-        if not isinstance(kinds, dict):
-            continue
-        for kind, names in kinds.items():
-            if not isinstance(names, dict):
-                continue
-            for name, routes in names.items():
-                manifest = index.get((namespace, kind, name))
-                if manifest is None:
-                    raise GitOpsTargetError(
-                        f"routing references missing resource {namespace}/{kind}/{name}"
-                    )
-                if not isinstance(routes, list):
-                    raise GitOpsTargetError(
-                        f"routing for {namespace}/{kind}/{name} must be a list"
-                    )
-                for route in routes:
-                    target = GitOpsTarget(
-                        branch=_required_string(route, "branch"),
-                        path=_required_string(route, "path"),
-                    )
-                    result[target].append(manifest)
+    for name, entry in gitops_targets.items():
+        if not isinstance(entry, dict):
+            raise GitOpsTargetError(f"GitOps target {name!r} entry must be an attribute set")
+        objects = entry.get("objects")
+        if not isinstance(objects, list):
+            raise GitOpsTargetError(f"GitOps target {name!r} objects must be a list")
+        target = GitOpsTarget(
+            branch=_required_string(entry.get("target"), "branch"),
+            path=_required_string(entry.get("target"), "path"),
+        )
+        result[target].extend(objects)
     return dict(result)
 
 
-__all__ = ["GitOpsTarget", "GitOpsTargetError", "routed_manifests"]
+__all__ = ["GitOpsTarget", "GitOpsTargetError", "resolved_targets"]

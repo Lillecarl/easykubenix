@@ -16,10 +16,9 @@
   noHooks ? false,
   apiVersions ? null,
   syncWave ? "0",
-  # Applications to route these resources through (see kubernetes.nix's
-  # ekn.argo); typically `lib.optional config.argocd.root.enable
-  # config.kubernetes.objects.none.Application.root`.
-  routeToRoot ? [ ],
+  # Name of the `gitops.targets.<name>` to route these resources through
+  # (see kubernetes.nix's ekn.gitOpsTarget); null leaves them unrouted.
+  gitOpsTarget ? null,
 }:
 let
   # Single switch for every chart's CRD handling: `true` routes CRDs through
@@ -95,7 +94,7 @@ let
     object:
     lib.recursiveUpdate object {
       metadata.annotations."argocd.argoproj.io/sync-wave" = syncWave;
-      ekn.argo = routeToRoot;
+      ekn.gitOpsTarget = gitOpsTarget;
     }
   ) rendered;
   # CustomResourceDefinitions carry enormous OpenAPI schemas. Forcing them

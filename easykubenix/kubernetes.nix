@@ -52,38 +52,6 @@ let
   # walk is exactly what kubernetes.crds exists to avoid paying for. They're
   # concatenated in afterwards, already complete and untouched.
   allGenerated = generatedWithEkn ++ cfg.crds;
-  generatedWithEknByPath = lib.foldl' (
-    acc: object:
-    lib.recursiveUpdate acc {
-      ${object.metadata.namespace or "none"}.${object.kind}.${object.metadata.name} = object;
-    }
-  ) { } generatedWithEkn;
-  argoRoute = application:
-    if application.kind != "Application" || !(lib.hasPrefix "argoproj.io/" application.apiVersion) then
-      throw "ekn.argo must reference an Argo CD Application"
-    else
-      {
-        branch = application.spec.source.targetRevision;
-        path = application.spec.source.path;
-      };
-  fluxRoute = kustomization:
-    if kustomization.kind != "Kustomization" || !(lib.hasPrefix "kustomize.toolkit.fluxcd.io/" kustomization.apiVersion) then
-      throw "ekn.flux must reference a Flux Kustomization"
-    else
-      let
-        sourceRef = kustomization.spec.sourceRef;
-        namespace = sourceRef.namespace or kustomization.metadata.namespace or "none";
-        source = lib.attrByPath [ namespace sourceRef.kind sourceRef.name ]
-          (throw "ekn.flux Kustomization sourceRef does not resolve to a Kubernetes resource")
-          generatedWithEknByPath;
-      in
-      if source.kind != "GitRepository" || !(lib.hasPrefix "source.toolkit.fluxcd.io/" source.apiVersion) then
-        throw "ekn.flux Kustomization sourceRef must reference a Flux GitRepository"
-      else
-        {
-          branch = source.spec.ref.branch;
-          path = kustomization.spec.path;
-        };
 in
 {
   imports = [
@@ -126,23 +94,17 @@ in
                           ekn = lib.mkOption {
                             type = lib.types.submodule {
                               options = {
-                                argo = lib.mkOption {
-                                  type = lib.types.listOf lib.types.attrs;
-                                  default = [ ];
+                                gitOpsTarget = lib.mkOption {
+                                  type = lib.types.nullOr lib.types.str;
+                                  default = null;
                                   description = ''
-                                    Argo Application resources which should receive this
-                                    object. This is EKN-only routing metadata and is
-                                    stripped before Kubernetes manifests are rendered.
-                                  '';
-                                };
-
-                                flux = lib.mkOption {
-                                  type = lib.types.listOf lib.types.attrs;
-                                  default = [ ];
-                                  description = ''
-                                    Flux Kustomization resources which should receive
-                                    this object. This is EKN-only routing metadata and
-                                    is stripped before Kubernetes manifests are rendered.
+                                    Name of the `gitops.targets.<name>` this object routes
+                                    to. Deliberately single-valued, not a list: an object
+                                    synced by two GitOps targets at once means two
+                                    controllers independently reconciling (and potentially
+                                    pruning) the same resource. This is EKN-only routing
+                                    metadata and is stripped before Kubernetes manifests
+                                    are rendered.
                                   '';
                                 };
                               };
@@ -225,7 +187,7 @@ in
         CustomResourceDefinitions from Nix-rendered Helm charts) that bypass
         `kubernetes.objects`' per-object submodule and its expensive
         settingsFormat.type value-checking entirely. Still passes through
-        `ekn.argo`/`ekn.flux` GitOps routing and the final YAML render, just
+        `ekn.gitOpsTarget` GitOps routing and the final YAML render, just
         skips generators/transformers/filters and the auto-defaulting
         `kubernetes.objects` provides.
       '';
@@ -341,7 +303,7 @@ in
       '';
     };
 
-    # generated/generatedByPath/eknByPath are readOnly, fully-computed
+    # generated/generatedByPath/generatedWithEkn/gitopsTargets are readOnly, fully-computed
     # outputs -- there is nothing left to override/merge on them, so
     # settingsFormat.type's recursive per-leaf JSON-schema-style validation
     # buys nothing here and would re-force the exact same expensive
@@ -361,11 +323,24 @@ in
       readOnly = true;
     };
 
-    eknByPath = lib.mkOption {
+    generatedWithEkn = lib.mkOption {
       type = lib.types.anything;
       description = ''
-        Resolved EKN GitOps routes by Kubernetes object path. This is derived
-        before the `ekn` field is stripped from rendered Kubernetes objects.
+        Like `generated`, but with each object's `ekn` routing metadata still
+        attached (`generated` strips it). Consumed by anything that needs to
+        see EKN metadata alongside the rendered object, e.g. `gitopsTargets`.
+      '';
+      readOnly = true;
+    };
+
+    gitopsTargets = lib.mkOption {
+      type = lib.types.anything;
+      description = ''
+        Objects grouped by the `gitops.targets.<name>` they route to (via
+        `ekn.gitOpsTarget`), each group paired with that target's resolved
+        `{branch, path}`. Objects with no `ekn.gitOpsTarget` set are omitted.
+        This is derived before the `ekn` field is stripped from rendered
+        Kubernetes objects.
       '';
       readOnly = true;
     };
@@ -388,28 +363,22 @@ in
       (map (object: removeAttrs object [ "ekn" ]))
     ];
 
-    eknByPath = lib.pipe allGenerated [
-      (lib.filter (
-        object:
-        let
-          ekn = object.ekn or { };
-        in
-        (ekn.argo or [ ]) != [ ] || (ekn.flux or [ ]) != [ ]
+    generatedWithEkn = allGenerated;
+
+    gitopsTargets = lib.pipe allGenerated [
+      (lib.filter (object: (object.ekn.gitOpsTarget or null) != null))
+      (lib.groupBy (object: object.ekn.gitOpsTarget))
+      (lib.mapAttrs (
+        name: objects:
+        {
+          target =
+            config.gitops.targets.${name} or (throw ''
+              ekn.gitOpsTarget references unknown GitOps target "${name}".
+              Declared targets: ${lib.concatStringsSep ", " (lib.attrNames config.gitops.targets)}
+            '');
+          inherit objects;
+        }
       ))
-      (
-        objects:
-        lib.foldl' (
-          acc: object:
-          lib.recursiveUpdate acc {
-            ${object.metadata.namespace or "none"}.${object.kind}.${object.metadata.name} =
-              # `or [ ]`: kubernetes.crds objects (renderChart-tagged) only
-              # ever set ekn.argo, never ekn.flux -- unlike
-              # kubernetes.objects' per-object submodule, there's no option
-              # default filling in the missing field for them.
-              map argoRoute (object.ekn.argo or [ ]) ++ map fluxRoute (object.ekn.flux or [ ]);
-          }
-        ) { } objects
-      )
     ];
 
     # like kubernetes.objects but with transformation and generation applied

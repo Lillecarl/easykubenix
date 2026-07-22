@@ -8,33 +8,22 @@ let
   cfg = config.kluctl;
   settingsFormat = pkgs.formats.json { };
 
-  # Objects routed (via kubernetes.eknByPath / ekn.argo / ekn.flux) to one of
-  # cfg.excludeGitopsPaths already have their own deployment path -- an
+  # Objects routed (via kubernetes.gitopsTargets / ekn.gitOpsTarget) to one of
+  # cfg.excludeGitopsTargets already have their own deployment path -- an
   # ArgoCD Application/Flux Kustomization applying them from a git branch,
   # plus a one-time bootstrap apply for whatever's needed to get that
   # controller running in the first place. kluctl must not also manage them,
   # or the two reconcilers fight over the same objects (prune wars, drift
-  # resets). Everything NOT in excludeGitopsPaths -- including objects routed
-  # to GitOps targets that aren't live yet -- keeps deploying via kluctl as
-  # before, so a GitOps migration can move one target at a time.
+  # resets). Everything NOT in excludeGitopsTargets -- including objects
+  # routed to GitOps targets that aren't live yet -- keeps deploying via
+  # kluctl as before, so a GitOps migration can move one target at a time.
   excludedGitopsKeys = lib.genAttrs (
-    lib.flatten (
-      lib.mapAttrsToList (
-        namespace: kinds:
-        lib.mapAttrsToList (
-          kind:
-          names:
-          lib.concatMap (
-            name:
-            let
-              routes = names.${name};
-            in
-            lib.optional (lib.any (r: lib.elem r.path cfg.excludeGitopsPaths) routes)
-              "${namespace}/${kind}/${name}"
-          ) (lib.attrNames names)
-        ) kinds
-      ) config.kubernetes.eknByPath
-    )
+    lib.concatMap (
+      name:
+      map (
+        object: "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}"
+      ) config.kubernetes.gitopsTargets.${name}.objects
+    ) (lib.filter (name: config.kubernetes.gitopsTargets ? ${name}) cfg.excludeGitopsTargets)
   ) (_: true);
   isExcludedFromKluctl =
     object: excludedGitopsKeys ? "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}";
@@ -44,19 +33,17 @@ in
   options = {
     kluctl = {
       package = lib.mkPackageOption pkgs "kluctl" { };
-      excludeGitopsPaths = lib.mkOption {
+      excludeGitopsTargets = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [ ];
         description = ''
-          GitOps target paths (kubernetes.eknByPath's `path`, set via a
-          referenced ekn.argo Application's/ekn.flux Kustomization's own
-          spec.source.path) whose objects kluctl should not deploy. Use this
-          once a target has its own deployment path (e.g. a one-time
-          bootstrap apply plus the GitOps controller syncing itself from
-          there) to avoid kluctl and that controller fighting over the same
-          objects. Objects routed to a target *not* listed here still deploy
-          via kluctl as normal, so a GitOps migration can move one target at
-          a time instead of all-or-nothing.
+          Names of `gitops.targets` whose objects kluctl should not deploy.
+          Use this once a target has its own deployment path (e.g. a
+          one-time bootstrap apply plus the GitOps controller syncing itself
+          from there) to avoid kluctl and that controller fighting over the
+          same objects. Objects routed to a target *not* listed here still
+          deploy via kluctl as normal, so a GitOps migration can move one
+          target at a time instead of all-or-nothing.
         '';
         example = [ "bootstrap" ];
       };

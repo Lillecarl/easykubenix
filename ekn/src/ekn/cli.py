@@ -26,7 +26,7 @@ from ekn.eval import (
     evaluate_validation_file,
 )
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests, try_jj_status
-from ekn.gitops import GitOpsTargetError, routed_manifests
+from ekn.gitops import GitOpsTargetError, resolved_targets
 
 _log = structlog.get_logger()
 
@@ -84,8 +84,8 @@ async def _evaluate_gitops(
     flake: str | None,
     attr: str | None,
 ) -> dict:
-    """Like `_evaluate`, but only forces kubernetes.generated/eknByPath --
-    the only fields Diff/Commit/Deploy read via `_gitops_file_groups`."""
+    """Like `_evaluate`, but only forces kubernetes.gitopsTargets -- the
+    only field Diff/Commit/Deploy read via `_gitops_file_groups`."""
     try:
         uri, customer = _parse_flake(flake) if flake is not None else (None, None)
         return await evaluate_gitops_manifests(file, uri, customer, attr)
@@ -124,21 +124,12 @@ def _gitops_path(result: dict[str, Any]) -> str:
     return path
 
 
-def _get_manifests(result: dict[str, Any]) -> list[Any]:
-    manifests = _dig(result, "config", "kubernetes", "generated")
-    if not isinstance(manifests, list):
-        _log.error("no kubernetes objects found (config.kubernetes.generated is empty or not a list)")
-        raise SystemExit(1)
-    return manifests
-
-
 def _gitops_file_groups(result: dict[str, Any]) -> dict[str, list[tuple[str, str]]]:
-    manifests = _get_manifests(result)
-    routing = _dig(result, "config", "kubernetes", "eknByPath")
-    if not isinstance(routing, dict) or not routing:
+    gitops_targets = _dig(result, "config", "kubernetes", "gitopsTargets")
+    if not isinstance(gitops_targets, dict) or not gitops_targets:
         raise GitOpsTargetError("no GitOps-routed Kubernetes objects found")
 
-    routed = routed_manifests(manifests, routing)
+    routed = resolved_targets(gitops_targets)
 
     groups: dict[str, dict[str, str]] = {}
     for target, target_manifests in routed.items():

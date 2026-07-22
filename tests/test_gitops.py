@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from ekn.cli import _gitops_file_groups
-from ekn.gitops import GitOpsTarget, GitOpsTargetError, routed_manifests
+from ekn.gitops import GitOpsTarget, GitOpsTargetError, resolved_targets
 
 
 def _deployment() -> dict[str, object]:
@@ -14,102 +14,58 @@ def _deployment() -> dict[str, object]:
     }
 
 
-def test_argo_target_routes_payload() -> None:
-    application = {
-        "apiVersion": "argoproj.io/v1alpha1",
-        "kind": "Application",
-        "metadata": {"name": "apps", "namespace": "argocd"},
-        "spec": {
-            "source": {
-                "repoURL": "ssh://git@example.test/platform.git",
-                "targetRevision": "deploy",
-                "path": "clusters/home/apps",
-            }
-        },
-    }
-    manifests = [_deployment(), application]
-    routing = {
-        "default": {
-            "Deployment": {
-                "api": [{"branch": "deploy", "path": "clusters/home/apps"}]
-            }
+def test_resolved_targets_groups_objects_by_target() -> None:
+    gitops_targets = {
+        "apps": {
+            "target": {"branch": "deploy", "path": "clusters/home/apps"},
+            "objects": [_deployment()],
         }
     }
 
-    assert routed_manifests(manifests, routing) == {
-        GitOpsTarget(
-            branch="deploy",
-            path="clusters/home/apps",
-        ): [_deployment()]
+    assert resolved_targets(gitops_targets) == {
+        GitOpsTarget(branch="deploy", path="clusters/home/apps"): [_deployment()]
     }
 
 
-def test_flux_target_routes_payload() -> None:
-    source = {
-        "apiVersion": "source.toolkit.fluxcd.io/v1",
-        "kind": "GitRepository",
-        "metadata": {"name": "platform", "namespace": "flux-system"},
-        "spec": {
-            "url": "ssh://git@example.test/platform.git",
-            "ref": {"branch": "deploy"},
+def test_resolved_targets_merges_targets_sharing_branch_and_path() -> None:
+    config_map = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "cfg", "namespace": "default"},
+    }
+    gitops_targets = {
+        "apps": {
+            "target": {"branch": "deploy", "path": "clusters/home/apps"},
+            "objects": [_deployment()],
+        },
+        "apps-mirror": {
+            "target": {"branch": "deploy", "path": "clusters/home/apps"},
+            "objects": [config_map],
         },
     }
-    kustomization = {
-        "apiVersion": "kustomize.toolkit.fluxcd.io/v1",
-        "kind": "Kustomization",
-        "metadata": {"name": "apps", "namespace": "flux-system"},
-        "spec": {
-            "path": "./clusters/home/apps",
-            "sourceRef": {"kind": "GitRepository", "name": "platform"},
-        },
-    }
-    manifests = [_deployment(), source, kustomization]
-    routing = {
-        "default": {
-            "Deployment": {
-                "api": [{"branch": "deploy", "path": "./clusters/home/apps"}]
-            }
-        }
-    }
 
-    assert routed_manifests(manifests, routing) == {
-        GitOpsTarget(
-            branch="deploy",
-            path="./clusters/home/apps",
-        ): [_deployment()]
-    }
+    result = resolved_targets(gitops_targets)
+
+    key = GitOpsTarget(branch="deploy", path="clusters/home/apps")
+    assert list(result) == [key]
+    assert result[key] == [_deployment(), config_map]
 
 
-def test_route_requires_fields() -> None:
-    manifests = [_deployment()]
-    routing = {"default": {"Deployment": {"api": [{}]}}}
+def test_resolved_targets_requires_branch_and_path() -> None:
+    gitops_targets = {"apps": {"target": {}, "objects": [_deployment()]}}
 
     with pytest.raises(GitOpsTargetError, match="branch"):
-        routed_manifests(manifests, routing)
+        resolved_targets(gitops_targets)
 
 
 def test_file_groups_use_target_branch_and_path() -> None:
-    application = {
-        "apiVersion": "argoproj.io/v1alpha1",
-        "kind": "Application",
-        "metadata": {"name": "apps", "namespace": "argocd"},
-        "spec": {
-            "source": {
-                "repoURL": "ssh://git@example.test/platform.git",
-                "targetRevision": "deploy",
-                "path": "clusters/home/apps",
-            }
-        },
-    }
     result = {
         "config": {
             "kubernetes": {
-                "generated": [_deployment(), application],
-                "eknByPath": {
-                    "default": {
-                        "Deployment": {
-                            "api": [{"branch": "deploy", "path": "clusters/home/apps"}]
-                        }
+                "gitopsTargets": {
+                    "apps": {
+                        "target": {"branch": "deploy", "path": "clusters/home/apps"},
+                        "objects": [_deployment()],
                     }
                 },
             }

@@ -118,17 +118,11 @@ async def evaluate_flake_ekn(flake_uri: str, customer: str) -> dict:
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
 
-        # `generated` (a flat list) instead of `generatedByPath`: the latter
-        # costs an extra O(n) chain of `lib.recursiveUpdate` calls in Nix
-        # just to pre-group by namespace/kind/name, a lookup gitops.py now
-        # builds itself in Python from the flat list instead.
         generated = await proxy.attr("kubernetes").attr("generated").force_json()
-        ekn_by_path = await proxy.attr("kubernetes").attr("eknByPath").force_json()
         return {
             "config": {
                 "kubernetes": {
                     "generated": generated,
-                    "eknByPath": ekn_by_path,
                 },
             }
         }
@@ -203,14 +197,14 @@ async def evaluate_gitops_manifests(
     customer: str | None,
     attr_path: str | None,
 ) -> dict:
-    """Resolve to `{"config": {"kubernetes": {"generated": ..., "eknByPath": ...}}}`.
+    """Resolve to `{"config": {"kubernetes": {"gitopsTargets": ...}}}`.
 
-    Used by Diff/Commit/Deploy, which only ever read those two fields via
+    Used by Diff/Commit/Deploy, which only ever read this field via
     `_gitops_file_groups`. Diff/Commit previously went through the generic
     `_evaluate` -> `evaluate_file`/`evaluate_flake`, which force_json's the
     *entire* narrowed `config` (every option in every module, not just
-    kubernetes.generated/eknByPath) before `_dig()`-ing out just these two
-    fields -- forcing everything else was pure waste.
+    kubernetes.gitopsTargets) before `_dig()`-ing this field out --
+    forcing everything else was pure waste.
     """
     async with (
         _session() as session,
@@ -238,13 +232,11 @@ async def evaluate_gitops_manifests(
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
 
-        generated = await proxy.attr("kubernetes").attr("generated").force_json()
-        ekn_by_path = await proxy.attr("kubernetes").attr("eknByPath").force_json()
+        gitops_targets = await proxy.attr("kubernetes").attr("gitopsTargets").force_json()
         return {
             "config": {
                 "kubernetes": {
-                    "generated": generated,
-                    "eknByPath": ekn_by_path,
+                    "gitopsTargets": gitops_targets,
                 },
             }
         }
@@ -255,7 +247,7 @@ async def _validation_config(proxy: Any) -> dict:
         proxy = proxy.attr("config")
 
     # Deliberately does not force kubernetes.generated/generatedByPath/
-    # eknByPath: Validate.run() applies manifests via
+    # gitopsTargets: Validate.run() applies manifests via
     # internal.manifestJSONFile (a derivation built straight from
     # kubernetes.generated, see internal.nix) and never reads the fields
     # this function returns beyond what's assembled below -- forcing them
