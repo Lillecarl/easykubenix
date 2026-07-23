@@ -276,18 +276,25 @@ class TestCommit:
         async def verify(_: object) -> None:
             calls.append("verify")
 
+        async def push_cache(*_args: object, **_kwargs: object) -> None:
+            calls.append("push_cache")
+
         async def commit(_: object) -> None:
             calls.append("commit")
 
         monkeypatch.setattr(Validate, "run", verify)
+        monkeypatch.setattr("ekn.cli._push_ekn_cache", push_cache)
         monkeypatch.setattr(Commit, "run", commit)
         deploy = object.__new__(Deploy)
         deploy.no_verify = False
         deploy.flake = ".#test"
+        deploy.file = None
+        deploy.attr = None
+        deploy.cache_allow_failure = False
 
         await Deploy.run(deploy)
 
-        assert calls == ["verify", "commit"]
+        assert calls == ["verify", "push_cache", "commit"]
 
     async def test_deploy_no_verify_skips_validation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[str] = []
@@ -295,17 +302,25 @@ class TestCommit:
         async def verify(_: object) -> None:
             calls.append("verify")
 
+        async def push_cache(*_args: object, **_kwargs: object) -> None:
+            calls.append("push_cache")
+
         async def commit(_: object) -> None:
             calls.append("commit")
 
         monkeypatch.setattr(Validate, "run", verify)
+        monkeypatch.setattr("ekn.cli._push_ekn_cache", push_cache)
         monkeypatch.setattr(Commit, "run", commit)
         deploy = object.__new__(Deploy)
         deploy.no_verify = True
+        deploy.flake = ".#test"
+        deploy.file = None
+        deploy.attr = None
+        deploy.cache_allow_failure = False
 
         await Deploy.run(deploy)
 
-        assert calls == ["commit"]
+        assert calls == ["push_cache", "commit"]
 
     async def test_first_commit(self, tmp_path: Path, git_repo: Path) -> None:
         f = tmp_path / "customers.nix"

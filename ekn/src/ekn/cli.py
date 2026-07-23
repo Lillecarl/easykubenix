@@ -24,6 +24,7 @@ from pydantic import TypeAdapter, ValidationError
 from ekn.apply import apply_and_prune
 from ekn.clusterdiff import cluster_diff
 from ekn.eval import (
+    evaluate_cache_config,
     evaluate_file,
     evaluate_flake,
     evaluate_flake_ekn,
@@ -33,7 +34,9 @@ from ekn.eval import (
     evaluate_validation_config,
     evaluate_validation_file,
     evaluate_with_fod_update,
+    push_closure_to_store,
     realise_attr,
+    verbose_session,
 )
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests, try_jj_status
 from ekn.gitops import GitOpsTargetError, resolved_targets
@@ -289,23 +292,47 @@ async def _git_push(remote: str, branch: str) -> None:
 async def _push_cache(attr: str, file: _Path | None, flake: str | None, to: str, *, substitute_on_destination: bool, check_sigs: bool) -> None:
     try:
         path = await realise_attr(file, flake, attr)
+        await push_closure_to_store(
+            [path], to,
+            substitute_on_destination=substitute_on_destination,
+            check_sigs=check_sigs,
+        )
+    except NixError as exc:
+        _log.error(exc.msg_without_ansi)
+        raise SystemExit(1) from exc
+    _log.info(f"pushed {path} to {to}")
+
+
+async def _push_ekn_cache(file: _Path | None, flake: str | None, attr: str | None, *, allow_failure: bool) -> None:
+    """`Deploy`'s automatic pre-git-push cache push, sourced entirely from
+    Nix config (`ekn.cacheTo`/`ekn.cachePackage`) -- no CLI flags needed.
+
+    Must run and (by default) succeed *before* the git commit/push that
+    triggers GitOps sync: CSI-mounted store paths referenced in the
+    manifests about to be applied need to already be substitutable, or
+    those pods fail to start the moment ArgoCD/Flux syncs.
+    """
+    try:
+        uri, customer = _parse_flake(flake) if flake is not None else (None, None)
+        cfg = await evaluate_cache_config(file, uri, customer, attr)
     except NixError as exc:
         _log.error(exc.msg_without_ansi)
         raise SystemExit(1) from exc
 
-    args = ["nix", "copy", "--to", to]
-    if substitute_on_destination:
-        args.append("--substitute-on-destination")
-    if not check_sigs:
-        args.append("--no-check-sigs")
-    args += ["-v", path]
+    cache_to = cfg["cache_to"]
+    if cache_to is None:
+        _log.info("ekn.cacheTo is null -- skipping pre-deploy cache push")
+        return
 
-    proc = await asyncio.create_subprocess_exec(*args)
-    rc = await proc.wait()
-    if rc != 0:
-        _log.error(f"nix copy failed (rc={rc})")
-        raise SystemExit(1)
-    _log.info(f"pushed {path} to {to}")
+    try:
+        await push_closure_to_store([cfg["cache_package_out"]], cache_to)
+    except NixError as exc:
+        if allow_failure:
+            _log.warning(f"cache push to {cache_to} failed, continuing anyway (--cache-allow-failure)\n{exc.msg_without_ansi}")
+            return
+        _log.error(exc.msg_without_ansi)
+        raise SystemExit(1) from exc
+    _log.info(f"pushed {cfg['cache_package_out']} to {cache_to}")
 
 
 class Validate(Command):
@@ -568,14 +595,19 @@ class Validate(Command):
 
 
 class Deploy(Commit):
-    """Verify, commit, and push -- the whole release in one command.
+    """Verify, push the pre-deploy cache, commit, and push -- the whole
+    release in one command.
 
-    Chains Validate (unless --no-verify) -> Commit (render + write GitOps
-    branches, git-pushed with --push) -> an optional cache push (when
-    --cache-attr/--cache-to are both given, e.g. kluctl.projectDir's build
-    closure to a cluster-local binary cache) so newly-rebuilt store paths
-    referenced in the rendered manifests are pullable before anything
-    tries to apply them.
+    Chains Validate (unless --no-verify) -> cache push (`ekn.cacheTo`/
+    `ekn.cachePackage`, read straight from Nix config -- see
+    `evaluate_cache_config`; a no-op if `ekn.cacheTo` is unset) -> Commit
+    (render + write GitOps branches, git-pushed with --push).
+
+    The cache push runs *before* the git commit/push deliberately: ArgoCD/
+    Flux may sync the instant the branch updates, and CSI-mounted store
+    paths referenced in the manifests need to already be substitutable at
+    that point, not eventually -- a failed cache push aborts the deploy by
+    default (see --cache-allow-failure).
     """
 
     # clypi only parses fields declared directly on the class being
@@ -600,33 +632,33 @@ class Deploy(Commit):
         "commit_manifests only ever commits locally, and ArgoCD/Flux read from the remote.",
     )
     remote: str = arg("origin", help="Remote to push GitOps branches to (with --push).")
-    cache_attr: str | None = arg(
-        None,
-        help="Dot-separated attribute path to build and push after committing, e.g. 'kubenix.config.kluctl.projectDir'.",
+    cache_allow_failure: bool = arg(
+        False,
+        help="Log a warning and continue if the pre-deploy cache push fails, instead of aborting. "
+        "Off by default -- CSI-mounted pods will fail to start if referenced store paths were "
+        "never pushed, so a failed push should normally block the deploy.",
     )
-    cache_to: str | None = arg(None, help="Destination store URI for --cache-attr, e.g. ssh-ng://nix@host:2222")
-    cache_substitute_on_destination: bool = arg(
-        True, help="Let the cache destination substitute from its own configured caches instead of streaming everything."
+    verbosity: str = arg(
+        "error",
+        short="v",
+        help="Nix log verbosity for every eval/build nanopynix does during this deploy "
+        "(error, warn, notice, info, talkative, chatty, debug, vomit). `nix run "
+        "--print-build-logs` only covers building the ekn CLI package itself, not what "
+        "it does at runtime -- this is the runtime equivalent.",
     )
-    cache_check_sigs: bool = arg(False, help="Verify signatures when pushing the cache (off by default).")
+    print_build_logs: bool = arg(
+        False,
+        help="Stream build/eval log lines from nanopynix's worker to stderr as they "
+        "happen, for visibility into what's taking long during Validate/cache-push/Commit.",
+    )
     _free_port = staticmethod(Validate._free_port)
 
     async def run(self) -> None:
-        if not self.no_verify:
-            await Validate.run(cast("Validate", self))
-        await super().run()
-        if self.cache_attr and self.cache_to:
-            await _push_cache(
-                self.cache_attr,
-                self.file,
-                self.flake,
-                self.cache_to,
-                substitute_on_destination=self.cache_substitute_on_destination,
-                check_sigs=self.cache_check_sigs,
-            )
-        elif self.cache_attr or self.cache_to:
-            _log.error("--cache-attr and --cache-to must be given together")
-            raise SystemExit(1)
+        with verbose_session(self.verbosity, print_build_logs=self.print_build_logs):
+            if not self.no_verify:
+                await Validate.run(cast("Validate", self))
+            await _push_ekn_cache(self.file, self.flake, self.attr, allow_failure=self.cache_allow_failure)
+            await super().run()
 
 
 class KubeApply(Command):
@@ -746,12 +778,10 @@ class ClusterDiff(Command):
 class PushCache(Command):
     """Build a Nix attribute and copy its realised closure to a remote store.
 
-    Generalizes the `nix copy` step kluctl.nix's preDeployScript already
-    runs before every kluctl deploy (so newly-rebuilt store paths --
-    package bumps referenced in the rendered manifests, e.g. cheapam,
-    otel-collector -- are pullable before anything applies them). ArgoCD-
-    synced targets have no equivalent pre-apply hook of their own, so this
-    is meant to be run by hand (or from CI) before syncing one.
+    Manual/ad-hoc escape hatch (or for CI) for pushing an arbitrary
+    attribute's closure -- for the routine per-deploy case, `ekn deploy`
+    already does this automatically from `ekn.cacheTo`/`ekn.cachePackage`,
+    no flags needed (see `Deploy`).
     """
     @classmethod
     def prog(cls) -> str:

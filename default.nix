@@ -76,6 +76,7 @@ let
         };
       }
       ./easykubenix/assertions.nix
+      ./easykubenix/ekn.nix
       ./easykubenix/gitops.nix
       ./easykubenix/helm.nix
       ./easykubenix/importyaml.nix

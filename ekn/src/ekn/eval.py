@@ -3,14 +3,18 @@ from __future__ import annotations
 import os
 import sys
 import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from os import PathLike
 from typing import Any
 
 from anyio import Path
 from nanopynix import NixError, NixEvalSettings, NixSettings, Session
+from nanopynix.models import LogEvent
 from nanopynix.primops import yaml_primops
+from nanopynix.verbosity import LogLevelInput
+from nanopynix_proto.nix.common import LogEvent as LogEventProto
 from nanopynix_helpers.fod import (
     derivation_name_from_path,
     extract_fod_hash_mismatch,
@@ -20,6 +24,42 @@ from nanopynix_helpers.fod import (
 )
 
 _SESSION_SETTINGS = NixSettings()
+
+# Every `_session()` call anywhere below reads these -- letting `ekn deploy`
+# turn on verbosity/print-build-logs for its whole Validate -> cache-push ->
+# Commit chain (each step opens its own Session) without threading extra
+# parameters through every `evaluate_*` helper's signature.
+_VERBOSITY: ContextVar[LogLevelInput] = ContextVar("_verbosity", default="error")
+_PRINT_BUILD_LOGS: ContextVar[bool] = ContextVar("_print_build_logs", default=False)
+
+
+def _print_log_event(raw: object) -> None:
+    if not isinstance(raw, LogEventProto):
+        return
+    event = LogEvent.from_proto(raw)
+    if event.result_type is not None and "BUILD_LOG" in event.result_type.name:
+        line = event.args[-1] if event.args else None
+        if isinstance(line, str):
+            sys.stderr.write(line if line.endswith("\n") else line + "\n")
+        return
+    message = event.message_without_ansi
+    if message:
+        sys.stderr.write(message + "\n")
+
+
+@contextmanager
+def verbose_session(verbosity: LogLevelInput, *, print_build_logs: bool) -> Iterator[None]:
+    """Turn up nanopynix's own logging for every `_session()` opened inside
+    this block -- real Nix build/eval progress that `nix run
+    --print-build-logs` can't see (that flag only covers building the `ekn`
+    CLI package itself, not what it does at runtime)."""
+    verbosity_token = _VERBOSITY.set(verbosity)
+    print_token = _PRINT_BUILD_LOGS.set(print_build_logs)
+    try:
+        yield
+    finally:
+        _VERBOSITY.reset(verbosity_token)
+        _PRINT_BUILD_LOGS.reset(print_token)
 
 
 def _profiler_eval_settings() -> NixEvalSettings | None:
@@ -44,14 +84,19 @@ def _profiler_eval_settings() -> NixEvalSettings | None:
 async def _session() -> AsyncIterator[Session]:
     async with Session(
         settings=_SESSION_SETTINGS,
-        verbosity="error",
+        verbosity=_VERBOSITY.get(),
         # yaml_primops() (fromYAML/fromYAML11/*Stream/toYAML) are bundled
         # with nanopynix but opt-in, not auto-registered by Session -- needed
         # so Nix-side chart-rendering code (renderChart.nix) can parse
         # `helm template`'s IFD-built output in-process via fromYAML11Stream.
         primops=yaml_primops(),
     ) as session:
-        yield session
+        sub = session.subscribe(_print_log_event) if _PRINT_BUILD_LOGS.get() else None
+        try:
+            yield session
+        finally:
+            if sub is not None:
+                sub.unsubscribe()
 
 
 async def evaluate_file(file: str | PathLike[str], attr_path: str | None) -> object:
@@ -406,6 +451,56 @@ async def evaluate_kubeapply_config(
         }
 
 
+async def evaluate_cache_config(
+    file: str | PathLike[str] | None,
+    flake_uri: str | None,
+    customer: str | None,
+    attr_path: str | None,
+) -> dict:
+    """Resolve `ekn.cacheTo` and build `ekn.cachePackage`, for `Deploy`'s
+    automatic pre-git-push cache push (see `cli.py`'s `Deploy.run`).
+
+    Never forces the whole config, matching `evaluate_gitops_manifests`'s
+    rationale. `cachePackage`'s closure is realized by `.build()`-ing it here
+    (its derivation inputs are every store path embedded anywhere in
+    `kubernetes.generated`, via Nix string context) -- `copy_closure` then
+    only needs this one output path; libnixstore computes the rest of the
+    closure to copy from the store's own reference graph, not from Python.
+    """
+    async with (
+        _session() as session,
+        session.store() as store,
+        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
+    ):
+        if flake_uri is not None:
+            outputs = await eval_.eval_flake(flake_uri)
+            if customer:
+                system = await (await eval_.string("builtins.currentSystem")).force_json()
+                proxy = outputs.attr("eknConfig").attr(str(system)).attr(customer)
+            else:
+                proxy = outputs
+        elif file is not None:
+            proxy = await (await eval_.file(str(file))).auto_call()
+        else:
+            raise ValueError("specify --file or --flake")
+
+        if attr_path:
+            for name in attr_path.split("."):
+                if not name:
+                    raise ValueError(f"empty segment in attr path: {attr_path!r}")
+                proxy = proxy.attr(name)
+
+        if await proxy.has_attr("config"):
+            proxy = proxy.attr("config")
+
+        cache_to = await proxy.attr("ekn").attr("cacheTo").force_json()
+        if cache_to is None:
+            return {"cache_to": None, "cache_package_out": None}
+
+        cache_package_out = (await proxy.attr("ekn").attr("cachePackage").build()).get("out")
+        return {"cache_to": cache_to, "cache_package_out": cache_package_out}
+
+
 async def realise_attr(
     file: str | PathLike[str] | None,
     flake_uri: str | None,
@@ -413,14 +508,10 @@ async def realise_attr(
 ) -> str:
     """Build the Nix value at `attr_path` and return its realised store path.
 
-    Backs `ekn pushcache`: builds an arbitrary attribute (e.g. hetzkube's
-    `kubenix.config.kluctl.projectDir`, whose rendered JSON keeps Nix string
-    context on every store path it references) and realises that context --
-    i.e. actually builds the full closure. This is the same thing
-    kluctl.nix's preDeployScript already does with a bare `nix copy` for
-    kluctl-applied objects, generalized so targets with no pre-apply hook of
-    their own (e.g. an ArgoCD-synced GitOps target) can push their closure
-    to a binary cache too, before anything tries to pull it.
+    Backs `ekn pushcache`: builds an arbitrary user-specified attribute
+    (whose rendered value keeps Nix string context on every store path it
+    references) and realises that context -- i.e. actually builds the full
+    closure -- so `push_closure_to_store` has a real path to copy.
     """
     async with (
         _session() as session,
@@ -440,6 +531,37 @@ async def realise_attr(
             proxy = proxy.attr(name)
 
         return await proxy.realise_string()
+
+
+async def push_closure_to_store(
+    paths: list[str],
+    to: str,
+    *,
+    substitute_on_destination: bool = True,
+    check_sigs: bool = False,
+) -> None:
+    """Copy the closure of already-realised `paths` to the store at `to`.
+
+    Pure store-to-store copy, no evaluation involved -- backs both
+    `ekn pushcache` (paths from `realise_attr`) and `Deploy`'s automatic
+    pre-git-push cache push (paths from `evaluate_cache_config`). Opens a
+    fresh source + destination store pair in one session (a copy_closure
+    destination must share the session/worker of the store it's called
+    against -- see nanopynix's Store.copy_closure), rather than reusing
+    whatever session/store originally realised the paths -- the physical
+    Nix store on disk is what actually matters, not which in-process Store
+    handle built it.
+    """
+    async with (
+        _session() as session,
+        session.store() as source,
+        session.store(uri=to) as dest,
+    ):
+        await source.copy_closure(
+            paths, dest,
+            substitute=substitute_on_destination,
+            check_sigs=check_sigs,
+        )
 
 
 async def _validation_config(proxy: Any) -> dict:

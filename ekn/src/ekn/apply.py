@@ -162,9 +162,20 @@ async def apply_and_prune(
         ):
             if not isinstance(obj, APIObject):
                 continue
-            key = _object_key(obj)
+            # Not `_object_key(obj)`: for CRD kinds (no static kr8s class),
+            # `api.async_get`'s own internal `async_lookup_kind` call
+            # reassigns its `kind` param to a `"singular.group/version"`
+            # string, which `new_class` then mis-splits on the first "." --
+            # the listed object's `.kind` ends up as the lowercase singular
+            # name (e.g. "verticalpodautoscaler"), not the PascalCase Kind
+            # (e.g. "VerticalPodAutoscaler") `desired_keys` was built from
+            # while applying. Use the loop's own `kind` (identical to what
+            # `_object_key` used at apply time) instead of trusting the
+            # listed object's mangled one -- otherwise every CRD-based
+            # object's key mismatches and everything gets "pruned".
+            key = (obj.namespace or "none", kind, obj.name)
             if key not in desired_keys:
-                _log.info("pruning", kind=obj.kind, namespace=obj.namespace, name=obj.name)
+                _log.info("pruning", kind=kind, namespace=obj.namespace, name=obj.name)
                 await obj.delete()
 
 

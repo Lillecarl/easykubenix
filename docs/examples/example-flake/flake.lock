@@ -1,7 +1,23 @@
 {
   "nodes": {
+    "adios": {
+      "locked": {
+        "lastModified": 1772186395,
+        "narHash": "sha256-NshyMZYZwjKMLKEX0eDf9Fcekq8MFNFk02wW5knzlZU=",
+        "owner": "adisbladis",
+        "repo": "adios",
+        "rev": "6a54071689ec9ec784a16e4eec8ddb864eca2982",
+        "type": "github"
+      },
+      "original": {
+        "owner": "adisbladis",
+        "repo": "adios",
+        "type": "github"
+      }
+    },
     "easykubenix": {
       "inputs": {
+        "adios": "adios",
         "flake-compatish": "flake-compatish",
         "nanopynix": "nanopynix",
         "nixpkgs": "nixpkgs"
@@ -18,11 +34,11 @@
     },
     "flake-compatish": {
       "locked": {
-        "lastModified": 1771176559,
-        "narHash": "sha256-V07a8KsYGj8nvMuBfF7PO88Tzqg3LJjxuIasgR5Mx3o=",
+        "lastModified": 1783984082,
+        "narHash": "sha256-A7Xl565OqEU7VCqq1hEBw5AzOTicFttZggJnA17tpSU=",
         "owner": "lillecarl",
         "repo": "flake-compatish",
-        "rev": "d8c944d4df613d47a3dc7b800c7531c33323c845",
+        "rev": "30cb7674c79484293588da00f39e6cd5eb36865c",
         "type": "github"
       },
       "original": {
@@ -31,19 +47,75 @@
         "type": "github"
       }
     },
-    "nanopynix": {
+    "flake-compatish_2": {
+      "locked": {
+        "lastModified": 1783984082,
+        "narHash": "sha256-A7Xl565OqEU7VCqq1hEBw5AzOTicFttZggJnA17tpSU=",
+        "owner": "lillecarl",
+        "repo": "flake-compatish",
+        "rev": "30cb7674c79484293588da00f39e6cd5eb36865c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "lillecarl",
+        "repo": "flake-compatish",
+        "type": "github"
+      }
+    },
+    "flake-compatish_3": {
+      "locked": {
+        "lastModified": 1783975188,
+        "narHash": "sha256-GH6Z1/0LXbQ6tKEWwpeVfrWvWvCJhte8B6yTQMMtIfQ=",
+        "owner": "lillecarl",
+        "repo": "flake-compatish",
+        "rev": "1a139e919618779b02154f8b9f05d5346a0aabf1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "lillecarl",
+        "repo": "flake-compatish",
+        "type": "github"
+      }
+    },
+    "grpclib-transports": {
       "inputs": {
+        "flake-compatish": "flake-compatish_3",
         "nixpkgs": [
           "easykubenix",
+          "nanopynix",
           "nixpkgs"
         ]
       },
       "locked": {
-        "lastModified": 1783872059,
-        "narHash": "sha256-zDUwFEjnD+WazSnPt6J5MA3NKs6XfoHLTjygvP2KGvQ=",
+        "lastModified": 1783975976,
+        "narHash": "sha256-LlzY7q2yOR9NJ/VGnIE1R3ZF0VrB6P5EncJNqBz9AgM=",
+        "owner": "lillecarl",
+        "repo": "grpclib-transports",
+        "rev": "d7544b9dec34ab5098368c70bf2522db62bed159",
+        "type": "github"
+      },
+      "original": {
+        "owner": "lillecarl",
+        "repo": "grpclib-transports",
+        "type": "github"
+      }
+    },
+    "nanopynix": {
+      "inputs": {
+        "flake-compatish": "flake-compatish_2",
+        "grpclib-transports": "grpclib-transports",
+        "nixpkgs": [
+          "easykubenix",
+          "nixpkgs"
+        ],
+        "pyproject-nix": "pyproject-nix"
+      },
+      "locked": {
+        "lastModified": 1784144293,
+        "narHash": "sha256-twrMfc9grf4u+WvZj8mNHsRAzmGw1eqyvfq6b+rXJgM=",
         "owner": "lillecarl",
         "repo": "nanopynix",
-        "rev": "2fb0ef8a2e4a8f4adf0054d5a1f1f510e0b56675",
+        "rev": "e0aed895c92b72e31d7c43cee782053058c9066f",
         "type": "github"
       },
       "original": {
@@ -55,11 +127,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1783279667,
-        "narHash": "sha256-/NAkDSsve+GNM0Bt6tleJdCGfsTlK89nPjkVOzZMo0s=",
+        "lastModified": 1784115452,
+        "narHash": "sha256-BoYPdqk6jlKXy+DyUzyGV/CtRGfAhk2MmIgBhsemTGI=",
         "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "f205b5574fd0cb7da5b702a2da51507b7f4fdd1b",
+        "rev": "35d3407a3816f3b341d8cf1d60abaf2b7b8166ac",
         "type": "github"
       },
       "original": {
@@ -82,6 +154,28 @@
         "owner": "nixos",
         "ref": "nixpkgs-unstable",
         "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "pyproject-nix": {
+      "inputs": {
+        "nixpkgs": [
+          "easykubenix",
+          "nanopynix",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1782905613,
+        "narHash": "sha256-SvXJcAemihifkTn4BGvyE5K1FJX9bl4U8DQ5pqKvD0s=",
+        "owner": "pyproject-nix",
+        "repo": "pyproject.nix",
+        "rev": "7af23cfe91064865ecf2e835da28b45b3c6f49fd",
+        "type": "github"
+      },
+      "original": {
+        "owner": "pyproject-nix",
+        "repo": "pyproject.nix",
         "type": "github"
       }
     },
