@@ -318,6 +318,42 @@ async def evaluate_kubeapply_config(
         }
 
 
+async def realise_attr(
+    file: str | PathLike[str] | None,
+    flake_uri: str | None,
+    attr_path: str,
+) -> str:
+    """Build the Nix value at `attr_path` and return its realised store path.
+
+    Backs `ekn pushcache`: builds an arbitrary attribute (e.g. hetzkube's
+    `kubenix.config.kluctl.projectDir`, whose rendered JSON keeps Nix string
+    context on every store path it references) and realises that context --
+    i.e. actually builds the full closure. This is the same thing
+    kluctl.nix's preDeployScript already does with a bare `nix copy` for
+    kluctl-applied objects, generalized so targets with no pre-apply hook of
+    their own (e.g. an ArgoCD-synced GitOps target) can push their closure
+    to a binary cache too, before anything tries to pull it.
+    """
+    async with (
+        _session() as session,
+        session.store() as store,
+        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
+    ):
+        if flake_uri is not None:
+            proxy = await eval_.eval_flake(flake_uri)
+        elif file is not None:
+            proxy = await (await eval_.file(str(file))).auto_call()
+        else:
+            raise ValueError("specify --file or --flake")
+
+        for name in attr_path.split("."):
+            if not name:
+                raise ValueError(f"empty segment in attr path: {attr_path!r}")
+            proxy = proxy.attr(name)
+
+        return await proxy.realise_string()
+
+
 async def _validation_config(proxy: Any) -> dict:
     if await proxy.has_attr("config"):
         proxy = proxy.attr("config")

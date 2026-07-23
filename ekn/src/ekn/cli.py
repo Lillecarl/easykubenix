@@ -32,6 +32,7 @@ from ekn.eval import (
     evaluate_kubeapply_config,
     evaluate_validation_config,
     evaluate_validation_file,
+    realise_attr,
 )
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests, try_jj_status
 from ekn.gitops import GitOpsTargetError, resolved_targets
@@ -610,6 +611,57 @@ class ClusterDiff(Command):
             _log.info("no differences")
 
 
+class PushCache(Command):
+    """Build a Nix attribute and copy its realised closure to a remote store.
+
+    Generalizes the `nix copy` step kluctl.nix's preDeployScript already
+    runs before every kluctl deploy (so newly-rebuilt store paths --
+    package bumps referenced in the rendered manifests, e.g. cheapam,
+    otel-collector -- are pullable before anything applies them). ArgoCD-
+    synced targets have no equivalent pre-apply hook of their own, so this
+    is meant to be run by hand (or from CI) before syncing one.
+    """
+    @classmethod
+    def prog(cls) -> str:
+        return "pushcache"
+
+    file: _Path | None = arg(None, short="f", inherited=True)
+    flake: str | None = arg(None, inherited=True)
+    attr: str = arg(help="Dot-separated attribute path to build and push, e.g. 'kubenix.config.kluctl.projectDir'.")
+    to: str = arg(help="Destination store URI, e.g. ssh-ng://nix@host:2222")
+    substitute_on_destination: bool = arg(
+        True, help="Let the destination substitute from its own configured caches instead of streaming everything."
+    )
+    check_sigs: bool = arg(
+        False, help="Verify signatures when copying (off by default, matching kluctl's existing preDeployScript)."
+    )
+
+    async def run(self) -> None:
+        try:
+            path = await realise_attr(self.file, self.flake, self.attr)
+        except NixError as exc:
+            _log.error(exc.msg_without_ansi)
+            raise SystemExit(1) from exc
+
+        args = ["nix", "copy", "--to", self.to]
+        if self.substitute_on_destination:
+            args.append("--substitute-on-destination")
+        if not self.check_sigs:
+            args.append("--no-check-sigs")
+        args += ["-v", path]
+
+        # Inherit stdio rather than the usual capture-then-log `_exec`
+        # helper -- `nix copy`'s `-v` progress output for a real closure
+        # can run to hundreds of lines, and the user watching this run
+        # wants to see it stream, not get it dumped as one blob at the end.
+        proc = await asyncio.create_subprocess_exec(*args)
+        rc = await proc.wait()
+        if rc != 0:
+            _log.error("nix copy failed (rc=%d)", rc)
+            raise SystemExit(1)
+        _log.info(f"pushed {path} to {self.to}")
+
+
 class SplitManifest(Command):
     """Split a JSON manifest list into a namespace/kind/name.yaml directory tree.
 
@@ -704,6 +756,7 @@ class Ekn(Command):
         | Validate
         | KubeApply
         | ClusterDiff
+        | PushCache
         | SplitManifest
         | YamlToJson
         | JsonToYaml
@@ -733,6 +786,7 @@ class Ekn(Command):
             print("  validate      Boot real etcd+kube-apiserver, apply manifests, run kubeconform.")
             print("  kubeapply     Apply Kubernetes objects directly against the current kubeconfig context.")
             print("  clusterdiff   Diff Kubernetes objects against the live cluster's actual current state.")
+            print("  pushcache     Build a Nix attribute and copy its realised closure to a remote store.")
             raise SystemExit(0)
         result = await _evaluate(self.file, self.flake, self.attr)
         json.dump(result, sys.stdout, indent=2, default=str)

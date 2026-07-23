@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import anyio
 import nanopynix
 import pytest
 
-from ekn.eval import evaluate_file
+from ekn.eval import evaluate_file, realise_attr
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 NIX_TEST_FILE = PROJECT_ROOT / "tests/test_eval.nix"
@@ -42,6 +43,36 @@ class TestSimpleEval:
             root = await eval_.string("[ 1 2 3 ]")
             result = await root.force_json()
         assert result == [1, 2, 3]
+
+
+class TestRealiseAttr:
+    async def test_builds_and_returns_store_path(self, tmp_path: Path) -> None:
+        compat_path = PROJECT_ROOT / "nix/compat.nix"
+        f = tmp_path / "drv.nix"
+        f.write_text(f"""
+            let
+              compat = import {compat_path};
+              pkgs = import compat.inputs.nixpkgs {{ }};
+            in
+            {{ thing = pkgs.writeText "ekn-realise-test" "hello from ekn"; }}
+        """)
+
+        path = await realise_attr(f, None, "thing")
+
+        built = anyio.Path(path)
+        assert await built.is_file()
+        assert await built.read_text() == "hello from ekn"
+
+    async def test_rejects_empty_segment(self, tmp_path: Path) -> None:
+        f = tmp_path / "drv.nix"
+        f.write_text("{ }")
+
+        with pytest.raises(ValueError, match="empty segment"):
+            await realise_attr(f, None, "foo..bar")
+
+    async def test_requires_file_or_flake(self) -> None:
+        with pytest.raises(ValueError, match="specify --file or --flake"):
+            await realise_attr(None, None, "thing")
 
 
 class TestEknModule:
