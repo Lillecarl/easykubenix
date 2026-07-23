@@ -221,6 +221,12 @@ class Commit(Command):
     flake: str | None = arg(None, inherited=True)
     attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
     message: str | None = arg(None, short="m", help="Commit message.")
+    push: bool = arg(
+        False,
+        help="git push each committed GitOps branch to its remote afterwards -- "
+        "commit_manifests only ever commits locally, and ArgoCD/Flux read from the remote.",
+    )
+    remote: str = arg("origin", help="Remote to push GitOps branches to (with --push).")
 
     async def run(self) -> None:
         result = await _evaluate_gitops(self.file, self.flake, self.attr)
@@ -244,7 +250,40 @@ class Commit(Command):
                 _log.error("commit failed: %s", exc)
                 raise SystemExit(1) from exc
             _log.info("committed to %s @ %s", branch, commit_id)
+            if self.push:
+                await _git_push(self.remote, branch)
         await try_jj_status(".")
+
+
+async def _git_push(remote: str, branch: str) -> None:
+    _log.info(f"pushing {branch} to {remote}")
+    proc = await asyncio.create_subprocess_exec("git", "push", remote, branch)
+    rc = await proc.wait()
+    if rc != 0:
+        _log.error(f"git push {remote} {branch} failed (rc={rc})")
+        raise SystemExit(1)
+
+
+async def _push_cache(attr: str, file: _Path | None, flake: str | None, to: str, *, substitute_on_destination: bool, check_sigs: bool) -> None:
+    try:
+        path = await realise_attr(file, flake, attr)
+    except NixError as exc:
+        _log.error(exc.msg_without_ansi)
+        raise SystemExit(1) from exc
+
+    args = ["nix", "copy", "--to", to]
+    if substitute_on_destination:
+        args.append("--substitute-on-destination")
+    if not check_sigs:
+        args.append("--no-check-sigs")
+    args += ["-v", path]
+
+    proc = await asyncio.create_subprocess_exec(*args)
+    rc = await proc.wait()
+    if rc != 0:
+        _log.error(f"nix copy failed (rc={rc})")
+        raise SystemExit(1)
+    _log.info(f"pushed {path} to {to}")
 
 
 class Validate(Command):
@@ -483,18 +522,61 @@ class Validate(Command):
 
 
 class Deploy(Commit):
-    """Verify and write GitOps-routed manifests to their target branches."""
+    """Verify, commit, and push -- the whole release in one command.
+
+    Chains Validate (unless --no-verify) -> Commit (render + write GitOps
+    branches, git-pushed with --push) -> an optional cache push (when
+    --cache-attr/--cache-to are both given, e.g. kluctl.projectDir's build
+    closure to a cluster-local binary cache) so newly-rebuilt store paths
+    referenced in the rendered manifests are pullable before anything
+    tries to apply them.
+    """
 
     no_verify: bool = arg(
         False,
         help="Skip temporary API-server and kubeconform verification.",
     )
+    # clypi only parses fields declared directly on this command's own class
+    # body -- a field only declared on a Python base class (Commit's push/
+    # remote/message here) isn't exposed as a flag on a sibling subcommand
+    # just because Deploy(Commit) inherits it in Python. Redeclared here
+    # (not inherited=True, which means something different: "value comes
+    # from a parent node in the actual CLI tree", e.g. Ekn's file/flake/attr)
+    # so `ekn deploy` actually parses them itself.
+    message: str | None = arg(None, short="m", help="Commit message.")
+    push: bool = arg(
+        False,
+        help="git push each committed GitOps branch to its remote afterwards -- "
+        "commit_manifests only ever commits locally, and ArgoCD/Flux read from the remote.",
+    )
+    remote: str = arg("origin", help="Remote to push GitOps branches to (with --push).")
+    cache_attr: str | None = arg(
+        None,
+        help="Dot-separated attribute path to build and push after committing, e.g. 'kubenix.config.kluctl.projectDir'.",
+    )
+    cache_to: str | None = arg(None, help="Destination store URI for --cache-attr, e.g. ssh-ng://nix@host:2222")
+    cache_substitute_on_destination: bool = arg(
+        True, help="Let the cache destination substitute from its own configured caches instead of streaming everything."
+    )
+    cache_check_sigs: bool = arg(False, help="Verify signatures when pushing the cache (off by default).")
     _free_port = staticmethod(Validate._free_port)
 
     async def run(self) -> None:
         if not self.no_verify:
             await Validate.run(cast(Validate, self))
         await super().run()
+        if self.cache_attr and self.cache_to:
+            await _push_cache(
+                self.cache_attr,
+                self.file,
+                self.flake,
+                self.cache_to,
+                substitute_on_destination=self.cache_substitute_on_destination,
+                check_sigs=self.cache_check_sigs,
+            )
+        elif self.cache_attr or self.cache_to:
+            _log.error("--cache-attr and --cache-to must be given together")
+            raise SystemExit(1)
 
 
 class KubeApply(Command):
@@ -637,29 +719,14 @@ class PushCache(Command):
     )
 
     async def run(self) -> None:
-        try:
-            path = await realise_attr(self.file, self.flake, self.attr)
-        except NixError as exc:
-            _log.error(exc.msg_without_ansi)
-            raise SystemExit(1) from exc
-
-        args = ["nix", "copy", "--to", self.to]
-        if self.substitute_on_destination:
-            args.append("--substitute-on-destination")
-        if not self.check_sigs:
-            args.append("--no-check-sigs")
-        args += ["-v", path]
-
-        # Inherit stdio rather than the usual capture-then-log `_exec`
-        # helper -- `nix copy`'s `-v` progress output for a real closure
-        # can run to hundreds of lines, and the user watching this run
-        # wants to see it stream, not get it dumped as one blob at the end.
-        proc = await asyncio.create_subprocess_exec(*args)
-        rc = await proc.wait()
-        if rc != 0:
-            _log.error("nix copy failed (rc=%d)", rc)
-            raise SystemExit(1)
-        _log.info(f"pushed {path} to {self.to}")
+        await _push_cache(
+            self.attr,
+            self.file,
+            self.flake,
+            self.to,
+            substitute_on_destination=self.substitute_on_destination,
+            check_sigs=self.check_sigs,
+        )
 
 
 class SplitManifest(Command):
