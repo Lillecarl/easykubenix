@@ -532,17 +532,21 @@ class Deploy(Commit):
     tries to apply them.
     """
 
+    # clypi only parses fields declared directly on the class being
+    # instantiated for that CLI node -- Deploy(Commit) inheriting a field
+    # in Python (file/flake/attr included, not just push/remote/message)
+    # doesn't expose it as a flag on the sibling 'deploy' subcommand unless
+    # redeclared here too, `inherited=True` or not. `inherited=True` only
+    # changes value-resolution/help-grouping semantics ("this value comes
+    # from a parent node in the actual CLI tree"), not whether the field
+    # needs (re)declaring on each command node that wants to parse it.
+    file: _Path | None = arg(None, short="f", inherited=True)
+    flake: str | None = arg(None, inherited=True)
+    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
     no_verify: bool = arg(
         False,
         help="Skip temporary API-server and kubeconform verification.",
     )
-    # clypi only parses fields declared directly on this command's own class
-    # body -- a field only declared on a Python base class (Commit's push/
-    # remote/message here) isn't exposed as a flag on a sibling subcommand
-    # just because Deploy(Commit) inherits it in Python. Redeclared here
-    # (not inherited=True, which means something different: "value comes
-    # from a parent node in the actual CLI tree", e.g. Ekn's file/flake/attr)
-    # so `ekn deploy` actually parses them itself.
     message: str | None = arg(None, short="m", help="Commit message.")
     push: bool = arg(
         False,
@@ -563,7 +567,7 @@ class Deploy(Commit):
 
     async def run(self) -> None:
         if not self.no_verify:
-            await Validate.run(cast(Validate, self))
+            await Validate.run(cast("Validate", self))
         await super().run()
         if self.cache_attr and self.cache_to:
             await _push_cache(
