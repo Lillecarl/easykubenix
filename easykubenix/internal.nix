@@ -67,34 +67,6 @@
       a: b: (getApplyPriority a.kind) < (getApplyPriority b.kind)
     ) config.kubernetes.generated;
 
-    # Makes a valid YAML string, supports multiple documents or single attrsets,
-    # documents will be JSON formatted since Nix can't render YAML.
-    toYAMLStr =
-      input:
-      if builtins.typeOf input == "list" then
-        lib.concatStringsSep "\n---\n" (map (doc: builtins.toJSON doc) input)
-      else if builtins.typeOf input == "set" then
-        builtins.toJSON input
-      else
-        throw "toYAML only supports set and list types";
-
-    # Makes a valid YAML string, supports multiple documents or single attrsets,
-    # reformatted using "yq-go".
-    toYAMLFile =
-      filename: input:
-      pkgs.runCommand filename
-        {
-          nativeBuildInputs = [
-            pkgs.yq-go
-          ];
-          yamlContent = toYAMLStr input;
-          passAsFile = [ "yamlContent" ];
-        }
-        #bash
-        ''
-          yq --prettyPrint < $yamlContentPath > $out
-        '';
-
     manifestAttrs = {
       apiVersion = "v1";
       kind = "List";
@@ -129,13 +101,25 @@
         '';
 
     # Beware that YAML rendering requires IFD
-    manifestYAMLList = builtins.readFile manifestYAMLFile;
-    manifestYAMLFileList =
-      pkgs.runCommand "manifest.yaml" { } # bash
+    # `_jsonToYAML` is the same derivation-fallback CLI subcommand
+    # importyaml.nix's `_yamlToJson` counterpart uses, reusing nanopynix's
+    # `to_yaml` so this stays byte-for-byte consistent with the in-process
+    # `toYAML` primop path -- no more `yq` (whose old heredoc-based
+    # invocation broke on manifest content containing a bare "EOF" line,
+    # since an unquoted heredoc delimiter also gets scanned for inside
+    # interpolated content, silently truncating the input and dumping the
+    # remainder as literal shell commands).
+    manifestYAMLFile =
+      pkgs.runCommand "manifest.yaml"
+        {
+          nativeBuildInputs = [ eknPackage ];
+          json = manifestJSON;
+          passAsFile = [ "json" ];
+        }
         ''
-          ${lib.getExe pkgs.yq} --yaml-output '.' ${manifestJSONFile} > $out
+          ekn _jsonToYAML < "$jsonPath" > $out
         '';
     manifestYAML = builtins.readFile manifestYAMLFile;
-    manifestYAMLFile = toYAMLFile "nix-csi.yaml" generatedOrdered;
+    manifestYAMLList = builtins.readFile manifestYAMLFile;
   };
 }
