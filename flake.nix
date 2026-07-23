@@ -29,7 +29,6 @@
         in
         {
           inherit (defNix.passthru)
-            ekn
             nanopynix
             nanopynix-bindings
             nanopynix-helpers
@@ -43,11 +42,9 @@
         system:
         let
           pkgs = inputs.self.nixpkgs.legacyPackages.${system};
-          defNix = eachDefNix.${system};
         in
         {
           default = pkgs.python3Packages.callPackage ./nix/shell.nix {
-            ekn = defNix.passthru.ekn;
             ruff = pkgs.ruff;
           };
         }

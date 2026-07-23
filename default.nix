@@ -18,10 +18,6 @@ let
   template = definition: adios definition { };
   clypi = pkgs.python3Packages.callPackage ./nix/clypi.nix { };
   kr8s = pkgs.python3Packages.callPackage ./nix/kr8s.nix { };
-  ekn = pkgs.python3Packages.callPackage ./ekn {
-    inherit (nanopynix) nanopynix nanopynix-helpers;
-    inherit clypi kr8s;
-  };
   easykubenix-docs = pkgs.python3Packages.callPackage ./nix/docs.nix { };
 
   eval = lib.evalModules {
@@ -39,15 +35,18 @@ let
           # be conflated with the `ekn` module-arg below (GitOps helpers) or
           # `object.ekn` (GitOps-routing metadata, see kubernetes.nix's
           # `ekn.gitOpsTarget`/`gitopsTargets`) -- same word, three unrelated
-          # meanings in this codebase, kept in separate namespaces.
-          eknPackage = ekn;
+          # meanings in this codebase, kept in separate namespaces. Sourced
+          # straight from the nanopynix input rather than a local binding --
+          # easykubenix no longer builds or exposes ekn as its own package
+          # (see pynix's `ekn` subcommand); this is purely an internal
+          # build-time tool for parseYamlStream.nix's IFD fallback below.
+          eknPackage = nanopynix.ekn;
           # Helper functions for consuming modules, distinct from `object.ekn`
           # (GitOps-routing metadata on rendered Kubernetes objects, see
           # kubernetes.nix's `ekn.gitOpsTarget`/`gitopsTargets`) and the
-          # top-level `ekn` CLI package bound above (exposed via
-          # `passthru.ekn`/`eknPackage`) -- same word, three unrelated
-          # meanings in this codebase, kept in separate namespaces by
-          # construction (module function-arg vs. object attrset field vs.
+          # `ekn` CLI package bound above as `eknPackage` -- same word, three
+          # unrelated meanings in this codebase, kept in separate namespaces
+          # by construction (module function-arg vs. object attrset field vs.
           # outer let-binding), but worth this note so nobody conflates them.
           ekn = {
             # Recursively wrap every leaf of an attrset in `lib.mkDefault`,
@@ -69,7 +68,7 @@ let
               # parseYamlStream.nix.
               parseYAMLStream = import ./easykubenix/lib/parseYamlStream.nix {
                 inherit lib pkgs;
-                eknPackage = ekn;
+                eknPackage = nanopynix.ekn;
               };
             };
           };
@@ -118,7 +117,6 @@ in
       lib
       adios
       eval
-      ekn
       clypi
       kr8s
       easykubenix-docs
