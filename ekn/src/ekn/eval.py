@@ -377,6 +377,12 @@ async def _validation_config(proxy: Any) -> dict:
     resource_priority = await proxy.attr("kluctl").attr("resourcePriority").force_json()
     discriminator = await proxy.attr("kluctl").attr("discriminator").force_json()
 
+    # Cheap -- just {kind, namespace, name} triples, not full objects (see
+    # kubernetes.nix's novalidateKeys) -- lets Validate.run() skip applying
+    # objects that can never be meaningfully verified in this ephemeral
+    # harness without re-forcing the entire generated set a second time.
+    novalidate_keys = await proxy.attr("kubernetes").attr("novalidateKeys").force_json()
+
     etcd_out = (await v.attr("etcdPackage").build()).get("out")
     kubeconform_out = (await v.attr("kubeconformPackage").build()).get("out")
     k8s_out = (await proxy.attr("kubernetes").attr("package").build()).get("out")
@@ -400,6 +406,7 @@ async def _validation_config(proxy: Any) -> dict:
                 "discriminator": discriminator,
             },
             "internal": {"manifestJSONFile": {"outPath": manifest_out}},
+            "novalidateKeys": novalidate_keys,
         }
     }
 

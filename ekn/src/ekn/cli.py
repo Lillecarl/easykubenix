@@ -465,6 +465,30 @@ class Validate(Command):
             _log.info("applying manifests")
             manifest_list = json.loads(await Path(manifest_path).read_text())
             objects = manifest_list["items"] if isinstance(manifest_list, dict) else manifest_list
+            # Skip objects that can never be meaningfully verified in this
+            # throwaway, controller-less apiserver (e.g. an aggregated
+            # APIService whose backing Service/Pod never actually runs
+            # here) -- see kubernetes.nix's `ekn.novalidate`/`novalidateKeys`.
+            novalidate_keys = {
+                (k["kind"], k["namespace"], k["name"]) for k in c.get("novalidateKeys", [])
+            }
+            if novalidate_keys:
+                skipped = [
+                    obj for obj in objects
+                    if (obj["kind"], obj.get("metadata", {}).get("namespace", "none"), obj["metadata"]["name"])
+                    in novalidate_keys
+                ]
+                for obj in skipped:
+                    _log.info(
+                        "skipping (novalidate)", kind=obj["kind"],
+                        namespace=obj.get("metadata", {}).get("namespace"),
+                        name=obj["metadata"]["name"],
+                    )
+                objects = [
+                    obj for obj in objects
+                    if (obj["kind"], obj.get("metadata", {}).get("namespace", "none"), obj["metadata"]["name"])
+                    not in novalidate_keys
+                ]
             objects = [await maybe_decrypt(obj) for obj in objects]
             kr8s_api = await kr8s.asyncio.api(kubeconfig=kubeconfig)
             try:

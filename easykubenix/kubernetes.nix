@@ -157,6 +157,22 @@ in
                                     are rendered.
                                   '';
                                 };
+                                novalidate = lib.mkOption {
+                                  type = lib.types.bool;
+                                  default = false;
+                                  description = ''
+                                    Skip this object in `ekn validate`'s ephemeral
+                                    etcd+kube-apiserver harness. For objects that can never
+                                    be meaningfully verified there regardless of manifest
+                                    correctness -- e.g. an aggregated APIService, whose
+                                    backing Service/Pod never actually runs in a throwaway,
+                                    single-shot apiserver with no controllers or kubelets,
+                                    so the apiserver 500s/503s on it (or on discovery calls
+                                    that touch it) no matter what. Applied for real via
+                                    `ekn kubeapply`/GitOps as normal; this only affects the
+                                    validation harness.
+                                  '';
+                                };
                               };
                             };
                             default = { };
@@ -423,6 +439,21 @@ in
       readOnly = true;
     };
 
+    novalidateKeys = lib.mkOption {
+      type = lib.types.anything;
+      description = ''
+        `{kind, namespace, name}` triples for every object with
+        `ekn.novalidate = true` -- deliberately just the identifying keys,
+        not the full objects (which `generated`/`manifestJSONFile` already
+        provide), so `ekn validate` can force_json this cheaply without
+        re-forcing the entire generated set a second time. Used by
+        `Validate.run()` to skip applying objects that can never be
+        meaningfully verified in its throwaway etcd+apiserver harness (e.g.
+        an aggregated APIService with no real backing Service running).
+      '';
+      readOnly = true;
+    };
+
     sopsAgeIdentities = lib.mkOption {
       type = lib.types.listOf (
         lib.types.submodule {
@@ -521,6 +552,15 @@ in
           objects = map (object: removeAttrs object [ "ekn" ]) objects;
         }
       ))
+    ];
+
+    novalidateKeys = lib.pipe allGenerated [
+      (lib.filter (object: object.ekn.novalidate or false))
+      (map (object: {
+        inherit (object) kind;
+        namespace = object.metadata.namespace or "none";
+        inherit (object.metadata) name;
+      }))
     ];
 
     # like kubernetes.objects but with transformation and generation applied

@@ -23,7 +23,13 @@ in
     };
     serviceSubnet = lib.mkOption {
       type = lib.types.str;
-      default = "10.96.0.0/16";
+      # Comma-separated IPv4+IPv6 CIDRs -- kube-apiserver only allows
+      # RequireDualStack Services when --service-cluster-ip-range lists both
+      # families, so a single-family default here would fail validation for
+      # any manifest containing a dual-stack Service (e.g. via a Kyverno
+      # mutate policy that sets ipFamilyPolicy=RequireDualStack cluster-wide)
+      # even though the real target cluster supports it fine.
+      default = "10.96.0.0/16,fd00:96::/112";
     };
     script = lib.mkOption {
       type = lib.types.package;
