@@ -62,7 +62,13 @@ def flatten_manifests(
                             "config.kubernetes.io/function": "exec:\n  path: ksops\n",
                         },
                     },
-                    "files": [f"{name}.yaml"],
+                    # Relative to the kustomization root (where kustomize
+                    # invokes the ksops KRM function from), not to the
+                    # generator file's own directory -- a bare "{name}.yaml"
+                    # here fails at kustomize-build time with "no such file
+                    # or directory" once the generator and plain file live
+                    # in a subdirectory (namespace/kind/), which is always.
+                    "files": [rel_path],
                 },
                 default_flow_style=False,
                 sort_keys=False,

@@ -73,7 +73,14 @@ class TestFlattenManifestsKustomize:
         assert "default/Secret/eso-creds.ksops-generator.yaml" in paths
         generator = paths["default/Secret/eso-creds.ksops-generator.yaml"]
         assert "kind: ksops" in generator
-        assert "eso-creds.yaml" in generator
+        # Regression: the generator's `files:` entry is relative to the
+        # kustomization root (where kustomize invokes the ksops KRM
+        # function from), not to the generator file's own directory -- a
+        # bare "eso-creds.yaml" (which this substring check alone can't
+        # distinguish from the correct full path) fails at kustomize-build
+        # time with "no such file or directory" once the generator lives
+        # in a namespace/kind/ subdirectory, which is always.
+        assert "files:\n- default/Secret/eso-creds.yaml\n" in generator
 
         kustomization = paths["kustomization.yaml"]
         assert "default/Secret/eso-creds.yaml" not in kustomization
