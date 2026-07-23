@@ -8,8 +8,16 @@ from contextlib import asynccontextmanager
 from os import PathLike
 from typing import Any
 
+from anyio import Path
 from nanopynix import NixError, NixEvalSettings, NixSettings, Session
 from nanopynix.primops import yaml_primops
+from nanopynix_helpers.fod import (
+    derivation_name_from_path,
+    extract_fod_hash_mismatch,
+    extract_unique_fod_hash_mismatch,
+    find_fod_hash_literal,
+    replace_fod_hash,
+)
 
 _SESSION_SETTINGS = NixSettings()
 
@@ -86,6 +94,86 @@ async def evaluate_file_multi(
                     proxy = proxy.attr(name)
             results.append(await proxy.force_json())
     return results
+
+
+async def evaluate_with_fod_update(
+    file: str | PathLike[str] | None,
+    flake_uri: str | None,
+    customer: str | None,
+    attr_path: str | None,
+    *,
+    source_file: str | PathLike[str],
+    max_updates: int = 10,
+) -> object:
+    """Like `evaluate_file`/`evaluate_flake`, but auto-patch one fixed-output
+    hash on mismatch and retry, up to `max_updates` times.
+
+    Unlike `nanopynix_helpers.build.build_with_fod_update` (built around
+    building one explicit derivation attr and verifying the mismatch belongs
+    to that attr's closure), this forces an arbitrary JSON value -- e.g.
+    kubenix's `kubernetes.crds`, which reads file content from several
+    independent fetchers via IFD (`parseYAMLStream` etc.) rather than being a
+    single derivation itself. There is no one target derivation to check
+    closure membership against, so this trusts the caller to invoke it one
+    mismatch at a time against a `source_file` whose fetcher is currently
+    unpinned (e.g. `lib.fakeHash`) -- `extract_fod_hash_mismatch` still
+    refuses to guess if Nix's diagnostic doesn't match its exact shape, and
+    `find_fod_hash_literal` refuses if `source_file` has more than one
+    plausible empty/placeholder hash literal.
+    """
+    source_path = Path(source_file)
+    updates = 0
+    async with (
+        _session() as session,
+        session.store() as store,
+        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
+    ):
+        while True:
+            async with session.capture_logs() as logs:
+                try:
+                    if flake_uri is not None:
+                        outputs = await eval_.eval_flake(flake_uri)
+                        if customer:
+                            system = await (await eval_.string("builtins.currentSystem")).force_json()
+                            proxy = outputs.attr("eknConfig").attr(str(system)).attr(customer)
+                        else:
+                            proxy = outputs
+                    elif file is not None:
+                        proxy = await (await eval_.file(str(file))).auto_call()
+                    else:
+                        raise ValueError("specify --file or --flake")
+                    if attr_path:
+                        for name in attr_path.split("."):
+                            if not name:
+                                raise ValueError(f"empty segment in attr path: {attr_path!r}")
+                            proxy = proxy.attr(name)
+                    return await proxy.force_json()
+                except NixError as exc:
+                    error = exc
+            # The exception's own message is sometimes just a wrapper
+            # ("Cannot build X, 1 dependency failed") when the mismatch
+            # happened on a dependency FOD rather than the top-level target
+            # -- the real two-line diagnostic instead arrives as a captured
+            # log event, same as nanopynix_helpers.build.build_with_fod_update.
+            mismatch = extract_fod_hash_mismatch(error.msg_without_ansi)
+            if mismatch is None:
+                mismatch = extract_unique_fod_hash_mismatch(
+                    event.message_without_ansi for event in logs.events if event.message_without_ansi is not None
+                )
+            if mismatch is None:
+                raise error
+            if updates >= max_updates:
+                raise RuntimeError(f"stopped after {max_updates} fixed-output hash updates") from error
+            source = await source_path.read_text()
+            literal = find_fod_hash_literal(
+                source,
+                mismatch.specified,
+                derivation_name=derivation_name_from_path(mismatch.drv_path),
+            )
+            updated = replace_fod_hash(source, literal, mismatch.got)
+            await source_path.write_text(updated)
+            updates += 1
+            await eval_.reset_file_cache()
 
 
 async def evaluate_flake(flake_uri: str, attr_path: str | None) -> object:
@@ -451,4 +539,5 @@ __all__ = [
     "evaluate_kubeapply_config",
     "evaluate_validation_config",
     "evaluate_validation_file",
+    "evaluate_with_fod_update",
 ]

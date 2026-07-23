@@ -32,6 +32,7 @@ from ekn.eval import (
     evaluate_kubeapply_config,
     evaluate_validation_config,
     evaluate_validation_file,
+    evaluate_with_fod_update,
     realise_attr,
 )
 from ekn.git import commit_manifests, diff_manifests, flatten_manifests, try_jj_status
@@ -159,9 +160,30 @@ class Eval(Command):
     file: _Path | None = arg(None, short="f", inherited=True)
     flake: str | None = arg(None, inherited=True)
     attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
+    update_fod: bool = arg(
+        False,
+        help="On a fixed-output hash mismatch, patch --source-file's plain-string hash literal with Nix's reported hash and retry.",
+    )
+    source_file: _Path | None = arg(
+        None,
+        help="Nix file containing the fixed-output hash literal to patch (required with --update-fod).",
+    )
 
     async def run(self) -> None:
-        result = await _evaluate(self.file, self.flake, self.attr)
+        if self.update_fod:
+            if self.source_file is None:
+                _log.error("--update-fod requires --source-file")
+                raise SystemExit(1)
+            uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
+            try:
+                result = await evaluate_with_fod_update(
+                    self.file, uri, customer, self.attr, source_file=self.source_file
+                )
+            except NixError as exc:
+                _log.error(exc.msg_without_ansi)
+                raise SystemExit(1) from exc
+        else:
+            result = await _evaluate(self.file, self.flake, self.attr)
         json.dump(result, sys.stdout, indent=2, default=str)
         sys.stdout.write("\n")
 
