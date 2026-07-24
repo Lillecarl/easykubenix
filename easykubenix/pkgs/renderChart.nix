@@ -16,7 +16,7 @@
   noHooks ? false,
   apiVersions ? null,
   syncWave ? "0",
-  # Name of the `gitops.targets.<name>` to route these resources through
+  # Name of the `gitOps.targets.<name>` to route these resources through
   # (see kubernetes.nix's ekn.gitOpsTarget); null leaves them unrouted.
   gitOpsTarget ? null,
 }:

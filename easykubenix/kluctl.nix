@@ -8,7 +8,7 @@
 let
   cfg = config.kluctl;
 
-  # Objects routed (via kubernetes.gitopsTargets / ekn.gitOpsTarget) to one of
+  # Objects routed (via kubernetes.gitOpsTargets / ekn.gitOpsTarget) to one of
   # cfg.excludeGitopsTargets already have their own deployment path -- an
   # ArgoCD Application/Flux Kustomization applying them from a git branch,
   # plus a one-time bootstrap apply for whatever's needed to get that
@@ -23,8 +23,8 @@ let
         name:
         map (
           object: "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}"
-        ) config.kubernetes.gitopsTargets.${name}.objects
-      ) (lib.filter (name: config.kubernetes.gitopsTargets ? ${name}) cfg.excludeGitopsTargets))
+        ) config.kubernetes.gitOpsTargets.${name}.objects
+      ) (lib.filter (name: config.kubernetes.gitOpsTargets ? ${name}) cfg.excludeGitopsTargets))
       (_: true);
   isExcludedFromKluctl =
     object:
@@ -46,7 +46,7 @@ in
         type = lib.types.listOf lib.types.str;
         default = [ ];
         description = ''
-          Names of `gitops.targets` whose objects kluctl should not deploy.
+          Names of `gitOps.targets` whose objects kluctl should not deploy.
           Use this once a target has its own deployment path (e.g. a
           one-time bootstrap apply plus the GitOps controller syncing itself
           from there) to avoid kluctl and that controller fighting over the

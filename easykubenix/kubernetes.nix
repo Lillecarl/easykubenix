@@ -148,7 +148,7 @@ in
                                   type = lib.types.nullOr lib.types.str;
                                   default = null;
                                   description = ''
-                                    Name of the `gitops.targets.<name>` this object routes
+                                    Name of the `gitOps.targets.<name>` this object routes
                                     to. Deliberately single-valued, not a list: an object
                                     synced by two GitOps targets at once means two
                                     controllers independently reconciling (and potentially
@@ -397,7 +397,7 @@ in
       '';
     };
 
-    # generated/generatedByPath/generatedWithEkn/gitopsTargets are readOnly, fully-computed
+    # generated/generatedByPath/generatedWithEkn/gitOpsTargets are readOnly, fully-computed
     # outputs -- there is nothing left to override/merge on them, so
     # ekn.lib.kubeValueType's recursive per-leaf JSON-schema-style validation
     # buys nothing here and would re-force the exact same expensive
@@ -422,17 +422,19 @@ in
       description = ''
         Like `generated`, but with each object's `ekn` routing metadata still
         attached (`generated` strips it). Consumed by anything that needs to
-        see EKN metadata alongside the rendered object, e.g. `gitopsTargets`.
+        see EKN metadata alongside the rendered object, e.g. `gitOpsTargets`.
       '';
       readOnly = true;
     };
 
-    gitopsTargets = lib.mkOption {
+    gitOpsTargets = lib.mkOption {
       type = lib.types.anything;
       description = ''
-        Objects grouped by the `gitops.targets.<name>` they route to (via
+        Objects grouped by the `gitOps.targets.<name>` they route to (via
         `ekn.gitOpsTarget`), each group paired with that target's resolved
-        `{branch, path}`. Objects with no `ekn.gitOpsTarget` set are omitted.
+        `{path}`. Objects with no `ekn.gitOpsTarget` set are omitted. The
+        branch(es) these all land on come from the instance-wide
+        `gitOps.deployBranch`/`gitOps.sourceBranch`, not from the target.
         This is derived before the `ekn` field is stripped from rendered
         Kubernetes objects.
       '';
@@ -534,15 +536,15 @@ in
 
     generatedWithEkn = allGenerated;
 
-    gitopsTargets = lib.pipe allGenerated [
+    gitOpsTargets = lib.pipe allGenerated [
       (lib.filter (object: (object.ekn.gitOpsTarget or null) != null))
       (lib.groupBy (object: object.ekn.gitOpsTarget))
       (lib.mapAttrs (
         name: objects: {
           target =
-            config.gitops.targets.${name} or (throw ''
+            config.gitOps.targets.${name} or (throw ''
               ekn.gitOpsTarget references unknown GitOps target "${name}".
-              Declared targets: ${lib.concatStringsSep ", " (lib.attrNames config.gitops.targets)}
+              Declared targets: ${lib.concatStringsSep ", " (lib.attrNames config.gitOps.targets)}
             '');
           # `ekn` belongs to the EKN compiler, not to the Kubernetes manifest
           # -- same strip as `kubernetes.generated` above. Left in place here,
