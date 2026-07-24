@@ -54,15 +54,6 @@ in
                 type = lib.types.listOf (types.functionTo ekn.lib.kubeValueType);
                 default = [ ];
               };
-              convertLists = mkOption {
-                description = ''
-                  Converts lists where all entires have a name attribute into
-                  attrsets instead. These attrsets are converted back into
-                  lists before rendering Kubernetes manifests.
-                '';
-                type = types.bool;
-                default = true;
-              };
               yamlVersion = mkOption {
                 description = ''
                   YAML version to parse the rendered `helm template` output
@@ -123,11 +114,11 @@ in
             };
 
             config = {
-              # list to attrset convertion is just a preconfigured override
-              overrides = lib.optional releaseConfig.convertLists (
-                lib.mkBefore (object: (lib.walkWithPath (lib.kubeListsToAttrs object)) object)
-              );
-
+              # No list-to-attribute-set pass runs on the chart output. A
+              # rendered chart list stays a plain list, and
+              # `ekn.lib.kubeValueType` merges it with an
+              # `ekn.lib.mkNamedList` override by name when the object reaches
+              # `kubernetes.objects`.
               objects =
                 let
                   resourcesYaml = pkgs.chart2yaml.override { kubernetes-helm = cfg.package; } {

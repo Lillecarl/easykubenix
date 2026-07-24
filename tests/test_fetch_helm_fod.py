@@ -5,11 +5,12 @@ import http.server
 import io
 import tarfile
 import threading
+from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING
 
-import nanopynix
 import pytest
+from nanopynix.rpc import Session
 from nanopynix_helpers.build import build_with_fod_update
 
 if TYPE_CHECKING:
@@ -50,9 +51,7 @@ def helm_chart_url(tmp_path: Path) -> Iterator[str]:
         thread.join()
 
 
-async def test_helm_fod_hash_mismatch_is_discovered_and_inserted(
-    tmp_path: Path, helm_chart_url: str
-) -> None:
+async def test_helm_fod_hash_mismatch_is_discovered_and_inserted(tmp_path: Path, helm_chart_url: str) -> None:
     """fetchHelm is declared with a wrong hash; build_with_fod_update must patch in the real one."""
     nix_file = tmp_path / "helm-fod.nix"
     nix_file.write_text(f"""
@@ -69,7 +68,7 @@ async def test_helm_fod_hash_mismatch_is_discovered_and_inserted(
     """)
 
     async with (
-        nanopynix.Session(experimental_features=["flakes", "nix-command"]) as nix,
+        Session(experimental_features=["flakes", "nix-command"]) as nix,
         nix.store("auto") as store,
         nix.eval(store) as session,
     ):

@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from ekn.git import commit_manifests, diff_manifests, flatten_manifests
+from ekn.git import commit_manifests, diff_manifests
+from ekn.gitops import flatten_manifests
 
 SAMPLE_MANIFESTS = [
     {
@@ -99,9 +100,7 @@ class TestCommit:
         files = flatten_manifests(SAMPLE_MANIFESTS)
         sha = commit_manifests(".", "test-render", files, "first commit")
         assert sha
-        parents = (
-            test_repo / ".git" / "refs" / "heads" / "test-render"
-        ).read_text().strip()
+        parents = (test_repo / ".git" / "refs" / "heads" / "test-render").read_text().strip()
         assert len(parents) == 40
 
     def test_second_commit(self, test_repo: Path) -> None:

@@ -14,15 +14,18 @@ def test_repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test"],
-        cwd=repo, check=True,
+        cwd=repo,
+        check=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "test"],
-        cwd=repo, check=True,
+        cwd=repo,
+        check=True,
     )
     subprocess.run(
         ["git", "commit", "--allow-empty", "-q", "-m", "root"],
-        cwd=repo, check=True,
+        cwd=repo,
+        check=True,
     )
     return repo
 

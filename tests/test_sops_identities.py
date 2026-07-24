@@ -14,6 +14,7 @@ import kr8s
 import pytest
 import yaml
 
+from ekn.eval import SopsAgeIdentity
 from ekn.sops import (
     SopsUpdateKeysError,
     _add_recipient_to_sops_config,
@@ -96,16 +97,13 @@ def age_identity_text(tmp_path: Path) -> str:
 
 
 class TestEnsureAgeIdentities:
-    async def test_skips_an_identity_whose_secret_already_exists(
-        self, age_identity_text: str
-    ) -> None:
-        api = FakeApi(
-            {("GET", "secrets/sops-age-key"): _secret("sops-age-key", "argocd", age_identity_text)}
-        )
+    async def test_skips_an_identity_whose_secret_already_exists(self, age_identity_text: str) -> None:
+        api = FakeApi({("GET", "secrets/sops-age-key"): _secret("sops-age-key", "argocd", age_identity_text)})
 
         await ensure_age_identities(
-            [{"namespace": "argocd", "secretName": "sops-age-key"}], api=api
-        )  # type: ignore[arg-type]
+            [SopsAgeIdentity.model_validate({"namespace": "argocd", "secretName": "sops-age-key"})],
+            api=api,
+        )
 
         assert api.calls == [("GET", "secrets/sops-age-key")]
 
@@ -119,8 +117,9 @@ class TestEnsureAgeIdentities:
         )
 
         await ensure_age_identities(
-            [{"namespace": "argocd", "secretName": "sops-age-key"}], api=api
-        )  # type: ignore[arg-type]
+            [SopsAgeIdentity.model_validate({"namespace": "argocd", "secretName": "sops-age-key"})],
+            api=api,
+        )
 
         assert ("PATCH", "namespaces/argocd") in api.calls
         assert ("PATCH", "secrets/sops-age-key") in api.calls
@@ -145,8 +144,9 @@ class TestEnsureAgeIdentities:
         )
 
         await ensure_age_identities(
-            [{"namespace": "argocd", "secretName": "sops-age-key"}], api=api
-        )  # type: ignore[arg-type]
+            [SopsAgeIdentity.model_validate({"namespace": "argocd", "secretName": "sops-age-key"})],
+            api=api,
+        )
 
         assert set(captured["body"]["stringData"].keys()) == {"key.txt"}
         assert "AGE-SECRET-KEY" in captured["body"]["stringData"]["key.txt"]
@@ -176,7 +176,12 @@ class TestEnsureAgeIdentities:
         # actually be YAML for this round-trip to be representative.
         encrypted_file.write_text("password: hunter2\n")
         encrypt_proc = await asyncio.create_subprocess_exec(
-            "sops", "--encrypt", "--in-place", "--age", _public_key_from_original(age_key), str(encrypted_file),
+            "sops",
+            "--encrypt",
+            "--in-place",
+            "--age",
+            _public_key_from_original(age_key),
+            str(encrypted_file),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -217,15 +222,17 @@ class TestEnsureAgeIdentities:
 
         await ensure_age_identities(
             [
-                {
-                    "namespace": "argocd",
-                    "secretName": "sops-age-key",
-                    "sopsConfigFile": str(config_file),
-                    "sopsFiles": [str(encrypted_file)],
-                }
+                SopsAgeIdentity.model_validate(
+                    {
+                        "namespace": "argocd",
+                        "secretName": "sops-age-key",
+                        "sopsConfigFile": str(config_file),
+                        "sopsFiles": [str(encrypted_file)],
+                    }
+                )
             ],
             api=api,
-        )  # type: ignore[arg-type]
+        )
 
         updated_config = yaml.safe_load(config_file.read_text())
         recipients = updated_config["creation_rules"][0]["age"]
@@ -242,7 +249,9 @@ class TestEnsureAgeIdentities:
         new_key_file = tmp_path / "new-identity.txt"
         new_key_file.write_text(new_identity_text)
         decrypt_proc = await asyncio.create_subprocess_exec(
-            "sops", "--decrypt", str(encrypted_file),
+            "sops",
+            "--decrypt",
+            str(encrypted_file),
             env=os.environ | {"SOPS_AGE_KEY_FILE": str(new_key_file)},
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -253,9 +262,7 @@ class TestEnsureAgeIdentities:
 
     async def test_raises_when_sops_updatekeys_fails(self, tmp_path: Path) -> None:
         config_file = tmp_path / ".sops.yaml"
-        config_file.write_text(
-            yaml.safe_dump({"creation_rules": [{"path_regex": ".*\\.yaml$", "age": ""}]})
-        )
+        config_file.write_text(yaml.safe_dump({"creation_rules": [{"path_regex": ".*\\.yaml$", "age": ""}]}))
         missing_file = tmp_path / "does-not-exist.yaml"
 
         api = FakeApi(
@@ -269,15 +276,17 @@ class TestEnsureAgeIdentities:
         with pytest.raises(SopsUpdateKeysError):
             await ensure_age_identities(
                 [
-                    {
-                        "namespace": "argocd",
-                        "secretName": "sops-age-key",
-                        "sopsConfigFile": str(config_file),
-                        "sopsFiles": [str(missing_file)],
-                    }
+                    SopsAgeIdentity.model_validate(
+                        {
+                            "namespace": "argocd",
+                            "secretName": "sops-age-key",
+                            "sopsConfigFile": str(config_file),
+                            "sopsFiles": [str(missing_file)],
+                        }
+                    )
                 ],
                 api=api,
-            )  # type: ignore[arg-type]
+            )
 
 
 class TestAddRecipientToSopsConfig:
@@ -334,5 +343,3 @@ def _public_key_from_original(key_file: Path) -> str:
         if line.startswith("# public key:"):
             return line.split(":", 1)[1].strip()
     raise AssertionError(f"no public key comment in {key_file}")
-
-

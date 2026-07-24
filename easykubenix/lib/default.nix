@@ -1,26 +1,65 @@
-self: lib: {
-  # Takes an attribute set and marks it as a `_namedlist`.
-  # It validates that every value within the input attrset is also an attrset.
-  # This is intended for manually defining `_namedlist` structures in Nix code.
+self: lib: rec {
+  # The two markers use `_type`. This is the tag that the module system uses
+  # for its own directives. `mkIf`, `mkMerge` and `mkOverride` all use it.
+  # Nixpkgs ignores a `_type` value that it does not know. Such a value goes
+  # through `dischargeProperties` and `pushDownProperties` without a change.
+  # Thus the tag is safe. It also makes an override different in structure from
+  # a Kubernetes object that is an attribute set.
+  namedListType = "namedList";
+  numberedListType = "numberedList";
+
+  isNamedList = value: lib.isAttrs value && (value._type or null) == namedListType;
+  isNumberedList = value: lib.isAttrs value && (value._type or null) == numberedListType;
+  isMarkedList = value: isNamedList value || isNumberedList value;
+  # Remove the marker. This gives the bare attribute set of entries.
+  stripListMarker = value: lib.removeAttrs value [ "_type" ];
+
+  # Search a value for a named-list or numbered-list marker.
+  # `ekn.lib.kubeValueType` resolves a marker when it merges an option. Thus a
+  # marker can only stay in a value that goes around the type, such as an entry
+  # of `kubernetes.crds`. Such a marker would reach the cluster as a literal
+  # `_type` field, which is not valid Kubernetes.
+  # The search stops at the first marker, because `lib.any` is lazy.
+  hasListMarker =
+    value:
+    if isMarkedList value then
+      true
+    else if lib.isAttrs value then
+      lib.any hasListMarker (lib.attrValues value)
+    else if lib.isList value then
+      lib.any hasListMarker value
+    else
+      false;
+
+  # Mark an attribute set as a named list.
+  # A named list is a short form to override a Kubernetes list field by name.
+  # Each element of such a field has a `name`.
+  # The attribute name becomes the `name` of the element.
+  # Each value in the input attribute set must also be an attribute set.
   mkNamedList =
     attrs:
     if !lib.isAttrs attrs then
       throw "mkNamedList error: Input must be an attribute set."
-    # Ensure all children are also attribute sets, as required by the `_namedlist` contract.
+    # All children must also be attribute sets. This is a rule of the named-list
+    # contract. Only objects can have a name.
     else if !(lib.all lib.isAttrs (lib.attrValues attrs)) then
       throw "mkNamedList error: All values in the attribute set must themselves be attribute sets."
     else
-      attrs // { _namedlist = true; };
+      attrs // { _type = namedListType; };
 
-  # Takes an attribute set and marks it as a `_numberedlist`.
-  # It validates that all keys are valid integer strings (e.g., "0", "5", "100").
-  # This ensures the structure can be losslessly converted back to an ordered list by sorting the keys numerically.
+  # Mark an attribute set as a numbered list.
+  # A numbered list is a short form to override a list field by index.
+  # It keeps the order of the elements.
+  # All keys must be integer strings, for example "0", "5" or "100".
+  # Thus a sort of the keys by number gives the list again, with no data loss.
+  #
+  # `mkNumberedList` does not require attribute-set values, but `mkNamedList`
+  # does. An index is also correct for a scalar value. This lets you override
+  # `args` and `command`, for example `mkNumberedList { "1" = "--flag"; }`.
   mkNumberedList =
     attrs:
     if !lib.isAttrs attrs then
       throw "mkNumberedList error: Input must be an attribute set."
-    else if !(lib.all lib.isAttrs (lib.attrValues attrs)) then
-      throw "mkNumberedList error: All values in the attribute set must themselves be attribute sets."
     else
       let
         keys = lib.attrNames attrs;
@@ -30,7 +69,7 @@ self: lib: {
       if !allKeysAreInts then
         throw "mkNumberedList error: All keys in the attribute set must be integer strings."
       else
-        attrs // { _numberedlist = true; };
+        attrs // { _type = numberedListType; };
 
   # Recursively traverses a data structure, applying a transformer function to each node.
   # The traversal is pre-order (top-down), meaning a node is transformed *before* its children.
@@ -56,93 +95,59 @@ self: lib: {
     in
     go [ ];
 
-  # Master transformer: Converts special `_namedlist` and `_numberedlist` attribute sets
-  # back into standard JSON lists. This function is the inverse of `kubeListsToAttrs`.
+  # Change the entries of a named list into a standard JSON list.
+  #
+  # `order` gives the keys to emit, and in which order. The key is the only
+  # source of the `name` attribute, so a key wins over an inner `name`.
+  #
+  # There are two callers, and they differ only in the order they ask for.
+  # `ekn.lib.kubeValueType` takes the order from the plain list definitions it
+  # merges against, so an override keeps the position of the entry it patches.
+  # `kubeAttrsToLists` has no such definition to read, so it uses attribute-name
+  # order. Both share this function, thus the two paths cannot drift apart.
+  fromNamedAttrs =
+    order: attrs:
+    map (
+      name:
+      let
+        value = attrs.${name};
+      in
+      if !lib.isAttrs value then
+        throw "namedList error: the value for key '${name}' is not an attribute set."
+      else
+        value // { inherit name; }
+    ) order;
+
+  # Change the entries of a numbered list into a standard JSON list. The keys
+  # are index numbers as strings, so a sort of the keys by number gives back
+  # the order. Shared by `ekn.lib.kubeValueType` and `kubeAttrsToLists`.
+  fromNumberedAttrs =
+    attrs:
+    lib.pipe attrs [
+      lib.attrsToList
+      (lib.sort (a: b: (lib.toInt a.name) < (lib.toInt b.name)))
+      (map (x: x.value))
+    ];
+
+  # Master transformer: change marked named and numbered attribute sets back
+  # into standard JSON lists.
+  #
+  # `ekn.lib.kubeValueType` resolves both markers when it merges an option, so
+  # a value that comes out of the module system holds no marker. This function
+  # is for a value that the module system never typed. A generator and a
+  # transformer both run after the merge and return such a value, and
+  # `kubernetes.nix` uses this function on their output for that reason.
   kubeAttrsToLists =
     path: value:
-    if lib.isAttrs value then
-      if value._namedlist or false == true then
-        # `_namedlist`s are attribute sets where keys were derived from a `name` attribute.
-        # Convert back to a list of attribute sets, injecting the key back as the `name` attribute.
-        lib.mapAttrsToList (
-          name: val:
-          if !lib.isAttrs val then
-            throw "namedListToList error: Value for key '${name}' is not an attribute set."
-          else
-            val // { inherit name; }
-        ) (lib.removeAttrs value [ "_namedlist" ])
-      else if value._numberedlist or false == true then
-        # `_numberedlist`s are attribute sets where keys are numeric indices ("0", "1", ...).
-        # Convert back to a simple list of values, ensuring order is preserved by sorting the keys.
-        lib.pipe value [
-          (x: lib.removeAttrs x [ "_numberedlist" ])
-          lib.attrsToList
-          (lib.sort (a: b: (lib.toInt a.name) < (lib.toInt b.name)))
-          (map (x: x.value))
-        ]
-      else
-        value
+    if isNamedList value then
+      let
+        entries = stripListMarker value;
+      in
+      fromNamedAttrs (lib.attrNames entries) entries
+    else if isNumberedList value then
+      fromNumberedAttrs (stripListMarker value)
     else
       value;
-
-  # Master transformer: Converts all standard JSON lists into special attribute sets
-  # to make them easily overridable in Nix.
-  # Takes the root object first to allow skipping entire objects (e.g., CRDs).
-  kubeListsToAttrs =
-    object:
-    let
-      # Never transform CustomResourceDefinition objects. Their spec contains OpenAPI schemas
-      # with deeply nested structures that must not be converted to named/numbered lists.
-      isCRD = lib.isAttrs object && (object.kind or null) == "CustomResourceDefinition";
-    in
-    path: value:
-    if isCRD then
-      value
-    else
-      let
-        # `path` includes this value's own key as its last element (see
-        # `walkWithPath`), except at the root where `path == []` -- guard
-        # that case explicitly, since `lib.last (path ++ [ null ])` (the
-        # previous form here) always evaluates to `null` regardless of
-        # `path` and silently disabled the `initContainers` exclusion below.
-        currentKey = if path == [ ] then null else lib.last path;
-        # Heuristic to identify a list that should become a `_namedlist`.
-        # A list is a candidate if all its elements are attribute sets that contain a `name` key.
-        isNamedListCandidate =
-          lib.isList value
-          && (lib.all (v: lib.isAttrs v && lib.hasAttr "name" v) value)
-          # Special exclusion for Kubernetes `initContainers`. The order of init containers is
-          # significant and must be preserved. By failing this check, it will be converted
-          # to a `_numberedlist` instead, which preserves order.
-          && currentKey != "initContainers";
-      in
-      if isNamedListCandidate then
-        # Convert the list to a `_namedlist` attribute set. The `name` attribute of each
-        # element becomes the key in the resulting attribute set.
-        lib.pipe value [
-          (lib.map (x: {
-            inherit (x) name;
-            value = lib.removeAttrs x [ "name" ];
-          }))
-          lib.listToAttrs
-          (x: x // { _namedlist = true; })
-        ]
-      # Any other list (e.g., simple string lists like container `args`, or `initContainers`)
-      # is converted to a `_numberedlist`.
-      else if lib.isList value then
-        # The list index becomes the key (e.g., "0", "1", "2", ...), preserving order.
-        lib.pipe value [
-          (lib.imap0 (
-            i: v: {
-              name = toString i;
-              value = v;
-            }
-          ))
-          lib.listToAttrs
-          (x: x // { _numberedlist = true; })
-        ]
-      else
-        value;
 
   # md5 hash an attrset, useful to trigger rollouts by hashing ConfigMaps.
   hashAttrs = attrs: builtins.hashString "md5" (builtins.toJSON attrs);

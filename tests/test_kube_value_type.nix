@@ -156,6 +156,219 @@ let
     { value.args = [ "--foo" ]; }
     { value.args = [ "--bar" ]; }
   ];
+
+  # A marked attrset with no plain list at the same path must still become a
+  # real list. `types.oneOf` is a left fold of `either`, so an `attrsOf` branch
+  # that accepts any attrset would take this definition first and keep the
+  # `_type` marker in the output. The type guards against that.
+  loneMkNamedListBecomesList = evalValue [
+    { value.containers = lib.mkNamedList { main.image = "v1"; }; }
+  ];
+
+  loneMkNumberedListBecomesList = evalValue [
+    {
+      value.initContainers = lib.mkNumberedList {
+        "1".image = "second";
+        "0".image = "first";
+      };
+    }
+  ];
+
+  # An entry that only the marker introduces must still get its `name`. The key
+  # is the only source of the name.
+  nameInjectedForNewEntry = evalValue [
+    {
+      value.containers = [
+        {
+          name = "main";
+          image = "base";
+        }
+      ];
+    }
+    { value.containers = lib.mkNamedList { sidecar.image = "s"; }; }
+  ];
+
+  # The key wins over a `name` inside the value.
+  keyWinsOverInnerName = evalValue [
+    {
+      value.containers = [
+        {
+          name = "a";
+          image = "A";
+        }
+      ];
+    }
+    {
+      value.containers = lib.mkNamedList {
+        b = {
+          name = "DIFFERENT";
+          image = "B";
+        };
+      };
+    }
+  ];
+
+  # A patch of one entry must not reorder the list. The plain list definitions
+  # give the order. An alphabetical sort would put "alpha" first.
+  orderPreservedUnderNamedOverride = evalValue [
+    {
+      value.containers = [
+        { name = "zeta"; }
+        { name = "alpha"; }
+      ];
+    }
+    { value.containers = lib.mkNamedList { zeta.image = "1"; }; }
+  ];
+
+  # A name that only the marker introduces goes after the plain list entries.
+  newNamesAppendAfterPlainEntries = evalValue [
+    {
+      value.containers = [
+        { name = "zeta"; }
+        { name = "alpha"; }
+      ];
+    }
+    { value.containers = lib.mkNamedList { beta.image = "b"; }; }
+  ];
+
+  mkMergeOfTwoMarkedLists = evalValue [
+    {
+      value.containers = lib.mkMerge [
+        (lib.mkNamedList { a.image = "x"; })
+        (lib.mkNamedList { b.image = "y"; })
+      ];
+    }
+  ];
+
+  mkMergeOfPlainListAndMarked = evalValue [
+    {
+      value.containers = lib.mkMerge [
+        [
+          {
+            name = "a";
+            image = "x";
+          }
+        ]
+        (lib.mkNamedList { b.image = "y"; })
+      ];
+    }
+  ];
+
+  # `mkForce` on the whole marked definition drops the plain list. Only the
+  # marked definition is left, and it must still become a real list.
+  mkForceWholeMarkedList = evalValue [
+    {
+      value.containers = [
+        {
+          name = "a";
+          image = "x";
+        }
+      ];
+    }
+    { value.containers = lib.mkForce (lib.mkNamedList { b.image = "y"; }); }
+  ];
+
+  mkIfFalseMarkedListIsDropped = evalValue [
+    {
+      value.containers = [
+        {
+          name = "a";
+          image = "x";
+        }
+      ];
+    }
+    { value.containers = lib.mkIf false (lib.mkNamedList { a.image = "y"; }); }
+  ];
+
+  mkIfTrueMarkedListApplies = evalValue [
+    {
+      value.containers = [
+        {
+          name = "a";
+          image = "x";
+        }
+      ];
+    }
+    { value.containers = lib.mkIf true (lib.mkNamedList { a.image = lib.mkForce "y"; }); }
+  ];
+
+  # `mkBefore` and `mkAfter` work on a plain list. Nothing here uses a marker.
+  mkOrderOnPlainLists = evalValue [
+    { value.containers = lib.mkAfter [ { name = "zzz"; } ]; }
+    { value.containers = lib.mkBefore [ { name = "aaa"; } ]; }
+    { value.containers = [ { name = "mmm"; } ]; }
+  ];
+
+  # An index override reaches a list of scalars, such as `args` or `command`.
+  numberedOverrideOfScalarList = evalValue [
+    {
+      value.args = [
+        "--a"
+        "--b"
+      ];
+    }
+    { value.args = lib.mkNumberedList { "1" = lib.mkForce "--B"; }; }
+  ];
+
+  # An index above the end of the list adds a new entry at the end.
+  numberedSparseIndexAppends = evalValue [
+    { value.containers = [ { name = "a"; } ]; }
+    {
+      value.containers = lib.mkNumberedList {
+        "5" = {
+          name = "f";
+        };
+      };
+    }
+  ];
+
+  # A marked list inside a marked list entry.
+  nestedNamedListOverride = evalValue [
+    {
+      value.containers = [
+        {
+          name = "a";
+          env = [
+            {
+              name = "V";
+              value = "1";
+            }
+          ];
+        }
+      ];
+    }
+    {
+      value.containers = lib.mkNamedList {
+        a.env = lib.mkNamedList { V.value = lib.mkForce "2"; };
+      };
+    }
+  ];
+
+  # The following bindings must throw. Each one is exposed as a thunk, so the
+  # test can assert on the error without an eager evaluation above.
+
+  # One field cannot use both markers. Earlier the named branch won in silence
+  # and left a literal `true` in the list.
+  mixedNamedAndNumberedThrows = evalValue [
+    { value.containers = [ { name = "a"; } ]; }
+    { value.containers = lib.mkNamedList { a.x = "1"; }; }
+    { value.containers = lib.mkNumberedList { "0".y = "2"; }; }
+  ];
+
+  # A named list takes its order from the keys. `mkBefore` on an entry has no
+  # effect, so the type refuses it instead of dropping it in silence.
+  mkOrderOnNamedEntryThrows = evalValue [
+    { value.containers = [ { name = "mid"; } ]; }
+    { value.containers = lib.mkNamedList { early = lib.mkBefore { image = "e"; }; }; }
+  ];
+
+  mkNamedListRejectsNonAttrsInput = lib.mkNamedList [ { name = "a"; } ];
+  mkNamedListRejectsNonAttrsValues = lib.mkNamedList { a = "not-an-attrset"; };
+  mkNumberedListRejectsNonIntKeys = lib.mkNumberedList {
+    notanumber = {
+      image = "x";
+    };
+  };
 in
 {
   inherit namedListOverrideViaMkNamedList;
@@ -166,7 +379,27 @@ in
   inherit nestedAttrsMergeAcrossModules;
   inherit scalarsPassthrough;
   inherit multiDefPlainListConcatenates;
-  # Forcing this one must throw -- exposed as a thunk so the test can
+  inherit loneMkNamedListBecomesList;
+  inherit loneMkNumberedListBecomesList;
+  inherit nameInjectedForNewEntry;
+  inherit keyWinsOverInnerName;
+  inherit orderPreservedUnderNamedOverride;
+  inherit newNamesAppendAfterPlainEntries;
+  inherit mkMergeOfTwoMarkedLists;
+  inherit mkMergeOfPlainListAndMarked;
+  inherit mkForceWholeMarkedList;
+  inherit mkIfFalseMarkedListIsDropped;
+  inherit mkIfTrueMarkedListApplies;
+  inherit mkOrderOnPlainLists;
+  inherit numberedOverrideOfScalarList;
+  inherit numberedSparseIndexAppends;
+  inherit nestedNamedListOverride;
+  # Forcing these must throw -- each is exposed as a thunk so the test can
   # assert on the error without eagerly evaluating it above.
   unmarkedAttrsRejectedAgainstListThrows = unmarkedAttrsRejectedAgainstListThrows;
+  mixedNamedAndNumberedThrows = mixedNamedAndNumberedThrows;
+  mkOrderOnNamedEntryThrows = mkOrderOnNamedEntryThrows;
+  mkNamedListRejectsNonAttrsInput = mkNamedListRejectsNonAttrsInput;
+  mkNamedListRejectsNonAttrsValues = mkNamedListRejectsNonAttrsValues;
+  mkNumberedListRejectsNonIntKeys = mkNumberedListRejectsNonIntKeys;
 }

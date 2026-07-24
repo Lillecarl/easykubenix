@@ -28,8 +28,8 @@
                   kubernetes.objects.default.ConfigMap.test = {
                     data.key = "hello-flake";
                   };
-                  gitops.enable = true;
-                  gitops.branch = "flake-branch";
+                  gitOps.enable = true;
+                  gitOps.deployBranch = "flake-branch";
                 }
               ];
             }).config;

@@ -86,8 +86,11 @@ class FakeApi:
                     api=self,  # type: ignore[arg-type]
                 )
 
-                async def _delete(o: Any = obj) -> None:
-                    self.deleted.append((o.namespace or "none", listed_kind, o.name))
+                # `k` bound as a default for the same reason `o` is: both are
+                # loop variables, and a closure over either would report the
+                # last iteration's value for every object the generator yields.
+                async def _delete(o: Any = obj, k: str = listed_kind) -> None:
+                    self.deleted.append((o.namespace or "none", k, o.name))
 
                 obj.delete = _delete  # type: ignore[method-assign]
                 yield obj

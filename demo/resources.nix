@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ pkgs, lib, ... }:
 {
   config.kubernetes.resources = {
     default.Secret."my-app-config" = {
@@ -26,18 +26,16 @@
             };
           };
           spec = {
-            containers = {
-              _namedlist = true;
+            # The attribute name becomes the `name` of the element. You do not
+            # have to repeat it in the value.
+            containers = lib.mkNamedList {
               main-app = {
-                name = "main-app";
                 image = "registry.k8s.io/pause:3.9";
-                env = {
-                  _namedlist = true;
+                env = lib.mkNamedList {
                   ASDF.value = "fdsa";
                 };
               };
               sidecar = {
-                name = "sidecar";
                 image = "registry.k8s.io/pause:3.9";
               };
             };

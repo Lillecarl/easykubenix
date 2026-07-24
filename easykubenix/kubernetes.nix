@@ -60,48 +60,83 @@ let
       }
     else
       object;
-  generatedWithEkn = lib.pipe cfg.objects [
-    # Convert kubernetes.objects.namespace.kind.name into a list of objects
-    (lib.collect (x: x ? apiVersion && x ? kind && x ? metadata))
-    # Run a generator pass to generate objects from objects.
-    (
-      objects:
-      objects
-      ++ lib.pipe objects [
-        (lib.concatMap (
-          object:
-          lib.pipe (map (generator: generator object) cfg.generators) [
-            # A generator declining to fire returns `{ }` -- filter it out
-            # here, before merging in a default `ekn`, otherwise the merge
-            # below turns it into a non-empty `{ ekn = ...; }` stub with no
-            # kind/apiVersion/metadata that survives downstream.
-            (lib.filter (generated: generated != { }))
-            (map (
-              generated:
-              generated
-              // lib.optionalAttrs (!(generated ? ekn)) {
-                ekn = object.ekn or { };
-              }
-            ))
-          ]
-        ))
-      ]
-    )
-    # Run a transformation pass over all objects
-    (map (object: lib.pipe object cfg.transformers))
-    # Run filter pass over all objects
-    (lib.filter (object: lib.all (function: function object) cfg.filters))
-    # Convert attrset with _namedlist attribute true to lists. This is useful
-    # when we want to override things in the Kubernetes containers list for
-    # example.
-    (map (lib.walkWithPath lib.kubeAttrsToLists))
-    (map stripEmptyTopLevelLabelsAnnotations)
-  ];
+  # `ekn.lib.kubeValueType` resolves an `mkNamedList` or `mkNumberedList` marker
+  # when it merges an option. Thus no marker from `kubernetes.objects` reaches
+  # the pipeline below, and the pipeline does not need a pass to convert one.
+  #
+  # A generator and a transformer both run after the merge. Each one is a plain
+  # function that returns a plain value, and no option type sees that value. Thus
+  # a generator or a transformer can put a new marker into an object. Run the
+  # conversion pass only when one of the two is set. The pass is a deep walk over
+  # every object, so it is not free.
+  needsMarkerPass = cfg.generators != [ ] || cfg.transformers != [ ];
+  generatedWithEkn = lib.pipe cfg.objects (
+    [
+      # Convert kubernetes.objects.namespace.kind.name into a list of objects
+      (lib.collect (x: x ? apiVersion && x ? kind && x ? metadata))
+      # Run a generator pass to generate objects from objects.
+      (
+        objects:
+        objects
+        ++ lib.pipe objects [
+          (lib.concatMap (
+            object:
+            lib.pipe (map (generator: generator object) cfg.generators) [
+              # A generator declining to fire returns `{ }` -- filter it out
+              # here, before merging in a default `ekn`, otherwise the merge
+              # below turns it into a non-empty `{ ekn = ...; }` stub with no
+              # kind/apiVersion/metadata that survives downstream.
+              (lib.filter (generated: generated != { }))
+              (map (
+                generated:
+                generated
+                // lib.optionalAttrs (!(generated ? ekn)) {
+                  ekn = object.ekn or { };
+                }
+              ))
+            ]
+          ))
+        ]
+      )
+      # Run a transformation pass over all objects
+      (map (object: lib.pipe object cfg.transformers))
+      # Run filter pass over all objects
+      (lib.filter (object: lib.all (function: function object) cfg.filters))
+    ]
+    # Change any marked attribute set that a generator or a transformer made
+    # back into a list. See `needsMarkerPass` above.
+    ++ lib.optional needsMarkerPass (map (lib.walkWithPath lib.kubeAttrsToLists))
+    ++ [
+      (map stripEmptyTopLevelLabelsAnnotations)
+    ]
+  );
   # cfg.crds objects deliberately don't flow through generatedWithEkn's
-  # pipeline above (generators/transformers/filters/kubeAttrsToLists) -- that
-  # walk is exactly what kubernetes.crds exists to avoid paying for. They're
-  # concatenated in afterwards, already complete and untouched.
-  allGenerated = generatedWithEkn ++ cfg.crds;
+  # pipeline above (generators/transformers/filters) -- that walk is exactly
+  # what kubernetes.crds exists to avoid paying for. They're concatenated in
+  # afterwards, already complete and untouched.
+  #
+  # `kubernetes.crds` is `listOf attrs`, so it also goes around
+  # `ekn.lib.kubeValueType`. Nothing resolves an `mkNamedList` or
+  # `mkNumberedList` marker in a CRD. Such a marker would reach the cluster as a
+  # literal `_type` field. Find it here and stop, instead of writing a manifest
+  # that is not valid Kubernetes. The search is lazy and stops at the first
+  # marker.
+  checkedCrds = map (
+    crd:
+    lib.throwIf (lib.hasListMarker crd) ''
+      The CustomResourceDefinition "${
+        crd.metadata.name or "<unnamed>"
+      }" in `kubernetes.crds' uses ekn.lib.mkNamedList or ekn.lib.mkNumberedList.
+
+      `kubernetes.crds' goes around ekn.lib.kubeValueType on purpose, for speed.
+      Thus nothing changes the marker back into a list, and the marker becomes a
+      literal `_type' field in the manifest.
+
+      Put the object in `kubernetes.objects' instead, where the type resolves
+      the marker. You can also write the list directly.
+    '' crd
+  ) cfg.crds;
+  allGenerated = generatedWithEkn ++ checkedCrds;
 in
 {
   imports = [
@@ -515,6 +550,50 @@ in
         `ekn.sops.maybe_decrypt`).
       '';
     };
+
+    rawFiles = lib.mkOption {
+      type = lib.types.listOf (
+        lib.types.submodule {
+          options = {
+            path = lib.mkOption {
+              type = lib.types.path;
+              description = ''
+                A complete, already-rendered Kubernetes manifest file (JSON
+                or YAML, apiVersion/kind/metadata all present). Tracked as a
+                Nix input (so it's pinned/reproducible like everything
+                else), but never parsed into `resources`/`generated` --
+                `ekn kubeapply`/`ekn commit` read it directly instead.
+              '';
+            };
+            gitOpsTarget = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "Same routing as ekn.gitOpsTarget on a normal object -- which gitOps.targets entry this file belongs to. Null omits it from every gitOpsTargets entry (still kubeapply-able via the full kubernetes.rawFiles list, just never committed to a GitOps branch).";
+            };
+          };
+        }
+      );
+      default = [ ];
+      description = ''
+        Escape hatch from the module system for objects that must reach the
+        cluster/git byte-identical to how they exist on disk -- the normal
+        `kubernetes.resources` -> `generated` pipeline round-trips every
+        object through Nix's own attrset representation, which
+        `builtins.toJSON` always serializes with alphabetized keys, and
+        which gains new sibling fields (`ekn`, `metadata` merged in by a
+        module, etc.) that weren't present when the object was first
+        authored. Both of those permanently invalidate a SOPS
+        whole-document MAC computed before either happened -- fine for
+        `ekn kubeapply`'s own decrypt (`ekn.sops.maybe_decrypt` passes
+        `--ignore-mac`, since each field's own AES-GCM tag is still
+        verified independently), but fatal for a MAC-verifying consumer
+        that offers no such bypass (e.g. ArgoCD's ksops-enabled
+        repo-server). A raw file sidesteps the round-trip entirely: it
+        must already be the complete manifest from before it was
+        SOPS-encrypted, so nothing about its structure changes between
+        encryption and decryption.
+      '';
+    };
   };
 
   config.kubernetes = {
@@ -536,25 +615,50 @@ in
 
     generatedWithEkn = allGenerated;
 
-    gitOpsTargets = lib.pipe allGenerated [
-      (lib.filter (object: (object.ekn.gitOpsTarget or null) != null))
-      (lib.groupBy (object: object.ekn.gitOpsTarget))
-      (lib.mapAttrs (
-        name: objects: {
-          target =
-            config.gitOps.targets.${name} or (throw ''
-              ekn.gitOpsTarget references unknown GitOps target "${name}".
-              Declared targets: ${lib.concatStringsSep ", " (lib.attrNames config.gitOps.targets)}
-            '');
-          # `ekn` belongs to the EKN compiler, not to the Kubernetes manifest
-          # -- same strip as `kubernetes.generated` above. Left in place here,
-          # it would land as a literal top-level field in every object `ekn
-          # commit` writes to the GitOps tree, permanently OutOfSync since
-          # nothing ever produces it on the live-cluster side.
-          objects = map (object: removeAttrs object [ "ekn" ]) objects;
-        }
-      ))
-    ];
+    gitOpsTargets =
+      let
+        objectsByTarget = lib.pipe allGenerated [
+          (lib.filter (object: (object.ekn.gitOpsTarget or null) != null))
+          (lib.groupBy (object: object.ekn.gitOpsTarget))
+          (lib.mapAttrs (
+            _name: objects:
+            # `ekn` belongs to the EKN compiler, not to the Kubernetes
+            # manifest -- same strip as `kubernetes.generated` above. Left
+            # in place here, it would land as a literal top-level field in
+            # every object `ekn commit` writes to the GitOps tree,
+            # permanently OutOfSync since nothing ever produces it on the
+            # live-cluster side.
+            map (object: removeAttrs object [ "ekn" ]) objects
+          ))
+        ];
+        rawFilesByTarget = lib.pipe config.kubernetes.rawFiles [
+          (lib.filter (f: f.gitOpsTarget != null))
+          (lib.groupBy (f: f.gitOpsTarget))
+          (lib.mapAttrs (_name: files: map (f: f.path) files))
+        ];
+        allTargetNames = lib.unique (lib.attrNames objectsByTarget ++ lib.attrNames rawFilesByTarget);
+      in
+      lib.listToAttrs (
+        map (name: {
+          inherit name;
+          value = {
+            target =
+              config.gitOps.targets.${name} or (throw ''
+                ekn.gitOpsTarget references unknown GitOps target "${name}".
+                Declared targets: ${lib.concatStringsSep ", " (lib.attrNames config.gitOps.targets)}
+              '');
+            objects = objectsByTarget.${name} or [ ];
+            # Paths only, deliberately not read/parsed here -- reading them
+            # would mean round-tripping their content through Nix's
+            # attrset representation, exactly what rawFiles exists to
+            # avoid (see kubernetes.rawFiles' description). `ekn
+            # kubeapply`/`ekn commit` read these files themselves, in
+            # Python, where insertion-ordered dicts + `sort_keys=False`
+            # actually preserve source order.
+            rawFiles = rawFilesByTarget.${name} or [ ];
+          };
+        }) allTargetNames
+      );
 
     novalidateKeys = lib.pipe allGenerated [
       (lib.filter (object: object.ekn.novalidate or false))

@@ -6,6 +6,7 @@
 }:
 let
   cleanName = lib.replaceStrings [ "/" ] [ "-" ];
+  isOci = repo: repo != null && lib.hasPrefix "oci://" repo;
 in
 {
   # name of the chart
@@ -31,14 +32,25 @@ stdenvNoCC.mkDerivation {
   buildCommand = ''
     export HOME="$PWD"
     echo "adding helm repo"
-    ${if repo == null then "" else "helm repo add repository ${repo}"}
+    ${if repo == null || isOci repo then "" else "helm repo add repository ${repo}"}
     echo "fetching helm chart"
     helm fetch -d ./chart \
       ${if untar then "--untar" else ""} \
       ${if version == null then "" else "--version ${version}"} \
       ${if devel then "--devel" else ""} \
       ${if verify then "--verify" else ""} \
-      ${if chartUrl == null then (if repo == null then chart else "repository/${chart}") else chartUrl}
+      ${
+        if chartUrl != null then
+          chartUrl
+        else if repo == null then
+          chart
+        else if isOci repo then
+          # OCI registries have no index.yaml to `helm repo add` against --
+          # `helm fetch`/`pull` accepts an oci:// ref directly instead.
+          "${repo}/${chart}"
+        else
+          "repository/${chart}"
+      }
     # helm fetch --untar with a direct chartUrl can leave a same-named empty
     # directory alongside the real extracted chart, so pick the one directory
     # that actually contains a Chart.yaml rather than globbing all of them.

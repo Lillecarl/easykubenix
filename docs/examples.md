@@ -20,15 +20,17 @@ The generated manifest will contain 5 items with `apiVersion`, `kind`, and
 
 ## Named Lists
 
-Demonstrates the `_namedlist` and `_numberedlist` helpers for overriding
+Demonstrates the `mkNamedList` and `mkNumberedList` helpers for overriding
 container lists and environment variables by name instead of positional index.
 
 ```{literalinclude} ./examples/namedlists/default.nix
 :language: nix
 ```
 
-`initContainers` use `_numberedlist` (order-preserving), while regular
-`containers` and `env` entries use `_namedlist` (keyed by the `name` attribute).
+`initContainers` use `mkNumberedList`, which addresses an entry by its index.
+Regular `containers` and `env` entries use `mkNamedList`, which addresses an
+entry by its `name` attribute. Both helpers keep the order of the entries that
+a plain list already defines.
 
 ---
 
@@ -42,8 +44,19 @@ and run through the same transformer/generator pipeline.
 :language: nix
 ```
 
-The `fetchHelm` function downloads and renders the chart. Set
-`convertLists = true` (the default) to make chart values overridable by name.
+The `fetchHelm` function downloads and renders the chart. A chart list stays a
+plain list. To override one entry of it by name, give the same field an
+`mkNamedList` value in your own module. The attribute name selects the entry:
+
+```nix
+kubernetes.objects.default.Deployment.my-chart.spec.template.spec.containers =
+  lib.mkNamedList { main.image = lib.mkForce "my-registry/main:1.2.3"; };
+```
+
+The type merges the two definitions by name. An entry keeps the position it had
+in the chart output. An attribute name that the chart does not use adds a new
+entry at the end. Use `mkNumberedList` to address an entry by index instead,
+for example a list of scalars such as `args`.
 
 ---
 

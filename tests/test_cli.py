@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from ekn.cli import Commit, Deploy, JsonToYaml, Validate, YamlToJson, _gitops_path
+from ekn.cli import Deploy, JsonToYaml, Validate, YamlToJson
 from ekn.eval import evaluate_file, evaluate_flake_ekn
-from ekn.git import commit_manifests, diff_manifests, flatten_manifests
+from ekn.git import commit_manifests, diff_manifests
+from ekn.gitops import flatten_manifests
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CUSTOMER_NIX = """\
@@ -42,14 +43,14 @@ def anyio_backend() -> str:
 @pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
     import subprocess
+
     repo = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"],
-                   capture_output=True, check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"],
-                   capture_output=True, check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "--allow-empty", "-q", "-m", "root"],
-                   capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "--allow-empty", "-q", "-m", "root"], capture_output=True, check=True
+    )
     return repo
 
 
@@ -70,15 +71,9 @@ class TestEval:
 
 
 class TestDiff:
-    def test_gitops_path_defaults_from_config(self) -> None:
-        result = {"config": {"gitops": {"path": "clusters/demo"}}}
-
-        assert _gitops_path(result) == "clusters/demo"
-
-    def test_gitops_path_defaults_to_root(self) -> None:
-        result = {"config": {"gitops": {}}}
-
-        assert _gitops_path(result) == "./"
+    # There is no instance-wide GitOps path any more -- a path belongs to a
+    # target (`gitOps.targets.<name>.path`, see tests/test_gitops.py) and the
+    # root default now lives in `flatten_manifests`' `subdir` argument.
 
     async def test_diff_no_changes(self, tmp_path: Path, git_repo: Path) -> None:
         f = tmp_path / "customers.nix"
@@ -113,13 +108,16 @@ class TestDiff:
         os.environ["EKN_REPO"] = str(git_repo)
         try:
             result = await evaluate_file(f, "customer1")
-            default_files = flatten_manifests([
-                {
-                    "apiVersion": "v1", "kind": "ConfigMap",
-                    "metadata": {"name": "my-config", "namespace": "default"},
-                    "data": {"key": "original"},
-                }
-            ])
+            default_files = flatten_manifests(
+                [
+                    {
+                        "apiVersion": "v1",
+                        "kind": "ConfigMap",
+                        "metadata": {"name": "my-config", "namespace": "default"},
+                        "data": {"key": "original"},
+                    }
+                ]
+            )
             commit_manifests(".", "override-branch", default_files, "first")
             new_files = flatten_manifests(result["config"]["kubernetes"]["generated"])
             diff_out = diff_manifests(".", "override-branch", new_files)
@@ -176,9 +174,7 @@ class TestYamlJsonConversion:
     that path shares nanopynix's YAML-parsing code (and its yaml11/yaml12
     scalar-resolution differences) instead of yq's."""
 
-    async def test_yaml_to_json_defaults_to_yaml12_decimal(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_yaml_to_json_defaults_to_yaml12_decimal(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stdout = _FakeStdout()
         monkeypatch.setattr(sys, "stdin", _FakeStdin(b"mode: 0644\n"))
         monkeypatch.setattr(sys, "stdout", stdout)
@@ -189,9 +185,7 @@ class TestYamlJsonConversion:
 
         assert json.loads(stdout.buffer.getvalue()) == [{"mode": 644}]
 
-    async def test_yaml_to_json_yaml11_resolves_octal(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_yaml_to_json_yaml11_resolves_octal(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stdout = _FakeStdout()
         monkeypatch.setattr(sys, "stdin", _FakeStdin(b"mode: 0644\n"))
         monkeypatch.setattr(sys, "stdout", stdout)
@@ -202,9 +196,7 @@ class TestYamlJsonConversion:
 
         assert json.loads(stdout.buffer.getvalue()) == [{"mode": 420}]
 
-    async def test_yaml_to_json_multi_document_stream(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_yaml_to_json_multi_document_stream(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stdout = _FakeStdout()
         monkeypatch.setattr(sys, "stdin", _FakeStdin(b"a: 1\n---\nb: 2\n"))
         monkeypatch.setattr(sys, "stdout", stdout)
@@ -215,9 +207,7 @@ class TestYamlJsonConversion:
 
         assert json.loads(stdout.buffer.getvalue()) == [{"a": 1}, {"b": 2}]
 
-    async def test_yaml_to_json_preserves_empty_documents_as_null(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_yaml_to_json_preserves_empty_documents_as_null(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # `_yamlToJson` dumps the raw parsed document stream -- dropping
         # empty/null documents (e.g. a leading `---` in a K8s manifest
         # bundle) is importyaml.nix's job, applied uniformly to both the
@@ -233,9 +223,7 @@ class TestYamlJsonConversion:
 
         assert json.loads(stdout.buffer.getvalue()) == [None, {"a": 1}]
 
-    async def test_json_to_yaml_renders_a_document_stream(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_json_to_yaml_renders_a_document_stream(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stdout = _FakeStdout()
         payload = json.dumps([{"kind": "ConfigMap", "metadata": {"name": "foo"}}]).encode()
         monkeypatch.setattr(sys, "stdin", _FakeStdin(payload))
@@ -248,9 +236,7 @@ class TestYamlJsonConversion:
         assert "kind: ConfigMap" in stdout.text
         assert "name: foo" in stdout.text
 
-    async def test_yaml_to_json_to_yaml_round_trips(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_yaml_to_json_to_yaml_round_trips(self, monkeypatch: pytest.MonkeyPatch) -> None:
         source = b"kind: ConfigMap\nmetadata:\n  name: foo\ndata:\n  mode: 0644\n"
         to_json_stdout = _FakeStdout()
         monkeypatch.setattr(sys, "stdin", _FakeStdin(source))
@@ -269,54 +255,62 @@ class TestYamlJsonConversion:
         assert "mode: 420" in to_yaml_stdout.text
 
 
+def _stub_deploy(monkeypatch: pytest.MonkeyPatch, *, no_verify: bool) -> tuple[Deploy, list[str]]:
+    """Build a Deploy with every step it orchestrates replaced by a recorder.
+
+    Deploy.run resolves the GitOps branches/files itself and then finalizes
+    the commit through `_finalize_commit` -- it does not delegate to
+    `Commit.run` -- so both of those are stubbed too. `sourceBranch` is None
+    here, which is what keeps `prepare_deploy_and_source_commits` (and thus
+    any real git repository) out of the picture.
+    """
+    calls: list[str] = []
+
+    async def verify(_: object) -> None:
+        calls.append("verify")
+
+    async def push_cache(*_args: object, **_kwargs: object) -> None:
+        calls.append("push_cache")
+
+    async def resolve_gitops(*_args: object) -> tuple[str, None, list[tuple[str, str]]]:
+        return "deploy", None, [("default/ConfigMap/my-config.yaml", "kind: ConfigMap\n")]
+
+    async def finalize_commit(*_args: object, **_kwargs: object) -> None:
+        calls.append("commit")
+
+    async def jj_status(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(Validate, "run", verify)
+    monkeypatch.setattr("ekn.cli._push_ekn_cache", push_cache)
+    monkeypatch.setattr("ekn.cli._resolve_gitops", resolve_gitops)
+    monkeypatch.setattr("ekn.cli._finalize_commit", finalize_commit)
+    monkeypatch.setattr("ekn.cli.try_jj_status", jj_status)
+
+    deploy = object.__new__(Deploy)
+    deploy.no_verify = no_verify
+    deploy.flake = ".#test"
+    deploy.file = None
+    deploy.attr = None
+    deploy.cache_allow_failure = False
+    deploy.message = "test"
+    deploy.push = False
+    deploy.remote = "origin"
+    deploy.verbosity = "error"
+    deploy.print_build_logs = False
+    return deploy, calls
+
+
 class TestCommit:
     async def test_deploy_verifies_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        calls: list[str] = []
-
-        async def verify(_: object) -> None:
-            calls.append("verify")
-
-        async def push_cache(*_args: object, **_kwargs: object) -> None:
-            calls.append("push_cache")
-
-        async def commit(_: object) -> None:
-            calls.append("commit")
-
-        monkeypatch.setattr(Validate, "run", verify)
-        monkeypatch.setattr("ekn.cli._push_ekn_cache", push_cache)
-        monkeypatch.setattr(Commit, "run", commit)
-        deploy = object.__new__(Deploy)
-        deploy.no_verify = False
-        deploy.flake = ".#test"
-        deploy.file = None
-        deploy.attr = None
-        deploy.cache_allow_failure = False
+        deploy, calls = _stub_deploy(monkeypatch, no_verify=False)
 
         await Deploy.run(deploy)
 
         assert calls == ["verify", "push_cache", "commit"]
 
     async def test_deploy_no_verify_skips_validation(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        calls: list[str] = []
-
-        async def verify(_: object) -> None:
-            calls.append("verify")
-
-        async def push_cache(*_args: object, **_kwargs: object) -> None:
-            calls.append("push_cache")
-
-        async def commit(_: object) -> None:
-            calls.append("commit")
-
-        monkeypatch.setattr(Validate, "run", verify)
-        monkeypatch.setattr("ekn.cli._push_ekn_cache", push_cache)
-        monkeypatch.setattr(Commit, "run", commit)
-        deploy = object.__new__(Deploy)
-        deploy.no_verify = True
-        deploy.flake = ".#test"
-        deploy.file = None
-        deploy.attr = None
-        deploy.cache_allow_failure = False
+        deploy, calls = _stub_deploy(monkeypatch, no_verify=True)
 
         await Deploy.run(deploy)
 
@@ -367,14 +361,14 @@ EXAMPLE_FLAKE = str((Path(__file__).resolve().parent.parent / "docs/examples/exa
 class TestFlakeEval:
     async def test_flake_eval(self) -> None:
         result = await evaluate_flake_ekn(EXAMPLE_FLAKE, "myapp")
-        namespaces = {obj["metadata"]["namespace"] for obj in result["config"]["kubernetes"]["generated"]}
+        namespaces = {obj["metadata"]["namespace"] for obj in result.config.kubernetes.generated}
         assert "default" in namespaces
 
     async def test_flake_diff(self, git_repo: Path) -> None:
         os.environ["EKN_REPO"] = str(git_repo)
         try:
             result = await evaluate_flake_ekn(EXAMPLE_FLAKE, "myapp")
-            files = flatten_manifests(result["config"]["kubernetes"]["generated"])
+            files = flatten_manifests(result.config.kubernetes.generated)
             commit_manifests(".", "flake-test", files, "seed")
             diff_out = diff_manifests(".", "flake-test", files)
             assert diff_out is None
@@ -385,7 +379,7 @@ class TestFlakeEval:
         os.environ["EKN_REPO"] = str(git_repo)
         try:
             result = await evaluate_flake_ekn(EXAMPLE_FLAKE, "myapp")
-            files = flatten_manifests(result["config"]["kubernetes"]["generated"])
+            files = flatten_manifests(result.config.kubernetes.generated)
             commit_id = commit_manifests(".", "flake-test", files, "flake-test")
             assert isinstance(commit_id, str)
         finally:

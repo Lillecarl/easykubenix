@@ -34,9 +34,14 @@ def _sops_encrypt(obj: dict, key_file: Path) -> dict:
     env = os.environ | {"SOPS_AGE_KEY_FILE": str(key_file)}
     proc = subprocess.run(
         [
-            "sops", "--encrypt",
-            "--input-type", "json", "--output-type", "json",
-            "--age", _public_key(key_file),
+            "sops",
+            "--encrypt",
+            "--input-type",
+            "json",
+            "--output-type",
+            "json",
+            "--age",
+            _public_key(key_file),
             "/dev/stdin",
         ],
         input=json.dumps(obj).encode(),
@@ -55,9 +60,7 @@ class TestMaybeDecrypt:
 
         assert result == obj
 
-    async def test_decrypts_a_sops_encrypted_object(
-        self, age_key: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_decrypts_a_sops_encrypted_object(self, age_key: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SOPS_AGE_KEY_FILE", str(age_key))
         plain = {
             "apiVersion": "v1",
@@ -79,9 +82,7 @@ class TestMaybeDecrypt:
         encrypted = _sops_encrypt(plain, age_key)
         # Point at a key file with no matching identity -- decrypt must fail.
         wrong_key = tmp_path / "wrong.txt"
-        await asyncio.to_thread(
-            subprocess.run, ["age-keygen", "-o", str(wrong_key)], check=True, capture_output=True
-        )
+        await asyncio.to_thread(subprocess.run, ["age-keygen", "-o", str(wrong_key)], check=True, capture_output=True)
         monkeypatch.setenv("SOPS_AGE_KEY_FILE", str(wrong_key))
 
         with pytest.raises(SopsDecryptError):

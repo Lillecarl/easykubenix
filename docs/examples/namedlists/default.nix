@@ -13,12 +13,14 @@ let
             spec.selector.matchLabels.app = "namedlist-demo";
             spec.template.metadata.labels.app = "namedlist-demo";
             spec.template.spec = {
-              # Use mkNamedList for explicit _namedlist containers
-              containers = ekn.lib.mkNamedList {
+              # `mkNamedList` gives an explicit named list. The attribute name
+              # becomes the `name` of the container. `pkgs.lib` here is the
+              # extended lib, which holds easykubenix' own helpers.
+              containers = pkgs.lib.mkNamedList {
                 main = {
                   image = "nginx:alpine";
                   ports = [ { containerPort = 80; } ];
-                  env = ekn.lib.mkNamedList {
+                  env = pkgs.lib.mkNamedList {
                     FOO.value = "bar";
                     MODE.value = "test";
                   };
@@ -28,7 +30,8 @@ let
                 };
               };
 
-              # initContainers should use _numberedlist preserving order
+              # A plain list keeps its order. Use `mkNumberedList` to override
+              # one entry of it by index.
               initContainers = [
                 {
                   name = "init-step1";
@@ -50,7 +53,7 @@ let
             };
           };
 
-          # Test plain containers without _namedlist
+          # A control case: plain containers with no marker at all.
           default.Deployment.plain-containers = {
             spec.selector.matchLabels.app = "plain";
             spec.template.metadata.labels.app = "plain";

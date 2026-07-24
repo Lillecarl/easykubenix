@@ -5,6 +5,8 @@ from pathlib import Path
 import anyio
 import nanopynix
 import pytest
+from nanopynix.rpc import Session
+from nanopynix_helpers.eval_target import EvaluationTargetError
 
 from ekn.eval import evaluate_file, realise_attr
 
@@ -26,22 +28,22 @@ def ekn_root() -> str:
 class TestSimpleEval:
     async def test_eval_literal(self) -> None:
         async with (
-            nanopynix.Session(experimental_features=["flakes", "nix-command"]) as session,
+            Session(experimental_features=["flakes", "nix-command"]) as session,
             session.store() as store,
             session.eval(store) as eval_,
         ):
             root = await eval_.string('{ x = 1; y = { z = "hello"; }; }')
-            result = await root.force_json()
+            result = await root.to_python()
         assert result == {"x": 1, "y": {"z": "hello"}}
 
     async def test_eval_list(self) -> None:
         async with (
-            nanopynix.Session(experimental_features=["flakes", "nix-command"]) as session,
+            Session(experimental_features=["flakes", "nix-command"]) as session,
             session.store() as store,
             session.eval(store) as eval_,
         ):
             root = await eval_.string("[ 1 2 3 ]")
-            result = await root.force_json()
+            result = await root.to_python()
         assert result == [1, 2, 3]
 
 
@@ -65,9 +67,11 @@ class TestRealiseAttr:
 
     async def test_rejects_empty_segment(self, tmp_path: Path) -> None:
         f = tmp_path / "drv.nix"
-        f.write_text("{ }")
+        # `foo` must exist. select_attr validates each component as it walks,
+        # so a missing first component would mask the empty one.
+        f.write_text("{ foo = { }; }")
 
-        with pytest.raises(ValueError, match="empty segment"):
+        with pytest.raises(EvaluationTargetError, match="empty component"):
             await realise_attr(f, None, "foo..bar")
 
     async def test_requires_file_or_flake(self) -> None:
@@ -98,8 +102,8 @@ class TestEknModule:
 
         deployment = result["generatedByPath"]["default"]["Deployment"]["api"]
         assert "ekn" not in deployment
-        target = result["gitopsTargets"]["apps"]
-        assert target["target"] == {"branch": "deploy", "path": "clusters/home/apps"}
+        target = result["gitOpsTargets"]["apps"]
+        assert target["target"] == {"path": "clusters/home/apps"}
         assert target["objects"][0]["metadata"]["name"] == "api"
 
     async def test_labels_annotations_are_coerced_by_default(self) -> None:
@@ -122,10 +126,48 @@ class TestEknModule:
             await evaluate_file(NIX_TEST_FILE, "labelsAnnotationsCoercionDisabledThrows")
 
     async def test_init_containers_preserve_order(self) -> None:
+        # A transformer runs after the option merge, so it can introduce a
+        # marker that no type ever sees. The pipeline still has to convert
+        # that one back into a list, in order.
         result = await evaluate_file(NIX_TEST_FILE, "initContainersOrder")
         assert isinstance(result, list)
         names = [c["name"] for c in result[0]["spec"]["initContainers"]]
         assert names == ["first", "second", "third"]
+
+    async def test_lone_named_list_resolves_without_a_conversion_pass(self) -> None:
+        # No generator and no transformer here, so nothing converts markers
+        # after the merge. The type has to do it on its own.
+        result = await evaluate_file(NIX_TEST_FILE, "loneNamedList")
+        assert isinstance(result, list)
+        assert result[0]["spec"]["containers"] == [{"name": "main", "image": "nginx"}]
+
+    async def test_named_list_override_across_modules(self) -> None:
+        # One module gives a plain rendered list, the shape a Helm chart
+        # produces. Another patches one entry by name and adds a second.
+        # The patched entry keeps its position, and the added entry gets a
+        # `name` from its key.
+        result = await evaluate_file(NIX_TEST_FILE, "namedListAcrossModules")
+        assert isinstance(result, list)
+        containers = result[0]["spec"]["containers"]
+        assert containers == [
+            {"name": "app", "image": "v2"},
+            {"name": "log", "image": "fluentd"},
+            {"name": "metrics", "image": "exporter"},
+        ]
+
+    async def test_named_list_survives_hoist_from_submodule(self) -> None:
+        # A module declares its own option with the recursive kube type and
+        # then lifts the result into kubernetes.objects, the way helm.nix and
+        # importyaml.nix do.
+        result = await evaluate_file(NIX_TEST_FILE, "hoistedFromSubmodule")
+        assert isinstance(result, list)
+        assert result[0]["spec"]["containers"] == [{"name": "main", "image": "api:1"}]
+
+    async def test_marker_in_crds_is_rejected(self) -> None:
+        # kubernetes.crds goes around the type for speed, so nothing there
+        # resolves a marker. Fail instead of writing `_type` into a manifest.
+        with pytest.raises(nanopynix.NixError, match=r"kubernetes\.crds"):
+            await evaluate_file(NIX_TEST_FILE, "crdMarkerThrows")
 
     async def test_generated_by_path(self, ekn_root: str) -> None:
         nix = f"""
@@ -142,12 +184,12 @@ class TestEknModule:
         easy.config.kubernetes.generatedByPath
         """
         async with (
-            nanopynix.Session(experimental_features=["flakes", "nix-command"]) as session,
+            Session(experimental_features=["flakes", "nix-command"]) as session,
             session.store() as store,
             session.eval(store) as eval_,
         ):
             root = await eval_.string(nix)
-            result = await root.force_json()
+            result = await root.to_python()
         assert isinstance(result, dict)
         assert "default" in result
         assert "ConfigMap" in result["default"]
@@ -168,12 +210,12 @@ class TestEknModule:
         easy.config.internal.manifestYAMLList
         """
         async with (
-            nanopynix.Session(experimental_features=["flakes", "nix-command"]) as session,
+            Session(experimental_features=["flakes", "nix-command"]) as session,
             session.store() as store,
             session.eval(store) as eval_,
         ):
             root = await eval_.string(nix)
-            result = await root.force_json()
+            result = await root.to_python()
         assert isinstance(result, str)
         assert "ConfigMap" in result
         assert "hello" in result
@@ -185,11 +227,11 @@ class TestValidationConfig:
 
         flake = str(PROJECT_ROOT / "docs/examples/example-flake")
         cfg = await evaluate_validation_config(flake, "myapp")
-        c = cfg["config"]
-        assert c["kubernetes"]["package"]["version"]
-        assert c["kubernetes"]["package"]["outPath"].startswith("/nix/store/")
-        assert c["validation"]["etcdPackage"]["outPath"].startswith("/nix/store/")
-        assert c["validation"]["kubeconformPackage"]["outPath"].startswith("/nix/store/")
-        assert isinstance(c["kluctl"]["resourcePriority"], dict)
-        assert c["kluctl"]["discriminator"]
-        assert c["internal"]["manifestJSONFile"]["outPath"].startswith("/nix/store/")
+        c = cfg.config
+        assert c.kubernetes.package.version
+        assert c.kubernetes.package.out_path.startswith("/nix/store/")
+        assert c.validation.etcd_package.out_path.startswith("/nix/store/")
+        assert c.validation.kubeconform_package.out_path.startswith("/nix/store/")
+        assert isinstance(c.kluctl.resource_priority, dict)
+        assert c.kluctl.discriminator
+        assert c.internal.manifest_json_file.out_path.startswith("/nix/store/")
