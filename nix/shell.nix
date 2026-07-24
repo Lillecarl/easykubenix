@@ -4,32 +4,46 @@
   sphinx,
   myst-parser,
   furo,
-  pytest,
-  anyio,
   ruff,
   pyright,
   sops,
   age,
+  # This repository's own venv -- see `eknDevEnv` in ../default.nix. One
+  # environment holding `ekn`'s whole dependency closure (kr8s, clypi, pygit2,
+  # pydantic, structlog, rich, pyyaml, anyio) together with `nanopynix` and
+  # its `test` extra, which is what brings pytest.
+  #
+  # `ekn`'s *source* lives in ../ekn, and pytest reads it from there via
+  # `pythonpath` in ../pytest.ini rather than from this venv. What the venv
+  # supplies is the dependency closure around it, which a hand-written
+  # `python.withPackages` list could not: nixpkgs' Python environments keep
+  # only importable modules and so drop an application together with
+  # everything it propagates.
+  eknDevEnv,
 }:
 let
-  pythonEnv = python.withPackages (
-    pp: [
-      sphinx
-      myst-parser
-      furo
-      pytest
-      anyio
-    ]
-  );
+  # Sphinx is only a command-line tool here. The docs are hand-written Markdown
+  # with no autodoc, so `sphinx-build` does not import `ekn` or anything else
+  # from this repository -- it needs no overlap with `eknDevEnv`.
+  docsEnv = python.withPackages (pp: [
+    sphinx
+    myst-parser
+    furo
+  ]);
 in
 mkShell {
+  # The order of this list decides the order of PATH. `eknDevEnv` must come
+  # first. Both environments give a `python3`, and pytest must run in the one
+  # that holds `ekn` and `nanopynix`. `docsEnv` still gives `sphinx-build`,
+  # because `eknDevEnv` does not have it.
   packages = [
-    pythonEnv
+    eknDevEnv
+    docsEnv
     ruff
     pyright
     # For local key management/testing (age-keygen etc) and manual sops
-    # inspection -- ekn's own sops.py (now in nanopynix) shells out to the
-    # real `sops` CLI too, but these aren't needed to import that code.
+    # inspection. ../ekn/src/ekn/sops.py shells out to the real `sops` CLI, so
+    # the tests that exercise it need one on PATH.
     sops
     age
   ];

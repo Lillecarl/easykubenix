@@ -13,6 +13,15 @@ ignore = [
 ]
 
 [lint.isort]
-known-first-party = [
-    "ekn",
-]
+# `ekn` alone. `nanopynix` was first-party here too while `ekn` imported
+# `nanopynix._typechecking` -- reaching into another package's private module
+# makes the two read as one codebase, and nanopynix' own ruff config groups
+# them that way. `ekn` no longer imports anything private from it, so it is an
+# ordinary declared dependency (ekn/pyproject.toml) and belongs with the rest
+# of the third-party imports.
+#
+# `combine-as-imports` keeps `from ekn.gitops import (X, branches as Y, ...)` as
+# the one statement it is written as, rather than splitting the aliased names
+# into a statement each.
+combine-as-imports = true
+known-first-party = ["ekn"]

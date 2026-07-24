@@ -3,6 +3,21 @@
 - `direnv exec . pyright ekn`
 - `direnv exec . ruff check --fix`
 - `direnv exec . ruff check --config ruff-strict.toml`
+- `direnv exec . ruff format --check`
+- `nix build --file ./checks.nix all` — the doc-example gates, the same thing CI
+  builds. Nothing in this repository is gated behind a flake command; `nix
+  build --file`, `nix run --file` and `nix-shell --run` must always work.
+
+`ekn/` is this repository's alone. nanopynix has no ekn dependency at all: no
+copy of the source, no `pynix ekn` subcommand, no gate over it. It is an
+ordinary third-party dependency of ours, imported through its public API only.
+Do not reintroduce an import of anything private from it (`nanopynix._*`).
+
+`ekn` does not opt into beartype, so nothing here resolves an annotation at
+runtime except pydantic. That is why `TC001`/`TC002` are selected and why
+`ruff-strict.toml` sets `runtime-evaluated-base-classes` to
+`["pydantic.BaseModel"]` — without it those rules will happily move a live
+model field type into an `if TYPE_CHECKING:` block and break imports.
 
 # Version control
 

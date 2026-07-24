@@ -9,45 +9,25 @@
     };
   };
 
+  # A wrapper over ./default.nix, which is where the examples are wired up.
+  # Nothing here may grow logic of its own: the non-flake path is the one that
+  # has to work, and a second definition would let the two disagree.
   outputs =
     { easykubenix, nixpkgs, ... }:
     let
-      eknLib = easykubenix.lib.easykubenix;
       forEachSystem = nixpkgs.lib.genAttrs [
         "x86_64-linux"
         "aarch64-linux"
       ];
-
-      eknPkgsFor =
+      examplesFor =
         system:
-        (eknLib {
+        import ./. {
           pkgs = import nixpkgs { inherit system; };
-          modules = [ ];
-        }).pkgs;
-
-      example =
-        system: name:
-        import ./${name} {
-          pkgs = eknPkgsFor system;
-          inherit (nixpkgs) lib;
-          easykubenix = eknLib;
+          easykubenix = easykubenix.lib.easykubenix;
         };
-
-      checksFor = system: {
-        basic = (example system "basic").check;
-        namedlists = (example system "namedlists").check;
-        helm = (example system "helm").check;
-        generators = (example system "generators").check;
-        edge-cases = (example system "edge-cases").check;
-        validation = (example system "validation").check;
-      };
-
     in
     {
-      checks = forEachSystem checksFor;
-      packages = forEachSystem (system: {
-        inherit (example system "basic") manifestJSON manifestYAMLFile;
-        validationScript = (example system "validation").validationScript;
-      });
+      checks = forEachSystem (system: (examplesFor system).checks);
+      packages = forEachSystem (system: (examplesFor system).packages);
     };
 }

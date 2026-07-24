@@ -4,6 +4,7 @@ result-*
 __pycache__/
 *.pyc
 .pytest_cache/
+.pytest-agent/
 .venv/
 *.egg-info/
 dist/

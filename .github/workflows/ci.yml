@@ -13,12 +13,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: nixbuild/nix-quick-install-action@v35
-      - name: Lint examples
-        run: nix flake check ./docs/examples --print-build-logs
+      # No flake command anywhere in this job. `checks.nix` and `shell.nix` are
+      # plain imports, so every gate here also runs from a checkout with no
+      # flake support -- which is the point. `all` covers every example, so a
+      # new one is gated the moment it joins the list in
+      # docs/examples/default.nix.
+      - name: Build example checks
+        run: nix build --file ./checks.nix all --no-link --print-build-logs
       - name: Validate against real kube-apiserver
-        run: nix run ./docs/examples#packages.x86_64-linux.validationScript
+        run: nix run --file ./nix packages.validationScript
       - name: Run tests
-        run: nix develop -c python3 -m pytest -v --no-header
+        run: nix-shell --run 'python3 -m pytest -v --no-header'
+      # `ekn/` is this repository's Python source, and nothing else lints or
+      # type-checks it. nanopynix' own gates used to, while the source lived
+      # there; they read its `../ekn` no longer.
+      - name: Lint
+        run: nix-shell --run 'ruff check --config ruff-strict.toml'
+      - name: Check formatting
+        run: nix-shell --run 'ruff format --check'
+      - name: Check types
+        run: nix-shell --run 'pyright ekn'
 
   docs-build:
     if: github.ref == 'refs/heads/develop'
@@ -35,8 +49,10 @@ jobs:
           authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
           useDaemon: false
 
+      # `--file .`, not `.#easykubenix-docs`: same reason as the gates above,
+      # a flake must never be the only way to build something here.
       - name: Build documentation
-        run: nix build .#easykubenix-docs --out-link result --print-build-logs --print-out-paths
+        run: nix build --file . passthru.easykubenix-docs --out-link result --print-build-logs --print-out-paths
 
       - name: Verify docs closure
         run: nix store verify --recursive --no-trust "$(readlink -f result)"

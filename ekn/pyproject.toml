@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ekn"
+version = "0.1.0"
+description = "easykubenix CLI"
+requires-python = ">=3.10"
+authors = [{ name = "easykubenix contributors" }]
+dependencies = [
+  "nanopynix",
+  "nanopynix-helpers",
+  "pygit2",
+  "pyyaml",
+  "clypi",
+  "kr8s",
+  "anyio",
+  "structlog",
+  "rich",
+  "pydantic-core",
+]
+
+[project.scripts]
+ekn = "ekn.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ekn"]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+# `../tests`, and not `../../tests`. The latter is what this file carried
+# while it lived one level deeper in the nanopynix checkout, and it resolved
+# to a sibling of that repository root -- a path that has never existed. The
+# suite that exercises these modules is easykubenix's own `tests/`.
+#
+# No `venvPath`/`venv` either. `direnv exec . pyright ekn` runs inside the
+# nix shell, whose interpreter already has the whole dependency closure; a
+# `.venv` directory is never created here and pointing at a missing one only
+# made pyright resolve nothing.
+include = ["src", "../tests"]
+extraPaths = ["src"]

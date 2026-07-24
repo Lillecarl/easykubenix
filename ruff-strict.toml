@@ -34,6 +34,13 @@ select = [
     "BLE",
     "TD",
     "LOG",
+    # mccabe, and pylint's too-many-arguments. `ekn/` carries `# noqa: C901`
+    # and `# noqa: PLR0913` on the complexity hotspots it already has, tracked
+    # rather than silenced. Both rules stay selected so those directives keep
+    # meaning something -- deselect either and RUF100 reads its directives as
+    # dead and asks for their removal, which loses the record of the debt.
+    "C901",
+    "PLR0913",
 ]
 
 ignore = [
@@ -44,13 +51,44 @@ ignore = [
     "BLE001",
     "A001",
     "T201",
+    # TC003 alone. TC001/TC002 used to be ignored alongside it, because `ekn/`
+    # guarded its typing-only imports with `if TYPE_CHECKING or BEARTYPING:` --
+    # a block that is live at runtime under beartype, which resolves
+    # annotations for real. Those rules could not see the `BEARTYPING` half and
+    # asked for imports to move into a block they were already in. `ekn` no
+    # longer opts into beartype at all (it is easykubenix's CLI, not part of
+    # nanopynix's library test surface), so the blocks are plain
+    # `if TYPE_CHECKING:` and both rules are correct again.
+    #
+    # TC004 likewise earns its place: it catches an import stranded inside a
+    # type-checking block that runtime code needs.
     "TC003",
 ]
 
+[lint.flake8-type-checking]
+# `ekn.eval` is a wall of pydantic models, and pydantic resolves a model's
+# field annotations for real at class-creation time -- `from __future__ import
+# annotations` does not save it, it just moves the resolution to
+# `model_rebuild`. So a name TC001/TC002 moves into an `if TYPE_CHECKING:`
+# block because "it is only used in an annotation" becomes an unresolved
+# forward reference at import. Naming the base class here is what tells those
+# rules which annotations are live; without it they are unsafe to select at
+# all next to pydantic, which is why the whole family used to be ignored.
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+
+[lint.per-file-ignores]
+# `PLR0913` is selected for `ekn/`, whose `# noqa: PLR0913` directives are
+# shared with nanopynix and must stay meaningful. Test fixtures are the case
+# the rule is not for: a fake API object or a chart-building helper takes the
+# arguments the thing it stands in for takes, and splitting one to satisfy an
+# argument count makes the test harder to read, not the code better.
+"tests/**" = ["PLR0913"]
+
 [lint.isort]
-known-first-party = [
-    "ekn",
-]
+# See ruff.toml for why `nanopynix` is not first-party here, and for
+# `combine-as-imports`.
+combine-as-imports = true
+known-first-party = ["ekn"]
 
 [format]
 docstring-code-format = true
