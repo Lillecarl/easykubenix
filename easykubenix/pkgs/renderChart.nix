@@ -3,7 +3,6 @@
   lib,
   kubernetes-helm,
   fetchHelm,
-  yq,
 }:
 {
   # { repoURL, name, version, sha256 }
@@ -19,6 +18,10 @@
   # Name of the `gitOps.targets.<name>` to route these resources through
   # (see kubernetes.nix's ekn.gitOpsTarget); null leaves them unrouted.
   gitOpsTarget ? null,
+  # The `ekn` CLI package, used only by the no-primop fallback below to
+  # convert this chart's rendered YAML. Not needed when evaluating through
+  # `ekn` itself, hence the null default.
+  eknPackage ? null,
 }:
 let
   # Single switch for every chart's CRD handling: `true` routes CRDs through
@@ -73,23 +76,41 @@ let
   # -- entirely in-process, with no extra derivation or subprocess.
   #
   # Falling back to plain Nix (`nix build`/`nix eval` with no nanopynix
-  # primops registered, or any other consumer of this file/easykubenix that
-  # isn't going through `ekn`) uses `yq` in a separate derivation to convert
-  # YAML to JSON, then parses with `builtins.fromJSON` (a real, universal
-  # Nix builtin). This path does NOT get the YAML 1.1 octal fix. Unlike this
-  # file, importyaml.nix/helm.nix's equivalent fallback shells out to ekn's
-  # own hidden `_yamlToJson` CLI subcommand instead of `yq` (see
-  # `ekn.lib.parseYAMLStream` in parseYamlStream.nix) so their fallback path
-  # DOES get correct yaml11/yaml12 semantics -- this file can't do the same
-  # since it's a plain `pkgs.callPackage` derivation, not a NixOS module, so
-  # it has no access to `_module.args.eknPackage`/`ekn.lib`.
+  # primops registered) shells out to ekn's own hidden `_yamlToJson`
+  # subcommand in a derivation, then parses with `builtins.fromJSON`. That
+  # is the same nanopynix parser the primop above uses, just out-of-process,
+  # so both branches agree on YAML 1.1 semantics.
+  #
+  # This used to run `yq` instead, which was the only foreign YAML parser
+  # left in the project and did not agree with the primop: measured, `yq`
+  # reads `0644` as octal 420 (correct) but an unquoted `yes` as the string
+  # "yes" where YAML 1.1 -- and therefore Kubernetes' own go-yaml v2 -- reads
+  # boolean true. That made the parse result depend on which evaluator ran.
+  # No such scalar appears in any chart this repo renders today (checked: 143
+  # rendered outputs, 0 hits), so it was latent rather than live, but the
+  # divergence class is now gone rather than merely unexercised.
+  #
+  # `eknPackage` is threaded in as a *call-time* argument rather than a
+  # callPackage one: this file is instantiated inside the `pkgs.extend`
+  # overlay, where the ekn CLI does not exist yet. (Verified there is no
+  # actual cycle -- nothing in ekn's build graph pulls a chart through
+  # renderChart -- but taking it here keeps the overlay uninvolved either
+  # way.) Only this fallback branch needs it, so callers evaluating through
+  # `ekn` never have to supply it.
   parsed =
     if builtins ? fromYAML11Stream then
       builtins.fromYAML11Stream (builtins.readFile resourcesYaml)
+    else if eknPackage == null then
+      throw ''
+        renderChart: evaluating without nanopynix's fromYAML11Stream primop
+        (i.e. not through `ekn`) needs `eknPackage` passed in to convert
+        "${name}"'s rendered YAML, and none was given.
+      ''
     else
       let
         resourcesJson = runCommand "${name}-rendered.json" { } ''
-          ${yq}/bin/yq -Scs '.' ${resourcesYaml} > $out
+          ${eknPackage}/bin/ekn _yamlToJson --yaml-version yaml11 \
+            < ${resourcesYaml} > $out
         '';
       in
       builtins.fromJSON (builtins.readFile resourcesJson);
