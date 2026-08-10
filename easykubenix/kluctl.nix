@@ -28,7 +28,9 @@ let
       (_: true);
   isExcludedFromKluctl =
     object:
-    (excludedGitopsKeys ? "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}")
+    (
+      excludedGitopsKeys ? "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}"
+    )
     # kluctl has no SOPS awareness at all -- it would apply the raw,
     # still-encrypted `sops:` blob as the object's literal content. Any
     # object carrying one is meant for a ksops/`ekn kubeapply`-style

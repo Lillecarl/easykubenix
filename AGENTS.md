@@ -4,9 +4,18 @@
 - `direnv exec . ruff check --fix`
 - `direnv exec . ruff check --config ruff-strict.toml`
 - `direnv exec . ruff format --check`
-- `nix build --file ./checks.nix all` — the doc-example gates, the same thing CI
-  builds. Nothing in this repository is gated behind a flake command; `nix
-  build --file`, `nix run --file` and `nix-shell --run` must always work.
+- `direnv exec . nixfmt $(jj file list | grep '\.nix$')`
+- `nix build --file ./checks.nix all` — the doc-example gates plus this
+  repository's own (`ekn-sandbox`, `nixfmt`), the same thing CI builds. Nothing
+  in this repository is gated behind a flake command; `nix build --file`,
+  `nix run --file` and `nix-shell --run` must always work.
+
+Every `.nix` file is nixfmt'd, and `checks.nixfmt` enforces it over the whole
+tree — it filters the repository down to `*.nix` by dropping dot-directories,
+`result` symlinks and `__pycache__`, so a new directory is covered without
+anyone extending a list. Use the `nixfmt` from the dev shell rather than one
+off your PATH: it is the version the gate runs, and nixfmt's output moves
+between releases.
 
 `ekn/` is this repository's alone. nanopynix has no ekn dependency at all: no
 copy of the source, no `pynix ekn` subcommand, no gate over it. It is an

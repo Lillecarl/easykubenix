@@ -4,6 +4,8 @@
   pkgs ? inputs.nixpkgs.legacyPackages.${system},
 }:
 let
+  inherit (pkgs) lib;
+
   # `ekn`'s source lives in ../ekn, but its dependency closure comes from
   # nanopynix' exported development environment. See shell.nix.
   nanopynix = import inputs.nanopynix { inherit pkgs; };
@@ -49,9 +51,42 @@ let
 
         touch "$out"
       '';
+
+  # Every `.nix` file in the repository, and nothing else. The filter names
+  # what to *drop* rather than what to keep, so a directory added later is
+  # covered without anyone remembering to list it -- a formatting gate that
+  # silently stops seeing new files is worse than no gate. Dot-directories go
+  # (`.git`, `.direnv`, `.pytest-agent`, `.claude`), as do `result` symlinks
+  # and `__pycache__`; none of them holds source this repository owns, and
+  # `.git` in particular must never be walked.
+  nixSources = builtins.path {
+    name = "easykubenix-nix-sources";
+    path = ../.;
+    filter =
+      path: type:
+      let
+        base = baseNameOf path;
+      in
+      if type == "directory" then
+        !(
+          lib.hasPrefix "." base || base == "result" || lib.hasPrefix "result-" base || base == "__pycache__"
+        )
+      else
+        lib.hasSuffix ".nix" base;
+  };
+
+  # nixfmt is the formatter, at the version this repository's nixpkgs pin
+  # carries -- which is the point of running it from a derivation rather than
+  # from whatever happens to be on a contributor's PATH. `--check` writes
+  # nothing, so the read-only store copy above is all it needs.
+  nixfmt = pkgs.runCommand "easykubenix-check-nixfmt" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
+    cd ${nixSources}
+    find . -type f -name '*.nix' -print0 | sort -z | xargs -0 nixfmt --check
+    touch "$out"
+  '';
 in
 {
-  inherit root ekn-sandbox;
+  inherit root ekn-sandbox nixfmt;
   inherit (examples) packages;
 
   shell = pkgs.python3Packages.callPackage ./shell.nix {
@@ -59,7 +94,7 @@ in
   };
 
   checks = examples.checks // {
-    inherit ekn-sandbox;
+    inherit ekn-sandbox nixfmt;
     # `all` is what CI builds, so a gate that is not in it is a gate that does
     # not run. ../docs/examples/default.nix builds its own `all` over the
     # examples; this one is that plus everything added here.
@@ -67,6 +102,7 @@ in
       checks = [
         examples.checks.all
         ekn-sandbox
+        nixfmt
       ];
     } "printf '%s\\n' $checks > $out";
   };

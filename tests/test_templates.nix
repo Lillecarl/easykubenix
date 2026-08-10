@@ -12,33 +12,31 @@ let
           ...
         }:
         {
-          kubernetes.templates.sealedSecret =
-            template {
-              name = "sealedSecret";
-              options = {
-                encryptedData = {
-                  type = adios.types.attrsOf adios.types.str;
-                };
-                template = {
-                  type = adios.types.attrs;
-                  default = { };
+          kubernetes.templates.sealedSecret = template {
+            name = "sealedSecret";
+            options = {
+              encryptedData = {
+                type = adios.types.attrsOf adios.types.str;
+              };
+              template = {
+                type = adios.types.attrs;
+                default = { };
+              };
+            };
+            impl =
+              { options }:
+              {
+                apiVersion = "bitnami.com/v1alpha1";
+                spec = {
+                  inherit (options) encryptedData template;
                 };
               };
-              impl =
-                { options }:
-                {
-                  apiVersion = "bitnami.com/v1alpha1";
-                  spec = {
-                    inherit (options) encryptedData template;
-                  };
-                };
-            };
+          };
 
-          kubernetes.objects.default.SealedSecret.database =
-            config.kubernetes.templates.sealedSecret {
-              encryptedData.password = "AgByEncrypted";
-              template.metadata.labels.app = "api";
-            };
+          kubernetes.objects.default.SealedSecret.database = config.kubernetes.templates.sealedSecret {
+            encryptedData.password = "AgByEncrypted";
+            template.metadata.labels.app = "api";
+          };
         }
       )
     ];

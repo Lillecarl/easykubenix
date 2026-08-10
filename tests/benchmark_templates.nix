@@ -25,7 +25,12 @@ let
     apiVersion = "bitnami.com/v1alpha1";
     kind = "SealedSecret";
     metadata = {
-      inherit (args) name namespace labels annotations;
+      inherit (args)
+        name
+        namespace
+        labels
+        annotations
+        ;
     };
     spec = {
       inherit (args) encryptedData;
@@ -38,24 +43,29 @@ let
     };
   };
 
-  evalModulesTemplate = index:
+  evalModulesTemplate =
+    index:
     let
-      cfg = (lib.evalModules {
-        modules = [
-          ({ config, lib, ... }: {
-            options = {
-              name = lib.mkOption { type = lib.types.str; };
-              namespace = lib.mkOption { type = lib.types.str; };
-              encryptedData = lib.mkOption { type = lib.types.attrsOf lib.types.str; };
-              labels = lib.mkOption { type = lib.types.attrsOf lib.types.str; };
-              annotations = lib.mkOption { type = lib.types.attrsOf lib.types.str; };
-              result = lib.mkOption { type = lib.types.attrs; readOnly = true; };
-            };
-            config.result = render config;
-          })
-          { config = arguments index; }
-        ];
-      }).config;
+      cfg =
+        (lib.evalModules {
+          modules = [
+            ({ config, lib, ... }: {
+              options = {
+                name = lib.mkOption { type = lib.types.str; };
+                namespace = lib.mkOption { type = lib.types.str; };
+                encryptedData = lib.mkOption { type = lib.types.attrsOf lib.types.str; };
+                labels = lib.mkOption { type = lib.types.attrsOf lib.types.str; };
+                annotations = lib.mkOption { type = lib.types.attrsOf lib.types.str; };
+                result = lib.mkOption {
+                  type = lib.types.attrs;
+                  readOnly = true;
+                };
+              };
+              config.result = render config;
+            })
+            { config = arguments index; }
+          ];
+        }).config;
     in
     cfg.result;
 

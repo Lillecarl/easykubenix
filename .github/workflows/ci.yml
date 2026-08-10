@@ -17,8 +17,9 @@ jobs:
       # plain imports, so every gate here also runs from a checkout with no
       # flake support -- which is the point. `all` covers every example, so a
       # new one is gated the moment it joins the list in
-      # docs/examples/default.nix.
-      - name: Build example checks
+      # docs/examples/default.nix, and it covers the repository's own gates
+      # (`ekn-sandbox`, `nixfmt`) from nix/default.nix.
+      - name: Build checks
         run: nix build --file ./checks.nix all --no-link --print-build-logs
       - name: Validate against real kube-apiserver
         run: nix run --file ./nix packages.validationScript
@@ -29,7 +30,7 @@ jobs:
       # there; they read its `../ekn` no longer.
       - name: Lint
         run: nix-shell --run 'ruff check --config ruff-strict.toml'
-      - name: Check formatting
+      - name: Check Python formatting
         run: nix-shell --run 'ruff format --check'
       - name: Check types
         run: nix-shell --run 'pyright ekn'

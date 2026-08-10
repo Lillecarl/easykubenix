@@ -6,6 +6,7 @@
   furo,
   ruff,
   pyright,
+  nixfmt,
   sops,
   age,
   # This repository's own venv -- see `eknDevEnv` in ../default.nix. One
@@ -41,6 +42,11 @@ mkShell {
     docsEnv
     ruff
     pyright
+    # Same version the `nixfmt` gate in ./default.nix runs, because both come
+    # from this repository's nixpkgs pin. A formatter that disagrees with its
+    # own gate is worse than none, and nixfmt's output does move between
+    # releases.
+    nixfmt
     # For local key management/testing (age-keygen etc) and manual sops
     # inspection. ../ekn/src/ekn/sops.py shells out to the real `sops` CLI, so
     # the tests that exercise it need one on PATH.
