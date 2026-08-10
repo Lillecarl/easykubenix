@@ -3,11 +3,22 @@
   pkgs,
   lib,
   ekn,
+  eknPackage,
   ...
 }:
 let
   cfg = config.validation;
   debugpipe = if (!cfg.debug) then "&>/dev/null" else "";
+
+  # The apply inputs, written out as files because `ekn _applyManifest` is
+  # handed already-evaluated data rather than re-entering Nix from inside a
+  # store-path script -- see its docstring in ekn/src/ekn/cli.py.
+  resourcePriorityFile = pkgs.writeText "resource-priority.json" (
+    builtins.toJSON config.ekn.resourcePriority
+  );
+  novalidateKeysFile = pkgs.writeText "novalidate-keys.json" (
+    builtins.toJSON config.kubernetes.novalidateKeys
+  );
 in
 {
   options.validation = {
@@ -159,8 +170,17 @@ in
 
             echo "kube-apiserver ready; applying manifest(s)"
 
-            ${lib.getExe config.kluctl.script} --yes --no-wait || begin
-              echo "kluctl deploy failed"
+            # Applies through the same `apply_and_prune` as `ekn kubeapply`
+            # (the bootstrap path) and `ekn validate`, rather than shelling
+            # out to `kluctl deploy` as this used to. A conformance gate that
+            # proves a deploy path nothing else uses proves the wrong thing:
+            # barrier ordering, CRD-establish waits and SOPS handling are all
+            # ekn's, and they are what runs against a real cluster.
+            ${lib.getExe' eknPackage "ekn"} _applyManifest ${config.internal.manifestJSONFile} \
+              --discriminator ${config.ekn.discriminator} \
+              --resource-priority-file ${resourcePriorityFile} \
+              --novalidate-keys-file ${novalidateKeysFile} || begin
+              echo "ekn apply failed"
               exit 1
             end
             echo "dumping openapiv2 schema from apiserver"

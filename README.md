@@ -102,17 +102,31 @@ as it requires running `helm template` during Nix evaluation.
 
 See the demo for examples
 
-### Kluctl Integration
+### Applying and pruning
 
-`kluctl` is a CLI and GitOps tool that deploys manifests. It's distinctive
-feature is that it adds a label (discriminator) to every resource deployed which
-means when applying manifests with --prune it scans the watch-cache for resources
-with this label and removes them if they're not in the manifest we're applying.
+`ekn kubeapply` server-side-applies the generated objects and can prune what a
+previous apply left behind. It stamps every object it applies with an
+`ekn.dev/discriminator` label, then lists objects back by that label and deletes
+the ones the current apply no longer produces — `kubectl apply --prune -l` with
+the ordering and SOPS handling filled in.
 
-Essentially kubectl apply --prune -l on steroids. It also integrates SOPS
-which can be used to keep secrets out of the Nix store.
+The label value comes from `ekn.discriminator`, or from
+`gitOps.targets.<name>.discriminator` for a `--target` apply, so pruning one
+target can never reach another's objects.
 
-`easykubenix` supports generating a minimal kluctl project and deployment script.
+Objects apply in barriers ordered by `ekn.resourcePriority`, which defaults to
+Helm's `InstallOrder`: namespaces and CRDs go down before the things that need
+them, CRDs are waited on until Established, and any kind not in the list applies
+last — which is where custom resources belong.
+
+### Kluctl integration (deprecated)
+
+`kluctl` is a CLI and GitOps tool that deploys manifests, and easykubenix can
+still generate a minimal kluctl project and deployment script. It predates
+`ekn kubeapply`, which now covers the same ground natively. See
+[issue #2](https://github.com/Lillecarl/easykubenix/issues/2); `kluctl.*`
+options still work, and `kluctl.discriminator`/`kluctl.resourcePriority` have
+moved to `ekn.*` with warnings pointing at the new paths.
 
 [Documentation](https://lillecarl.github.io/easykubenix/)
 

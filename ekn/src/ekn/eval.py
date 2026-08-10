@@ -141,7 +141,7 @@ class _ValidationInfo(BaseModel):
     kubeconform_package: _OutPathInfo = Field(alias="kubeconformPackage")
 
 
-class _KluctlInfo(BaseModel):
+class _ApplyInfo(BaseModel):
     resource_priority: dict[str, int] = Field(alias="resourcePriority")
     discriminator: str
 
@@ -153,7 +153,7 @@ class _InternalInfo(BaseModel):
 class _ValidationConfig(BaseModel):
     kubernetes: _ValidationKubernetesConfig
     validation: _ValidationInfo
-    kluctl: _KluctlInfo
+    ekn: _ApplyInfo
     internal: _InternalInfo
     novalidate_keys: list[dict[str, str]] = Field(alias="novalidateKeys")
 
@@ -519,6 +519,53 @@ async def evaluate_gitops_manifests(
         )
 
 
+def _unpack_gitops_target(
+    gitops_targets: JsonValue,
+    target: str,
+) -> tuple[list[dict[str, Any]], list[JsonValue], str]:
+    """Pull one `kubernetes.gitOpsTargets` entry apart into the three things
+    a `--target` apply needs: its objects (with `.ekn` routing metadata
+    stripped), its raw-file paths, and its own discriminator.
+
+    Split out of `evaluate_kubeapply_config` purely to keep that function
+    under the complexity limit -- every branch here is a shape guard over a
+    `to_python`'d value, which is inherently branchy and says nothing about
+    the surrounding control flow.
+
+    A wrong shape raises TypeError: it means the Nix side produced something
+    this code cannot read, which is the same class of bug as passing the
+    wrong type to a function. An unknown `target` is a plain ValueError --
+    it is a typo on the command line, not a malformed evaluation, and is the
+    one failure here a user is actually likely to hit.
+    """
+    if not isinstance(gitops_targets, dict):
+        raise TypeError("kubernetes.gitOpsTargets did not evaluate to an object")
+    if target not in gitops_targets:
+        declared = ", ".join(sorted(gitops_targets)) or "(none)"
+        raise ValueError(f"unknown gitops target {target!r}; declared targets: {declared}")
+    resolved = gitops_targets[target]
+    if not isinstance(resolved, dict):
+        raise TypeError(f"gitops target {target!r} did not evaluate to an object")
+
+    resolved_objects = resolved.get("objects")
+    if not isinstance(resolved_objects, list):
+        raise TypeError(f"gitops target {target!r} has no objects list")
+    objects = [{k: v for k, v in obj.items() if k != "ekn"} for obj in resolved_objects if isinstance(obj, dict)]
+
+    raw_file_paths = resolved.get("rawFiles") or []
+    if not isinstance(raw_file_paths, list):
+        raise TypeError(f"gitops target {target!r} rawFiles must be a list")
+
+    resolved_target = resolved.get("target")
+    if not isinstance(resolved_target, dict):
+        raise TypeError(f"gitops target {target!r} has no resolved target config")
+    discriminator = resolved_target.get("discriminator")
+    if not isinstance(discriminator, str):
+        raise TypeError(f"gitops target {target!r} has no discriminator")
+
+    return objects, raw_file_paths, discriminator
+
+
 async def evaluate_kubeapply_config(
     file: str | PathLike[str] | None,
     flake_uri: str | None,
@@ -527,7 +574,7 @@ async def evaluate_kubeapply_config(
     target: str | None,
 ) -> KubeApplyConfigResult:
     """Resolve the object list `ekn kubeapply` should apply, plus the
-    `kluctl.discriminator`/`kluctl.resourcePriority` `apply_and_prune` needs
+    discriminator/`ekn.resourcePriority` `apply_and_prune` needs
     and `kubernetes.sopsAgeIdentities` (SOPS age decrypt identities some
     consumer needs bootstrapped as a Secret -- see `ekn.sops.ensure_age_identities`).
 
@@ -535,6 +582,12 @@ async def evaluate_kubeapply_config(
     `.ekn` routing metadata stripped; omitted, to_python's the full
     `kubernetes.generated` instead -- never both, so this only ever forces
     the one field it actually needs.
+
+    The discriminator follows the same split, because it is the prune scope
+    and the prune scope has to match the apply scope: a `--target` apply uses
+    that target's own `gitOps.targets.<name>.discriminator`, so pruning it
+    cannot reach objects another target applied. Only the whole-`generated`
+    apply uses the instance-wide `ekn.discriminator`.
     """
     async with (
         _session() as session,
@@ -546,21 +599,10 @@ async def evaluate_kubeapply_config(
             proxy = proxy.attr("config")
 
         if target:
-            gitops_targets = await proxy.attr("kubernetes").attr("gitOpsTargets").to_python()
-            if not isinstance(gitops_targets, dict):
-                raise ValueError("kubernetes.gitOpsTargets did not evaluate to an object")
-            resolved = gitops_targets.get(target)
-            if not isinstance(resolved, dict):
-                raise ValueError(f"unknown gitops target {target!r}")
-            resolved_objects = resolved.get("objects")
-            if not isinstance(resolved_objects, list):
-                raise ValueError(f"gitops target {target!r} has no objects list")
-            objects = [
-                {k: v for k, v in obj.items() if k != "ekn"} for obj in resolved_objects if isinstance(obj, dict)
-            ]
-            raw_file_paths = resolved.get("rawFiles") or []
-            if not isinstance(raw_file_paths, list):
-                raise ValueError(f"gitops target {target!r} rawFiles must be a list")
+            objects, raw_file_paths, discriminator = _unpack_gitops_target(
+                await proxy.attr("kubernetes").attr("gitOpsTargets").to_python(),
+                target,
+            )
         else:
             generated = await proxy.attr("kubernetes").attr("generated").to_python()
             if not isinstance(generated, list):
@@ -572,6 +614,7 @@ async def evaluate_kubeapply_config(
             raw_file_paths = [
                 entry["path"] for entry in raw_files if isinstance(entry, dict) and isinstance(entry.get("path"), str)
             ]
+            discriminator = await proxy.attr("ekn").attr("discriminator").to_python()
 
         # Read here, in Python -- not by having Nix `builtins.readFile` +
         # `fromJSON`/eval it, which is exactly the round-trip
@@ -581,8 +624,7 @@ async def evaluate_kubeapply_config(
         # apply_and_prune/maybe_decrypt identically to any other object.
         objects = [*objects, *(load_raw_manifest(p) for p in raw_file_paths if isinstance(p, str))]
 
-        discriminator = await proxy.attr("kluctl").attr("discriminator").to_python()
-        resource_priority = await proxy.attr("kluctl").attr("resourcePriority").to_python()
+        resource_priority = await proxy.attr("ekn").attr("resourcePriority").to_python()
         sops_age_identities = await proxy.attr("kubernetes").attr("sopsAgeIdentities").to_python()
 
         return KubeApplyConfigResult.model_validate(
@@ -701,18 +743,19 @@ async def _validation_config(proxy: Any) -> ValidationResult:
     # this function returns beyond what's assembled below -- forcing them
     # here would just be wasted eval work.
     v = proxy.attr("validation")
-    with timed_stage("validate: to_python cheap validation/kluctl fields"):
+    with timed_stage("validate: to_python cheap validation/apply fields"):
         kubeadm_config = await v.attr("kubeadmConfig").to_python()
         pod_subnet = await v.attr("podSubnet").to_python()
         service_subnet = await v.attr("serviceSubnet").to_python()
         debug = await v.attr("debug").to_python()
         k8s_version = await proxy.attr("kubernetes").attr("package").attr("version").to_python()
 
-        # kluctl.resourcePriority/discriminator are plain data (no build), used
-        # by Validate.run()'s kr8s-based apply_and_prune instead of shelling out
-        # to `kluctl deploy` -- see apply.py.
-        resource_priority = await proxy.attr("kluctl").attr("resourcePriority").to_python()
-        discriminator = await proxy.attr("kluctl").attr("discriminator").to_python()
+        # ekn.resourcePriority/discriminator are plain data (no build), used by
+        # Validate.run()'s kr8s-based apply_and_prune -- see apply.py. They used
+        # to live under `kluctl.*` and be handed to `kluctl deploy`; nothing
+        # about them was ever kluctl-specific.
+        resource_priority = await proxy.attr("ekn").attr("resourcePriority").to_python()
+        discriminator = await proxy.attr("ekn").attr("discriminator").to_python()
 
         # Cheap -- just {kind, namespace, name} triples, not full objects (see
         # kubernetes.nix's novalidateKeys) -- lets Validate.run() skip applying
@@ -743,7 +786,7 @@ async def _validation_config(proxy: Any) -> ValidationResult:
                     "etcdPackage": {"outPath": etcd_out},
                     "kubeconformPackage": {"outPath": kubeconform_out},
                 },
-                "kluctl": {
+                "ekn": {
                     "resourcePriority": resource_priority,
                     "discriminator": discriminator,
                 },

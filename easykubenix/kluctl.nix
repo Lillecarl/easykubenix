@@ -1,5 +1,6 @@
 {
   config,
+  options,
   pkgs,
   lib,
   ekn,
@@ -7,6 +8,27 @@
 }:
 let
   cfg = config.kluctl;
+
+  # The options a user writes by hand. `deployment`/`projectDir`/`script` are
+  # left out on purpose: kluctl.nix's own `config` block defines all three, so
+  # `isDefined` is true for them no matter what the user did, and warning on
+  # them would fire for everybody.
+  deprecatedUserOptions = [
+    "excludeGitopsTargets"
+    "files"
+    "package"
+    "postDeployScript"
+    "preDeployScript"
+    "project"
+  ];
+  # Not `isDefined`: the module system feeds an option's own `default` in as a
+  # definition at `mkOptionDefault` priority (1500), so `isDefined` is true for
+  # every option that has a default and the warning would fire for everyone.
+  # A definition written by a user comes in at 100, or 1000 via `mkDefault`.
+  optionDefaultPriority = (lib.mkOptionDefault null).priority;
+  definedDeprecated = lib.filter (
+    name: options.kluctl.${name}.highestPrio < optionDefaultPriority
+  ) deprecatedUserOptions;
 
   # Objects routed (via kubernetes.gitOpsTargets / ekn.gitOpsTarget) to one of
   # cfg.excludeGitopsTargets already have their own deployment path -- an
@@ -41,6 +63,16 @@ let
   kluctlGenerated = lib.filter (object: !(isExcludedFromKluctl object)) config.kubernetes.generated;
 in
 {
+  # Both options moved out of `kluctl.*` because neither is kluctl's any more:
+  # `ekn`'s own `apply_and_prune` reads them (see ekn/src/ekn/apply.py) to
+  # order barriers and to scope pruning, and it does so whether or not kluctl
+  # is used at all. `mkRenamedOptionModule` keeps existing definitions working
+  # and warns with the new path, so a config only has to move once.
+  imports = [
+    (lib.mkRenamedOptionModule [ "kluctl" "discriminator" ] [ "ekn" "discriminator" ])
+    (lib.mkRenamedOptionModule [ "kluctl" "resourcePriority" ] [ "ekn" "resourcePriority" ])
+  ];
+
   options = {
     kluctl = {
       package = lib.mkPackageOption pkgs "kluctl" { };
@@ -57,15 +89,6 @@ in
           target at a time instead of all-or-nothing.
         '';
         example = [ "bootstrap" ];
-      };
-      discriminator = lib.mkOption {
-        type = lib.types.str;
-        description = ''
-          kluctl deployment label discriminator. RFC1123 compliant string
-          This is used to prune resources that are no longer generated so make
-          sure to change this between projects
-        '';
-        default = "easykubenix";
       };
       preDeployScript = lib.mkOption {
         type = lib.types.lines;
@@ -89,54 +112,6 @@ in
           targets = [ { name = "local"; } ];
         };
       };
-      resourcePriority = lib.mkOption {
-        type = lib.types.attrsOf lib.types.int;
-        description = "Priority of which order to apply resource types in";
-        # See https://github.com/helm/helm/blob/490dffeb3458a1ad1a8e0140b33a1d1b43ce7a04/pkg/release/v1/util/kind_sorter.go#L31
-        # and cry knowing that this is what the worlds Kubernetes deployments rely on.
-        default = {
-          Namespace = 10;
-          CustomResourceDefinition = 10;
-          # PriorityClass = 0;
-          # Namespace = 5;
-          # NetworkPolicy = 10;
-          # ResourceQuota = 15;
-          # LimitRange = 20;
-          # PodSecurityPolicy = 25;
-          # PodDisruptionBudget = 30;
-          # ServiceAccount = 35;
-          # Secret = 40;
-          # SecretList = 45;
-          # ConfigMap = 50;
-          # StorageClass = 55;
-          # PersistentVolume = 60;
-          # PersistentVolumeClaim = 65;
-          # CustomResourceDefinition = 70;
-          # ClusterRole = 75;
-          # ClusterRoleList = 80;
-          # ClusterRoleBinding = 85;
-          # ClusterRoleBindingList = 90;
-          # Role = 95;
-          # RoleList = 100;
-          # RoleBinding = 105;
-          # RoleBindingList = 110;
-          # Service = 115;
-          # DaemonSet = 120;
-          # Pod = 125;
-          # ReplicationController = 130;
-          # ReplicaSet = 135;
-          # Deployment = 140;
-          # HorizontalPodAutoscaler = 145;
-          # StatefulSet = 150;
-          # Job = 155;
-          # CronJob = 160;
-          # IngressClass = 170;
-          # Ingress = 175;
-          # APIService = 180;
-          # MutatingWebhookConfiguration = 185;
-          # ValidatingWebhookConfiguration = 190;
-        };
-      };
       deployment = lib.mkOption {
         type = ekn.lib.kubeValueType;
         description = "Anything to be rendered into deployment.yaml";
@@ -158,10 +133,30 @@ in
     };
   };
   config = {
+    # Everything still under `kluctl.*` is deprecated -- see
+    # https://github.com/Lillecarl/easykubenix/issues/2. `ekn kubeapply` covers
+    # the same ground natively, and `validation.nix` no longer deploys through
+    # kluctl either, so nothing in this repository consumes the generated
+    # project. It keeps working; it just is not where new work goes.
+    #
+    # Warn on definition rather than on use: there is no way to detect that
+    # something read `kluctl.projectDir`, but a config that sets any of these
+    # has made a deliberate choice worth flagging once.
+    warnings = lib.optional (definedDeprecated != [ ]) ''
+      The kluctl integration is deprecated (easykubenix issue #2); these options
+      still work but will be removed: ${
+        lib.concatMapStringsSep ", " (name: "kluctl.${name}") definedDeprecated
+      }.
+
+      `ekn kubeapply` applies and prunes natively, using `ekn.resourcePriority`
+      for ordering and `ekn.discriminator` (or a GitOps target's own) for prune
+      scope.
+    '';
+
     kluctl.deployment = {
       deployments =
         # Create barrier deployments for prioritized resource kinds
-        (lib.pipe cfg.resourcePriority [
+        (lib.pipe config.ekn.resourcePriority [
           lib.attrValues
           (lib.sort (a: b: a < b))
           lib.unique
@@ -199,7 +194,9 @@ in
           content = builtins.toJSON {
             apiVersion = "v1";
             kind = "List";
-            items = lib.filter (v: !lib.elem v.kind (lib.attrNames cfg.resourcePriority)) kluctlGenerated;
+            items = lib.filter (
+              v: !lib.elem v.kind (lib.attrNames config.ekn.resourcePriority)
+            ) kluctlGenerated;
           };
         };
       }
@@ -211,7 +208,7 @@ in
           kind = "List";
           items = lib.filter (v: v.kind == n) kluctlGenerated;
         };
-      }) cfg.resourcePriority)
+      }) config.ekn.resourcePriority)
       # Other user-supplied files
       // cfg.files;
     };
@@ -226,7 +223,7 @@ in
             deploy \
               --no-update-check \
               --target local \
-              --discriminator ${cfg.discriminator} \
+              --discriminator ${config.ekn.discriminator} \
               --project-dir ${cfg.projectDir} \
               $@ # --dry-run? --yes? --prune!
           ${cfg.postDeployScript}

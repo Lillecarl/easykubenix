@@ -137,6 +137,33 @@ let
     '' crd
   ) cfg.crds;
   allGenerated = generatedWithEkn ++ checkedCrds;
+
+  # `assertions`/`warnings` (assertions.nix) are collected from every module,
+  # but a plain `lib.evalModules` has nothing playing the part NixOS'
+  # top-level.nix plays -- so unless something forces them they are gathered
+  # and thrown away. That made every `assertions` entry a silent no-op and,
+  # more pressingly, made `mkRenamedOptionModule`'s deprecation notice
+  # invisible, which is the whole point of keeping a renamed option around.
+  #
+  # `generated` and `gitOpsTargets` are the two universal outputs: rendering
+  # manifests goes through the first, applying a single GitOps target through
+  # the second. Routing both through here means neither can be produced
+  # without the checks having run.
+  #
+  # Anything defining an assertion or warning must not read `generated` or
+  # `gitOpsTargets` to build its message -- that closes a loop through this
+  # function and evaluation hits infinite recursion rather than a readable
+  # error. Assert on the inputs an object was built from, not on the
+  # rendered result.
+  checked =
+    value:
+    let
+      failed = map (a: a.message) (lib.filter (a: !a.assertion) config.assertions);
+    in
+    if failed != [ ] then
+      throw "Failed assertions:\n${lib.concatMapStringsSep "\n" (message: "- ${message}") failed}"
+    else
+      lib.showWarnings config.warnings value;
 in
 {
   imports = [
@@ -608,10 +635,12 @@ in
       in
       lib.listToAttrs (map objectToAttr data.resources);
 
-    generated = lib.pipe allGenerated [
-      # `ekn` belongs to the EKN compiler, not to the Kubernetes manifest.
-      (map (object: removeAttrs object [ "ekn" ]))
-    ];
+    generated = checked (
+      lib.pipe allGenerated [
+        # `ekn` belongs to the EKN compiler, not to the Kubernetes manifest.
+        (map (object: removeAttrs object [ "ekn" ]))
+      ]
+    );
 
     generatedWithEkn = allGenerated;
 
@@ -638,26 +667,28 @@ in
         ];
         allTargetNames = lib.unique (lib.attrNames objectsByTarget ++ lib.attrNames rawFilesByTarget);
       in
-      lib.listToAttrs (
-        map (name: {
-          inherit name;
-          value = {
-            target =
-              config.gitOps.targets.${name} or (throw ''
-                ekn.gitOpsTarget references unknown GitOps target "${name}".
-                Declared targets: ${lib.concatStringsSep ", " (lib.attrNames config.gitOps.targets)}
-              '');
-            objects = objectsByTarget.${name} or [ ];
-            # Paths only, deliberately not read/parsed here -- reading them
-            # would mean round-tripping their content through Nix's
-            # attrset representation, exactly what rawFiles exists to
-            # avoid (see kubernetes.rawFiles' description). `ekn
-            # kubeapply`/`ekn commit` read these files themselves, in
-            # Python, where insertion-ordered dicts + `sort_keys=False`
-            # actually preserve source order.
-            rawFiles = rawFilesByTarget.${name} or [ ];
-          };
-        }) allTargetNames
+      checked (
+        lib.listToAttrs (
+          map (name: {
+            inherit name;
+            value = {
+              target =
+                config.gitOps.targets.${name} or (throw ''
+                  ekn.gitOpsTarget references unknown GitOps target "${name}".
+                  Declared targets: ${lib.concatStringsSep ", " (lib.attrNames config.gitOps.targets)}
+                '');
+              objects = objectsByTarget.${name} or [ ];
+              # Paths only, deliberately not read/parsed here -- reading them
+              # would mean round-tripping their content through Nix's
+              # attrset representation, exactly what rawFiles exists to
+              # avoid (see kubernetes.rawFiles' description). `ekn
+              # kubeapply`/`ekn commit` read these files themselves, in
+              # Python, where insertion-ordered dicts + `sort_keys=False`
+              # actually preserve source order.
+              rawFiles = rawFilesByTarget.${name} or [ ];
+            };
+          }) allTargetNames
+        )
       );
 
     novalidateKeys = lib.pipe allGenerated [

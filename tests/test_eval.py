@@ -103,7 +103,10 @@ class TestEknModule:
         deployment = result["generatedByPath"]["default"]["Deployment"]["api"]
         assert "ekn" not in deployment
         target = result["gitOpsTargets"]["apps"]
-        assert target["target"] == {"path": "clusters/home/apps"}
+        assert target["target"]["path"] == "clusters/home/apps"
+        # Derived from `ekn.discriminator`, per target, so pruning one target
+        # cannot reach another's objects -- see gitops.nix.
+        assert target["target"]["discriminator"] == "easykubenix-apps"
         assert target["objects"][0]["metadata"]["name"] == "api"
 
     async def test_labels_annotations_are_coerced_by_default(self) -> None:
@@ -232,6 +235,10 @@ class TestValidationConfig:
         assert c.kubernetes.package.out_path.startswith("/nix/store/")
         assert c.validation.etcd_package.out_path.startswith("/nix/store/")
         assert c.validation.kubeconform_package.out_path.startswith("/nix/store/")
-        assert isinstance(c.kluctl.resource_priority, dict)
-        assert c.kluctl.discriminator
+        assert isinstance(c.ekn.resource_priority, dict)
+        # Helm's InstallOrder, so CRDs must sort before the custom resources
+        # they establish -- and PriorityClass, being first, must be 0.
+        assert c.ekn.resource_priority["PriorityClass"] == 0
+        assert c.ekn.resource_priority["CustomResourceDefinition"] < c.ekn.resource_priority["Deployment"]
+        assert c.ekn.discriminator
         assert c.internal.manifest_json_file.out_path.startswith("/nix/store/")

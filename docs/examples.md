@@ -95,16 +95,21 @@ demonstrates a resource in an existing namespace.
 
 ## Validation with Real kube-apiserver
 
-Spins up etcd + kube-apiserver, deploys all manifests via kluctl, dumps the
+Spins up etcd + kube-apiserver, applies all manifests with `ekn`, dumps the
 live OpenAPI v2 schema, and runs kubeconform against every resource — including
 CRDs from a Helm chart and custom resources that depend on them.
+
+The apply goes through the same `apply_and_prune` that `ekn kubeapply` uses to
+bootstrap a real cluster, so the gate exercises the path you actually deploy
+with rather than a second one maintained alongside it.
 
 ```{literalinclude} ./examples/validation/default.nix
 :language: nix
 ```
 
 The kube-prometheus-stack chart bundles `CustomResourceDefinition` objects
-(Prometheus, ServiceMonitor, Alertmanager, etc.). These are applied first via
-kluctl's priority system, then their dependent custom resources are validated
-against the live schema. The `apiMappings` option tells easykubenix what
+(Prometheus, ServiceMonitor, Alertmanager, etc.). `ekn.resourcePriority` puts
+these in an earlier barrier and waits for each to become Established, after
+which their dependent custom resources — being kinds with no configured
+priority — apply last and are validated against the live schema. The `apiMappings` option tells easykubenix what
 apiVersion to use for each custom kind.

@@ -1,4 +1,5 @@
 {
+  config,
   lib,
   ...
 }:
@@ -43,15 +44,35 @@
 
     targets = lib.mkOption {
       type = lib.types.attrsOf (
-        lib.types.submodule {
-          options = {
-            path = lib.mkOption {
-              type = lib.types.str;
-              default = "./";
-              description = "Subdirectory within deployBranch/sourceBranch where this target's manifests are stored.";
+        lib.types.submodule (
+          { name, ... }:
+          {
+            options = {
+              path = lib.mkOption {
+                type = lib.types.str;
+                default = "./";
+                description = "Subdirectory within deployBranch/sourceBranch where this target's manifests are stored.";
+              };
+              discriminator = lib.mkOption {
+                type = lib.types.str;
+                default = "${config.ekn.discriminator}-${name}";
+                defaultText = lib.literalExpression ''"''${config.ekn.discriminator}-''${name}"'';
+                description = ''
+                  Prune scope for `ekn kubeapply --target ${name} --prune`.
+
+                  Per-target rather than shared, because pruning selects by
+                  this label across every namespace and every kind the apply
+                  touched: with one value shared between targets, applying
+                  target A with `--prune` would delete target B's objects,
+                  which carry the same label but are not in A's desired set.
+                  Deriving it from `ekn.discriminator` keeps the scopes
+                  disjoint by construction while still letting a project
+                  rename all of them at once.
+                '';
+              };
             };
-          };
-        }
+          }
+        )
       );
       default = { };
       description = ''

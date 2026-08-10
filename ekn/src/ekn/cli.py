@@ -57,7 +57,12 @@ from ekn.gitops import (
     flatten_manifests,
 )
 from ekn.sops import ensure_age_identities, maybe_decrypt
-from ekn.validation import EphemeralControlPlane, exec_capture, prepare_validation_objects
+from ekn.validation import (
+    EphemeralControlPlane,
+    exec_capture,
+    prepare_validation_objects,
+    validation_resource_priority,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -455,8 +460,8 @@ class Validate(EknCommand):
                 await apply_and_prune(
                     objects,
                     api=kr8s_api,
-                    discriminator=c.kluctl.discriminator,
-                    resource_priority=c.kluctl.resource_priority,
+                    discriminator=c.ekn.discriminator,
+                    resource_priority=validation_resource_priority(c.ekn.resource_priority),
                 )
             except kr8s.ServerError as exc:
                 _report_server_error("apply", exc)
@@ -697,7 +702,7 @@ class KubeApply(EknCommand):
     )
     prune: bool = arg(
         False,
-        help="Delete previously-applied (same discriminator) objects no longer present in this apply.",
+        help="Delete previously-applied objects no longer present in this apply. Scoped to this apply's discriminator: the target's own with --target, otherwise ekn.discriminator.",
     )
     confirm_context: str | None = arg(
         None,
@@ -840,6 +845,69 @@ class SplitManifest(EknCommand):
             await dest.write_text(content)
 
 
+class ApplyManifest(EknCommand):
+    """Apply an already-evaluated manifest JSON file against $KUBECONFIG.
+
+    Internal: the apply step of easykubenix's `validation.script`, which
+    boots a throwaway etcd+kube-apiserver in Nix and needs manifests on it
+    before it can dump an OpenAPI schema for kubeconform. That step used to
+    shell out to `kluctl deploy`, which meant the gate proved a deploy path
+    nothing else in the project uses; this runs the same `apply_and_prune`
+    that `ekn kubeapply` (bootstrap) and `ekn validate` do.
+
+    Takes its inputs as files rather than re-evaluating Nix, because the
+    caller is a derivation-built script that already has them -- there is no
+    source tree to point `-f` at from inside the store. Not intended for
+    interactive use; use `ekn kubeapply` for that.
+    """
+
+    @classmethod
+    def prog(cls) -> str:
+        return "_applyManifest"
+
+    manifest_file: Positional[_Path]
+    discriminator: str = arg(help="Value for the ekn.dev/discriminator label (ekn.discriminator).")
+    resource_priority_file: _Path | None = arg(
+        None,
+        help="JSON file holding ekn.resourcePriority ({kind: int}). Omitted means no barrier ordering.",
+    )
+    novalidate_keys_file: _Path | None = arg(
+        None,
+        help="JSON file holding kubernetes.novalidateKeys ({kind, namespace, name} objects) to skip.",
+    )
+
+    async def run(self) -> None:
+        resource_priority: dict[str, int] = {}
+        if self.resource_priority_file is not None:
+            loaded = json.loads(await Path(str(self.resource_priority_file)).read_text())
+            if not isinstance(loaded, dict):
+                _log.error("resource priority file must hold a JSON object")
+                raise SystemExit(1)
+            resource_priority = cast("dict[str, int]", loaded)
+
+        novalidate_keys: set[tuple[str, str, str]] = set()
+        if self.novalidate_keys_file is not None:
+            loaded_keys = json.loads(await Path(str(self.novalidate_keys_file)).read_text())
+            if not isinstance(loaded_keys, list):
+                _log.error("novalidate keys file must hold a JSON list")
+                raise SystemExit(1)
+            novalidate_keys = {
+                (k["kind"], k["namespace"], k["name"]) for k in cast("list[dict[str, str]]", loaded_keys)
+            }
+
+        objects = await prepare_validation_objects(str(self.manifest_file), novalidate_keys)
+        api = await kr8s.asyncio.api()
+        try:
+            await apply_and_prune(
+                objects,
+                api=api,
+                discriminator=self.discriminator,
+                resource_priority=validation_resource_priority(resource_priority),
+            )
+        except kr8s.ServerError as exc:
+            _report_server_error("apply", exc)
+
+
 _json_value_adapter: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 _json_value_list_adapter: TypeAdapter[list[JsonValue]] = TypeAdapter(list[JsonValue])
 
@@ -918,6 +986,7 @@ class Ekn(EknCommand):
         | ClusterDiff
         | PushCache
         | SplitManifest
+        | ApplyManifest
         | YamlToJson
         | JsonToYaml
         | None

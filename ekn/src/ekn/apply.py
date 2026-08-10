@@ -14,7 +14,15 @@ if TYPE_CHECKING:
 _log = structlog.get_logger()
 
 DEFAULT_DISCRIMINATOR_LABEL = "ekn.dev/discriminator"
-_DEFAULT_BARRIER_PRIORITY = 100
+
+# Where a kind with no configured priority sorts. Must stay *above* every
+# priority `ekn.resourcePriority` can hand out, so unlisted kinds apply last --
+# which is how custom resources end up after the CustomResourceDefinitions that
+# establish them, and it is what Helm's own kind sorter does with kinds outside
+# its InstallOrder. The default option value is that InstallOrder numbered in
+# fives, so it tops out at 185; this was 100, which silently sorted every
+# unlisted kind into the *middle* of it.
+_DEFAULT_BARRIER_PRIORITY = 1000
 
 type Manifest = dict[str, JsonValue]
 
@@ -25,11 +33,11 @@ def barriers(
 ) -> list[list[Manifest]]:
     """Group objects into ordered apply barriers by kind priority.
 
-    Mirrors kluctl's resourcePriority: objects whose kind has a lower
-    configured priority number (e.g. Namespace/CustomResourceDefinition)
-    land in an earlier barrier -- fully applied (and, for CRDs, waited on to
-    become Established) before the next barrier starts. Kinds with no
-    configured priority all land together in one final barrier.
+    `resource_priority` is `ekn.resourcePriority` (Helm's InstallOrder by
+    default): objects whose kind has a lower number land in an earlier
+    barrier -- fully applied, and for CRDs waited on to become Established,
+    before the next barrier starts. Kinds with no configured priority all
+    land together in one final barrier after every configured kind.
     """
     grouped: dict[int, list[Manifest]] = {}
     for obj in objects:
@@ -184,7 +192,14 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     desired_keys: set[tuple[str, str, str]] = set()
     kinds: set[str] = set()
 
-    for tier in barriers(objects, resource_priority):
+    # Progress is logged at INFO per barrier, not per object. An apply of a few
+    # hundred objects otherwise runs completely silently for minutes -- every
+    # CRD in it can hold a barrier open for up to `crd_establish_timeout`, and
+    # a caller with no output cannot tell that from a hang. Per-object stays at
+    # DEBUG; the barrier is the unit where the waiting actually happens.
+    tiers = barriers(objects, resource_priority)
+    for index, tier in enumerate(tiers, start=1):
+        _log.info("applying", barrier=f"{index}/{len(tiers)}", objects=len(tier))
         applied: list[APIObject] = []
         for spec in tier:
             labeled = _with_discriminator_label(spec, discriminator_label, discriminator)
@@ -195,13 +210,17 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
             _log.debug("applied", kind=obj.kind, namespace=obj.namespace, name=obj.name)
 
         crds = [obj for obj in applied if obj.kind == "CustomResourceDefinition"]
+        if crds:
+            _log.info("waiting for CRDs to become Established", count=len(crds), timeout=crd_establish_timeout)
         for crd in crds:
             await crd.wait("condition=Established", timeout=crd_establish_timeout)
 
     if not prune:
         return
 
-    for kind in kinds | (prune_kinds or set()):
+    scan_kinds = kinds | (prune_kinds or set())
+    _log.info("pruning", kinds=len(scan_kinds), discriminator=discriminator)
+    for kind in scan_kinds:
         # kr8s.Api.async_get's `label_selector`/`field_selector` params and its
         # `APIObject | dict` yield type are both bare-`dict`/unannotated
         # upstream, so pyright can't resolve the member or the loop variable.
