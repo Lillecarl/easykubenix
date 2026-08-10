@@ -61,11 +61,11 @@
     },
     "flake-compatish": {
       "locked": {
-        "lastModified": 1783984082,
-        "narHash": "sha256-A7Xl565OqEU7VCqq1hEBw5AzOTicFttZggJnA17tpSU=",
+        "lastModified": 1786117702,
+        "narHash": "sha256-RWLVkrabWD6H3oxshfSeIT0iWnmXuO8sDEorZOMjfeM=",
         "owner": "lillecarl",
         "repo": "flake-compatish",
-        "rev": "30cb7674c79484293588da00f39e6cd5eb36865c",
+        "rev": "ceadbe462830c595f3b0c0ef212d039cba5a48ae",
         "type": "github"
       },
       "original": {
