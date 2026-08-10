@@ -134,6 +134,16 @@ let
                 inherit lib pkgs;
                 eknPackage = eknCli;
               };
+              # The write direction, same dispatch (primop path + `ekn
+              # _jsonToYAML` derivation fallback). Drop-in for
+              # `builtins.toYAML`, which is a nanopynix primop and therefore
+              # absent under stock Nix -- a consumer calling it directly
+              # cannot be evaluated by plain `nix eval` at all, it dies with
+              # `attribute 'toYAML' missing`. See serialiseYaml.nix.
+              toYAML = import ./easykubenix/lib/serialiseYaml.nix {
+                inherit lib pkgs;
+                eknPackage = eknCli;
+              };
             };
           };
         };
