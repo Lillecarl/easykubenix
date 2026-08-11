@@ -57,12 +57,7 @@ from ekn.gitops import (
     flatten_manifests,
 )
 from ekn.sops import ensure_age_identities, maybe_decrypt
-from ekn.validation import (
-    EphemeralControlPlane,
-    exec_capture,
-    prepare_validation_objects,
-    validation_resource_priority,
-)
+from ekn.validation import EphemeralControlPlane, exec_capture, prepare_validation_objects
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -461,7 +456,7 @@ class Validate(EknCommand):
                     objects,
                     api=kr8s_api,
                     discriminator=c.ekn.discriminator,
-                    resource_priority=validation_resource_priority(c.ekn.resource_priority),
+                    resource_priority=c.ekn.resource_priority,
                 )
             except kr8s.ServerError as exc:
                 _report_server_error("apply", exc)
@@ -902,7 +897,7 @@ class ApplyManifest(EknCommand):
                 objects,
                 api=api,
                 discriminator=self.discriminator,
-                resource_priority=validation_resource_priority(resource_priority),
+                resource_priority=resource_priority,
             )
         except kr8s.ServerError as exc:
             _report_server_error("apply", exc)

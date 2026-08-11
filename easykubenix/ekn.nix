@@ -83,9 +83,19 @@ in
 
         Defaults to Helm's `InstallOrder`, numbered in steps of five so a
         kind can be slotted between two neighbours without renumbering the
-        rest. A kind absent from this set applies in a final barrier after
-        every listed kind, which is what puts custom resources after the
-        CustomResourceDefinitions that establish them.
+        rest.
+
+        A kind absent from this set applies at 179 -- after every listed kind
+        except the two webhook configurations at 180 and 185. That is what
+        puts custom resources after the CustomResourceDefinitions that
+        establish them, while still ahead of the admission webhooks that
+        would intercept them.
+
+        Note this is deliberately *not* Helm's rule, which sorts unknown
+        kinds after its whole list and so applies every custom resource
+        behind the webhooks. Renumbering these past 179 reintroduces that:
+        during a bootstrap the webhook's backend is not serving yet, so each
+        intercepted write costs its full `timeoutSeconds`.
       '';
       default = lib.listToAttrs (
         lib.imap0 (index: kind: lib.nameValuePair kind (index * 5)) helmInstallOrder

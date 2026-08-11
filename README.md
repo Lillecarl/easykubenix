@@ -116,8 +116,14 @@ target can never reach another's objects.
 
 Objects apply in barriers ordered by `ekn.resourcePriority`, which defaults to
 Helm's `InstallOrder`: namespaces and CRDs go down before the things that need
-them, CRDs are waited on until Established, and any kind not in the list applies
-last — which is where custom resources belong.
+them, and CRDs are waited on until Established.
+
+A kind not in that list — every custom resource — applies near the end, but
+deliberately *ahead* of the admission webhook configurations rather than after
+them. Helm sorts unknown kinds after its whole list, which puts every custom
+resource behind the webhooks that intercept it; during a bootstrap the
+webhook's backend was applied seconds earlier and is not serving yet, so each
+intercepted write costs the webhook's full timeout.
 
 ### Kluctl integration (deprecated)
 

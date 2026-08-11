@@ -15,14 +15,31 @@ _log = structlog.get_logger()
 
 DEFAULT_DISCRIMINATOR_LABEL = "ekn.dev/discriminator"
 
-# Where a kind with no configured priority sorts. Must stay *above* every
-# priority `ekn.resourcePriority` can hand out, so unlisted kinds apply last --
-# which is how custom resources end up after the CustomResourceDefinitions that
-# establish them, and it is what Helm's own kind sorter does with kinds outside
-# its InstallOrder. The default option value is that InstallOrder numbered in
-# fives, so it tops out at 185; this was 100, which silently sorted every
-# unlisted kind into the *middle* of it.
-_DEFAULT_BARRIER_PRIORITY = 1000
+# Where a kind with no configured priority sorts.
+#
+# Helm's rule for kinds outside its InstallOrder is "unknown kind is last"
+# (the literal comment in pkg/release/v1/util/kind_sorter.go). This constant
+# deliberately does *not* copy that, because the last two entries of that
+# order are MutatingWebhookConfiguration and ValidatingWebhookConfiguration
+# and every custom resource is an unknown kind. Sorting unknowns after them
+# applies each CR *behind* the admission webhooks that intercept it -- and
+# during a bootstrap the webhook's backing workload was applied seconds
+# earlier and is not serving yet, so every intercepted write blocks for the
+# webhook's full `timeoutSeconds` before `failurePolicy` is honoured. On
+# kube-prometheus-stack that is two 10s webhooks over 19 PrometheusRules:
+# roughly six minutes of an apply doing nothing. Helm has the same hazard;
+# it is usually masked on a live cluster where the backend is already up.
+#
+# 179 sits above every other kind in the default `ekn.resourcePriority` --
+# Helm's order numbered in fives, whose highest non-webhook entry is
+# APIService at 175 -- and below both webhook kinds at 180 and 185. Custom
+# resources therefore still apply after the CustomResourceDefinitions that
+# establish them (70), and still ahead of anything that would intercept them.
+#
+# tests/test_eval.py checks that relationship against the real evaluated
+# option, so renumbering either side fails loudly rather than silently
+# reintroducing the stall.
+_DEFAULT_BARRIER_PRIORITY = 179
 
 type Manifest = dict[str, JsonValue]
 

@@ -23,44 +23,6 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger()
 
-# Kinds forced into the very last apply barrier in the validation harness,
-# whatever `ekn.resourcePriority` says about them.
-#
-# An admission webhook configuration is inert until it is registered; once it
-# is, the API server calls out to its backing Service on every matching write.
-# Nothing can ever answer that call here -- this harness runs an apiserver and
-# etcd, no kubelet, so no pod exists to serve it -- and each intercepted write
-# then blocks for the webhook's full `timeoutSeconds` before `failurePolicy`
-# is honoured. kube-prometheus-stack registers two webhooks over
-# `prometheusrules` at 10s each, so its 19 rules alone stall the gate for
-# roughly six minutes of doing nothing.
-#
-# Ordering them last is deliberately not the same as skipping them: they are
-# still applied, so the API server still schema-checks them exactly like every
-# other object. They just land after everything they could have intercepted.
-#
-# Helm's InstallOrder (the `ekn.resourcePriority` default) puts these two at
-# the end of its list, which is right for a real cluster where the webhook's
-# backend is already running. It is not enough here, because kinds absent from
-# that list -- every custom resource -- apply after it.
-VALIDATION_DEFERRED_KINDS = (
-    "MutatingWebhookConfiguration",
-    "ValidatingWebhookConfiguration",
-)
-_VALIDATION_DEFERRED_PRIORITY = 10_000
-
-
-def validation_resource_priority(resource_priority: dict[str, int]) -> dict[str, int]:
-    """`resource_priority` with `VALIDATION_DEFERRED_KINDS` forced last.
-
-    Applied only by the validation harness -- `ekn kubeapply` against a real
-    cluster keeps the configured order untouched.
-    """
-    return {
-        **resource_priority,
-        **dict.fromkeys(VALIDATION_DEFERRED_KINDS, _VALIDATION_DEFERRED_PRIORITY),
-    }
-
 
 def _free_port() -> int:
     with socket.socket() as s:

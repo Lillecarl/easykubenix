@@ -8,6 +8,7 @@ import pytest
 from nanopynix.rpc import Session
 from nanopynix_helpers.eval_target import EvaluationTargetError
 
+from ekn.apply import _DEFAULT_BARRIER_PRIORITY
 from ekn.eval import evaluate_file, realise_attr
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -240,5 +241,16 @@ class TestValidationConfig:
         # they establish -- and PriorityClass, being first, must be 0.
         assert c.ekn.resource_priority["PriorityClass"] == 0
         assert c.ekn.resource_priority["CustomResourceDefinition"] < c.ekn.resource_priority["Deployment"]
+
+        # The one relationship that spans Nix and Python: an unlisted kind
+        # (every custom resource) must sort *above* everything else in the
+        # map and *below* the admission webhooks, or CR writes land behind
+        # webhooks whose backend the same apply has not brought up yet. The
+        # numbers live in easykubenix/ekn.nix, the fallback in ekn/apply.py;
+        # nothing but this assertion holds them together.
+        webhook_kinds = ["MutatingWebhookConfiguration", "ValidatingWebhookConfiguration"]
+        others = [priority for kind, priority in c.ekn.resource_priority.items() if kind not in webhook_kinds]
+        assert max(others) < _DEFAULT_BARRIER_PRIORITY
+        assert all(c.ekn.resource_priority[kind] > _DEFAULT_BARRIER_PRIORITY for kind in webhook_kinds)
         assert c.ekn.discriminator
         assert c.internal.manifest_json_file.out_path.startswith("/nix/store/")

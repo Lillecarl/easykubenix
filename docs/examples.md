@@ -111,5 +111,8 @@ The kube-prometheus-stack chart bundles `CustomResourceDefinition` objects
 (Prometheus, ServiceMonitor, Alertmanager, etc.). `ekn.resourcePriority` puts
 these in an earlier barrier and waits for each to become Established, after
 which their dependent custom resources — being kinds with no configured
-priority — apply last and are validated against the live schema. The `apiMappings` option tells easykubenix what
+priority — apply and are validated against the live schema. The chart's
+admission webhook configurations apply after those, in the last barriers of
+all: nothing can serve a webhook in this harness, so registering one before
+the custom resources would stall every one of them for its full timeout. The `apiMappings` option tells easykubenix what
 apiVersion to use for each custom kind.
