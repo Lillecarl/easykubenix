@@ -13,6 +13,11 @@
   Deliberately outside `checks.all` because it boots a real etcd and
   kube-apiserver, so it is run rather than built. `checks.nix` exposes only
   `checks`, so this one needs `./nix` rather than `./checks.nix`.
+- `nix run --file ./nix packages.bootstrapValidationScript` — the same harness
+  over `docs/examples/bootstrap`'s nested instance (ArgoCD's CRDs, then the
+  `Application` that needs them). A separate script because
+  `kubernetes.generated` excludes a GitOps target's submodule objects by
+  design, so the gate above can never cover them.
 
 Every `.nix` file is nixfmt'd, and `checks.nixfmt` enforces it over the whole
 tree — it filters the repository down to `*.nix` by dropping dot-directories,

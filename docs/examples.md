@@ -116,3 +116,49 @@ admission webhook configurations apply after those, in the last barriers of
 all: nothing can serve a webhook in this harness, so registering one before
 the custom resources would stall every one of them for its full timeout. The `apiMappings` option tells easykubenix what
 apiVersion to use for each custom kind.
+
+## Bootstrapping GitOps
+
+A GitOps engine cannot sync itself into existence. The controller, its CRDs and
+the root Application that points it at a branch all have to be applied before
+anything can be synced — and then never again by hand.
+
+`gitOps.targets.<name>.modules` is how that is expressed: a whole separate
+easykubenix configuration attached to one target, rendered into that target's
+path and kept out of `kubernetes.generated`. A plain `ekn kubeapply` and
+`ekn validate` never see it; only `ekn kubeapply --target bootstrap` applies it.
+
+```{literalinclude} ./examples/bootstrap/cluster.nix
+:language: nix
+```
+
+The bootstrap instance itself installs ArgoCD from its chart and declares the
+root Application:
+
+```{literalinclude} ./examples/bootstrap/argocd.nix
+:language: nix
+```
+
+`parent` is the outer instance's evaluated config. That is what keeps the root
+Application's `targetRevision` and `path` in agreement with the branch and
+target the parent actually commits to, instead of the two being written out
+twice and drifting. It reaches user-declared options too — `clusterRepoURL`
+above is declared by `cluster.nix`, not by easykubenix. Read the parent's
+*inputs* through it; reading its rendered outputs (`kubernetes.generated`,
+`kubernetes.gitOpsTargets`) closes a loop back through the nested instance and
+recurses.
+
+Because the nested instance is a complete easykubenix instance, it has its own
+`validationScript` — which is the only way these objects get an API server at
+all, `kubernetes.generated` excluding them by design:
+
+```
+nix run --file ./nix packages.bootstrapValidationScript
+```
+
+That applies ArgoCD's three CRDs, waits for them to become Established, and
+then applies the `Application` that depends on them — in a later barrier,
+because an unlisted kind sorts at 1000 while `CustomResourceDefinition` sorts
+at 150. Pruning scopes itself to `easykubenix-bootstrap`, the target's own
+discriminator, so a bootstrap apply can never reach anything the main
+configuration owns.

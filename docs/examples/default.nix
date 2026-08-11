@@ -35,6 +35,7 @@ let
     "generators"
     "edge-cases"
     "validation"
+    "bootstrap"
   ];
 
   examples = lib.genAttrs names (
@@ -61,10 +62,15 @@ in
 
   packages = {
     inherit (examples.basic) manifestJSON manifestYAMLFile;
-    # Not part of `checks`: this one boots a real etcd and kube-apiserver, so
-    # it is run (`nix run --file ./nix packages.validationScript` from the
+    # Not part of `checks`: these boot a real etcd and kube-apiserver, so they
+    # are run (`nix run --file ./nix packages.validationScript` from the
     # repository root) rather than built. ../../checks.nix exposes only
-    # `checks`, so it cannot reach this.
+    # `checks`, so it cannot reach them.
     inherit (examples.validation) validationScript;
+    # The bootstrap target's own instance, applied through the same harness --
+    # ArgoCD's CRDs and the Application that needs them. Named separately
+    # because `kubernetes.generated` deliberately excludes bootstrap objects,
+    # so `validationScript` above can never cover them.
+    bootstrapValidationScript = examples.bootstrap.validationScript;
   };
 }
