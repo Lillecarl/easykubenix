@@ -1,5 +1,6 @@
 {
   config,
+  ekn,
   lib,
   ...
 }:
@@ -45,7 +46,14 @@
     targets = lib.mkOption {
       type = lib.types.attrsOf (
         lib.types.submodule (
-          { name, ... }:
+          # `config` is deliberately not in the pattern: the options below
+          # read the *outer* one (this instance's `ekn.discriminator`,
+          # `gitOps`, ...) by closure, and naming it here would shadow that
+          # with the target submodule's own. `@target` reaches the
+          # submodule's as `target.config` without the shadowing -- and
+          # `name` still has to be named, since the module system passes
+          # `_module.args` entries only to a pattern that asks for them.
+          { name, ... }@target:
           {
             options = {
               path = lib.mkOption {
@@ -70,27 +78,108 @@
                   rename all of them at once.
                 '';
               };
+              modules = lib.mkOption {
+                type = lib.types.listOf lib.types.deferredModule;
+                default = [ ];
+                description = ''
+                  Modules making up a whole separate easykubenix
+                  configuration, rendered into this target's `path` and
+                  nowhere else. Its objects never reach this instance's
+                  `kubernetes.generated`, so a plain `ekn kubeapply` (or
+                  `ekn validate`) does not see them -- only
+                  `ekn kubeapply --target ${name}` does.
+
+                  That separation is the point: this is for the objects a
+                  GitOps engine cannot sync because they are what makes it
+                  able to sync anything -- the engine itself, its
+                  credentials, its root Application. They get applied once,
+                  by hand, and then have a different lifecycle from
+                  everything else.
+
+                  The nested instance is a complete easykubenix
+                  configuration, not a cut-down one, so it can render a Helm
+                  chart like any other. It receives its parent's evaluated
+                  config as the `parent` module argument, and its
+                  `ekn.discriminator` defaults to this target's
+                  `discriminator`.
+
+                  Definitions concatenate, so several modules can each add to
+                  one target's list.
+                '';
+                example = lib.literalExpression "[ ./bootstrap/argocd.nix ]";
+              };
+              instance = lib.mkOption {
+                type = lib.types.raw;
+                internal = true;
+                readOnly = true;
+                description = ''
+                  The evaluated nested instance -- `lib.evalModules`' result,
+                  so `instance.config.kubernetes.generated` is what
+                  `kubernetes.gitOpsTargets` joins into this target's
+                  objects. Internal because it holds functions and a whole
+                  option tree: it must never reach `kubernetes.gitOpsTargets`
+                  itself, which is serialized to JSON for `ekn`.
+                '';
+              };
+            };
+
+            config.instance = ekn.lib.mkInstance {
+              modules = [
+                # At `mkDefault`, so a nested module can still set its own.
+                # Without this the nested instance would default to the bare
+                # `ekn.discriminator`, disagreeing with the prune scope
+                # `ekn kubeapply --target ${name}` actually applies
+                # under -- which reads this target's `discriminator`.
+                { ekn.discriminator = lib.mkDefault target.config.discriminator; }
+              ]
+              ++ target.config.modules;
+              specialArgs = {
+                # The parent's *evaluated* config. A bootstrap configuration
+                # genuinely needs it -- an ArgoCD root Application has to
+                # name the branch and path it syncs, and those live up here.
+                #
+                # Reading a rendered output through this closes a loop and
+                # evaluation hits infinite recursion rather than a readable
+                # error: `parent.kubernetes.gitOpsTargets` is built *from*
+                # this instance, and `generated`/`generatedWithEkn` run the
+                # assertion checker that `gitOpsTargets` also runs. Read
+                # inputs -- `parent.gitOps.deployBranch`,
+                # `parent.ekn.discriminator`, a module's own options -- not
+                # results.
+                parent = config;
+              };
             };
           }
         )
       );
       default = { };
       description = ''
-        Named GitOps sync targets, each just a `{path}` -- pure
-        path-routing within the single `deployBranch`/`sourceBranch` pair
-        for this instance. Kubernetes objects route to one of these by
-        name via `ekn.gitOpsTarget`, rather than embedding a reference to
-        the Application/Kustomization object that happens to sync them --
-        the target is the single source of truth for where its manifests
-        land, and how many controllers exist (Argo, Flux, both, neither)
-        is up to whatever object references the target, not the target
-        itself.
+        Named GitOps sync targets -- pure path-routing within the single
+        `deployBranch`/`sourceBranch` pair for this instance. The target is
+        the single source of truth for where its manifests land, and how
+        many controllers exist (Argo, Flux, both, neither) is up to whatever
+        object references the target, not the target itself.
+
+        A target's objects come from either of two places, and it can use
+        both at once:
+
+        - This instance's own objects, routed by name with
+          `ekn.gitOpsTarget` -- rather than embedding a reference to the
+          Application/Kustomization that happens to sync them.
+        - `modules`, a whole separate easykubenix configuration evaluated
+          just for this target. Its objects render into the target's `path`
+          and stay out of this instance's `kubernetes.generated` entirely,
+          which is what makes it usable for bootstrapping a GitOps engine.
       '';
-      example = {
-        bootstrap = {
-          path = "bootstrap";
-        };
-      };
+      example = lib.literalExpression ''
+        {
+          apps.path = "clusters/home/apps";
+          bootstrap = {
+            path = "bootstrap";
+            modules = [ ./bootstrap/argocd.nix ];
+          };
+        }
+      '';
     };
   };
 }

@@ -129,6 +129,35 @@ resource they intercept. During a bootstrap their backing workload was applied
 seconds earlier and is not serving yet, so each intercepted request costs a full
 timeout — or, for an aggregated `APIService`, fails discovery outright.
 
+### Bootstrap targets
+
+A GitOps target can carry its own module list, evaluated as an entirely separate
+easykubenix configuration:
+
+```nix
+gitOps.targets.bootstrap = {
+  path = "bootstrap";
+  modules = [ ./bootstrap/argocd.nix ];
+};
+```
+
+Its objects render into that target's path and stay out of
+`kubernetes.generated`, so a plain `ekn kubeapply` and `ekn validate` never see
+them — only `ekn kubeapply --target bootstrap` applies them.
+
+That is what makes it usable for the chicken-and-egg part of GitOps: the engine
+itself, its credentials and its root Application cannot be synced by the engine,
+because they are what lets it sync anything. They go down once, by hand, and
+have a different lifecycle from everything else afterwards.
+
+The nested instance is a complete configuration, not a cut-down one, so it can
+render a Helm chart like any other. It gets its parent's evaluated config as the
+`parent` module argument — a root Application has to name the branch it syncs —
+and its `ekn.discriminator` defaults to the target's, so the prune scope agrees
+with what the apply uses. Read the parent's *inputs* through `parent`
+(`gitOps.deployBranch`, `ekn.discriminator`); reading its rendered outputs closes
+a loop back through the nested instance and recurses.
+
 ### Kluctl integration (deprecated)
 
 `kluctl` is a CLI and GitOps tool that deploys manifests, and easykubenix can

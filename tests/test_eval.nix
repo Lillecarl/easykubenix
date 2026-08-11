@@ -202,10 +202,50 @@ let
         )
       ];
     }).config.kubernetes.generated;
+
+  # A GitOps target carrying its own module list: a whole separate
+  # easykubenix instance, rendered into that target's path and kept out of
+  # this instance's `generated`. The `bootstrap` target has no routed objects
+  # at all, only submodule ones, which is the normal shape for one -- and the
+  # case the target-name union in kubernetes.nix would otherwise miss.
+  easyGitOpsSubmodule = import ../. {
+    inherit pkgs;
+    modules = [
+      {
+        gitOps.deployBranch = "deploy";
+        gitOps.targets.apps.path = "clusters/home/apps";
+        kubernetes.objects.default.ConfigMap.routed = {
+          ekn.gitOpsTarget = "apps";
+          data.key = "from-parent";
+        };
+        gitOps.targets.bootstrap = {
+          path = "bootstrap";
+          modules = [
+            (
+              { parent, ... }:
+              {
+                # Reading the parent's *inputs* is the supported direction --
+                # a real bootstrap config needs the branch to point a root
+                # Application at. Reading its rendered outputs would recurse.
+                kubernetes.objects.argocd.ConfigMap.root.data = {
+                  branch = parent.gitOps.deployBranch;
+                };
+              }
+            )
+          ];
+        };
+      }
+    ];
+  };
 in
 {
   eknRouting = {
     inherit (easy.config.kubernetes) generatedByPath gitOpsTargets;
+  };
+  gitOpsSubmodule = {
+    inherit (easyGitOpsSubmodule.config.kubernetes) generated gitOpsTargets;
+    nestedDiscriminator =
+      easyGitOpsSubmodule.config.gitOps.targets.bootstrap.instance.config.ekn.discriminator;
   };
   labelsAnnotationsCoercion = easyCoercion.config.kubernetes.generated;
   labelsAnnotationsCoercionDisabled = easyCoercionDisabled.config.kubernetes.generated;

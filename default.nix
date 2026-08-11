@@ -85,82 +85,115 @@ let
     pytest-agent = [ ];
   };
 
-  eval = lib.evalModules {
-    specialArgs = {
-      inherit adios template;
-    }
-    // specialArgs;
+  # The modules every instance is evaluated with -- the top-level one, and
+  # every nested one a GitOps target instantiates through `mkInstance` below.
+  # One list, deliberately: a nested instance is a whole easykubenix
+  # configuration rather than a cut-down one, so a bootstrap target can render
+  # a Helm chart (which is how you install the GitOps engine it exists to
+  # bootstrap). Nix's laziness means the modules it never uses cost it nothing.
+  baseModules = [
+    ./easykubenix/assertions.nix
+    ./easykubenix/ekn.nix
+    ./easykubenix/gitops.nix
+    ./easykubenix/helm.nix
+    ./easykubenix/importyaml.nix
+    ./easykubenix/internal.nix
+    ./easykubenix/kluctl.nix
+    ./easykubenix/kubernetes.nix
+    ./easykubenix/lib.nix
+    ./easykubenix/validation.nix
+  ];
 
-    modules = [
-      {
-        _module.args = {
-          inherit pkgs;
-          inherit (pkgs) lib;
-          # The `ekn` CLI package itself, under a distinct name so it can't
-          # be conflated with the `ekn` module-arg below (GitOps helpers) or
-          # `object.ekn` (GitOps-routing metadata, see kubernetes.nix's
-          # `ekn.gitOpsTarget`/`gitopsTargets`) -- same word, three unrelated
-          # meanings in this codebase, kept in separate namespaces. Built from
-          # this repository's own `ekn/` source (see `eknCli` above); an
-          # internal build-time tool for `internal.nix` and for
-          # parseYamlStream.nix's IFD fallback below.
-          eknPackage = eknCli;
-          # Helper functions for consuming modules, distinct from `object.ekn`
-          # (GitOps-routing metadata on rendered Kubernetes objects, see
-          # kubernetes.nix's `ekn.gitOpsTarget`/`gitopsTargets`) and the
-          # `ekn` CLI package bound above as `eknPackage` -- same word, three
-          # unrelated meanings in this codebase, kept in separate namespaces
-          # by construction (module function-arg vs. object attrset field vs.
-          # outer let-binding), but worth this note so nobody conflates them.
-          ekn = {
-            # Recursively wrap every leaf of an attrset in `lib.mkDefault`,
-            # so a module's baked-in option value (e.g. a Helm chart's
-            # `values`) stays overridable leaf-by-leaf instead of a caller's
-            # single definition replacing the whole thing.
-            mkDefaults = lib.mapAttrsRecursive (_: v: lib.mkDefault v);
-            lib = {
-              # Recursive JSON-ish value type (drop-in replacement for
-              # `pkgs.formats.json{}.type`/`settingsFormat.type`) that also
-              # accepts an attrset-keyed-by-`name` shorthand anywhere a list
-              # of named things (containers, ownerReferences, ...) would go,
-              # merged via ordinary `attrsOf` semantics and always emitted
-              # back out as a real list. See kubeValueType.nix.
-              kubeValueType = import ./easykubenix/lib/kubeValueType.nix { inherit lib; };
-              # Shared YAML-stream parser (primop path + `ekn _yamlToJson`
-              # derivation fallback) used by importyaml.nix and helm.nix so
-              # neither hand-rolls the primop-vs-CLI-fallback dispatch. See
-              # parseYamlStream.nix.
-              parseYAMLStream = import ./easykubenix/lib/parseYamlStream.nix {
-                inherit lib pkgs;
-                eknPackage = eknCli;
-              };
-              # The write direction, same dispatch (primop path + `ekn
-              # _jsonToYAML` derivation fallback). Drop-in for
-              # `builtins.toYAML`, which is a nanopynix primop and therefore
-              # absent under stock Nix -- a consumer calling it directly
-              # cannot be evaluated by plain `nix eval` at all, it dies with
-              # `attribute 'toYAML' missing`. See serialiseYaml.nix.
-              toYAML = import ./easykubenix/lib/serialiseYaml.nix {
-                inherit lib pkgs;
-                eknPackage = eknCli;
-              };
-            };
-          };
-        };
+  # Instantiate an easykubenix configuration. Called once below for the
+  # top-level instance, and again by gitops.nix for each GitOps target that
+  # carries its own `modules` -- see `ekn.lib.mkInstance` in `moduleArgs`.
+  #
+  # Everything costly is already bound in this `let` and is captured by
+  # closure rather than recomputed: the extended `pkgs`, the `nanopynix`
+  # import, `eknCli`, the `ekn` helper set. What a nested instance does cost
+  # is one more option merge; nothing in it is forced until something reads
+  # its `kubernetes.generated`, and `apiResources/v1.33.json` is imported by
+  # path, so Nix caches that parse across instances.
+  #
+  # Returns `evalModules`' own result (`.config`, `.options`), not the
+  # attrset this file returns -- a nested instance has no use for
+  # `validationScript`/`manifestJSONFile`, and building them would force work
+  # nobody asked for.
+  mkInstance =
+    {
+      modules ? [ ],
+      specialArgs ? { },
+    }:
+    lib.evalModules {
+      specialArgs = {
+        inherit adios template;
       }
-      ./easykubenix/assertions.nix
-      ./easykubenix/ekn.nix
-      ./easykubenix/gitops.nix
-      ./easykubenix/helm.nix
-      ./easykubenix/importyaml.nix
-      ./easykubenix/internal.nix
-      ./easykubenix/kluctl.nix
-      ./easykubenix/kubernetes.nix
-      ./easykubenix/lib.nix
-      ./easykubenix/validation.nix
-    ]
-    ++ modules;
+      // specialArgs;
+
+      modules = [ { _module.args = moduleArgs; } ] ++ baseModules ++ modules;
+    };
+
+  moduleArgs = {
+    inherit pkgs;
+    inherit (pkgs) lib;
+    # The `ekn` CLI package itself, under a distinct name so it can't
+    # be conflated with the `ekn` module-arg below (GitOps helpers) or
+    # `object.ekn` (GitOps-routing metadata, see kubernetes.nix's
+    # `ekn.gitOpsTarget`/`gitopsTargets`) -- same word, three unrelated
+    # meanings in this codebase, kept in separate namespaces. Built from
+    # this repository's own `ekn/` source (see `eknCli` above); an
+    # internal build-time tool for `internal.nix` and for
+    # parseYamlStream.nix's IFD fallback below.
+    eknPackage = eknCli;
+    # Helper functions for consuming modules, distinct from `object.ekn`
+    # (GitOps-routing metadata on rendered Kubernetes objects, see
+    # kubernetes.nix's `ekn.gitOpsTarget`/`gitopsTargets`) and the
+    # `ekn` CLI package bound above as `eknPackage` -- same word, three
+    # unrelated meanings in this codebase, kept in separate namespaces
+    # by construction (module function-arg vs. object attrset field vs.
+    # outer let-binding), but worth this note so nobody conflates them.
+    ekn = {
+      # Recursively wrap every leaf of an attrset in `lib.mkDefault`,
+      # so a module's baked-in option value (e.g. a Helm chart's
+      # `values`) stays overridable leaf-by-leaf instead of a caller's
+      # single definition replacing the whole thing.
+      mkDefaults = lib.mapAttrsRecursive (_: v: lib.mkDefault v);
+      lib = {
+        # Evaluate a whole separate easykubenix configuration from inside
+        # this one. Used by gitops.nix for `gitOps.targets.<name>.modules`;
+        # see `mkInstance` above for what it does and does not share with
+        # the instance calling it.
+        inherit mkInstance;
+        # Recursive JSON-ish value type (drop-in replacement for
+        # `pkgs.formats.json{}.type`/`settingsFormat.type`) that also
+        # accepts an attrset-keyed-by-`name` shorthand anywhere a list
+        # of named things (containers, ownerReferences, ...) would go,
+        # merged via ordinary `attrsOf` semantics and always emitted
+        # back out as a real list. See kubeValueType.nix.
+        kubeValueType = import ./easykubenix/lib/kubeValueType.nix { inherit lib; };
+        # Shared YAML-stream parser (primop path + `ekn _yamlToJson`
+        # derivation fallback) used by importyaml.nix and helm.nix so
+        # neither hand-rolls the primop-vs-CLI-fallback dispatch. See
+        # parseYamlStream.nix.
+        parseYAMLStream = import ./easykubenix/lib/parseYamlStream.nix {
+          inherit lib pkgs;
+          eknPackage = eknCli;
+        };
+        # The write direction, same dispatch (primop path + `ekn
+        # _jsonToYAML` derivation fallback). Drop-in for
+        # `builtins.toYAML`, which is a nanopynix primop and therefore
+        # absent under stock Nix -- a consumer calling it directly
+        # cannot be evaluated by plain `nix eval` at all, it dies with
+        # `attribute 'toYAML' missing`. See serialiseYaml.nix.
+        toYAML = import ./easykubenix/lib/serialiseYaml.nix {
+          inherit lib pkgs;
+          eknPackage = eknCli;
+        };
+      };
+    };
   };
+
+  eval = mkInstance { inherit modules specialArgs; };
 in
 {
   inherit (eval.config.internal)

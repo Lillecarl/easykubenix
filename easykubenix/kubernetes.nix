@@ -661,29 +661,67 @@ in
           (lib.groupBy (f: f.gitOpsTarget))
           (lib.mapAttrs (_name: files: map (f: f.path) files))
         ];
-        allTargetNames = lib.unique (lib.attrNames objectsByTarget ++ lib.attrNames rawFilesByTarget);
+
+        # Targets carrying their own `modules` -- a whole separate
+        # easykubenix instance, evaluated by gitops.nix. Its objects belong
+        # to this target and to nothing else: they are deliberately absent
+        # from this instance's `generated`, so `ekn kubeapply --target
+        # <name>` is the only thing that applies them.
+        #
+        # Its routing is ignored on purpose. `ekn.gitOpsTarget` selects
+        # between *this* instance's targets, and a nested instance's targets
+        # are a different set entirely, so every object it renders is taken.
+        submodulesByTarget = lib.mapAttrs (_name: t: t.instance.config.kubernetes) (
+          lib.filterAttrs (_name: t: t.modules != [ ]) config.gitOps.targets
+        );
+
+        # `submodulesByTarget` too: a bootstrap target commonly has no
+        # routed objects at all, and would otherwise be missing from
+        # `gitOpsTargets` entirely.
+        allTargetNames = lib.unique (
+          lib.attrNames objectsByTarget ++ lib.attrNames rawFilesByTarget ++ lib.attrNames submodulesByTarget
+        );
       in
       checked (
         lib.listToAttrs (
-          map (name: {
-            inherit name;
-            value = {
-              target =
+          map (
+            name:
+            let
+              declared =
                 config.gitOps.targets.${name} or (throw ''
                   ekn.gitOpsTarget references unknown GitOps target "${name}".
                   Declared targets: ${lib.concatStringsSep ", " (lib.attrNames config.gitOps.targets)}
                 '');
-              objects = objectsByTarget.${name} or [ ];
-              # Paths only, deliberately not read/parsed here -- reading them
-              # would mean round-tripping their content through Nix's
-              # attrset representation, exactly what rawFiles exists to
-              # avoid (see kubernetes.rawFiles' description). `ekn
-              # kubeapply`/`ekn commit` read these files themselves, in
-              # Python, where insertion-ordered dicts + `sort_keys=False`
-              # actually preserve source order.
-              rawFiles = rawFilesByTarget.${name} or [ ];
-            };
-          }) allTargetNames
+              submodule = submodulesByTarget.${name} or null;
+            in
+            {
+              inherit name;
+              value = {
+                # Named fields, not the whole `declared` submodule. This is
+                # serialized to JSON for `ekn` (see eval.py's
+                # `_GitOpsTargetRef` and `_unpack_gitops_target`, which read
+                # exactly these two), and the submodule also carries
+                # `modules` and `instance` -- module functions and an entire
+                # evaluated option tree. Passing it whole would try to
+                # serialize those.
+                target = {
+                  inherit (declared) path discriminator;
+                };
+                objects =
+                  (objectsByTarget.${name} or [ ]) ++ (if submodule == null then [ ] else submodule.generated);
+                # Paths only, deliberately not read/parsed here -- reading them
+                # would mean round-tripping their content through Nix's
+                # attrset representation, exactly what rawFiles exists to
+                # avoid (see kubernetes.rawFiles' description). `ekn
+                # kubeapply`/`ekn commit` read these files themselves, in
+                # Python, where insertion-ordered dicts + `sort_keys=False`
+                # actually preserve source order.
+                rawFiles =
+                  (rawFilesByTarget.${name} or [ ])
+                  ++ (if submodule == null then [ ] else map (f: f.path) submodule.rawFiles);
+              };
+            }
+          ) allTargetNames
         )
       );
 

@@ -9,7 +9,12 @@ from nanopynix.rpc import Session
 from nanopynix_helpers.eval_target import EvaluationTargetError
 
 from ekn.apply import DEFAULT_BARRIER_PRIORITY
-from ekn.eval import evaluate_file, realise_attr
+from ekn.eval import (
+    evaluate_file,
+    evaluate_gitops_manifests,
+    evaluate_kubeapply_config,
+    realise_attr,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 NIX_TEST_FILE = PROJECT_ROOT / "tests/test_eval.nix"
@@ -109,6 +114,59 @@ class TestEknModule:
         # cannot reach another's objects -- see gitops.nix.
         assert target["target"]["discriminator"] == "easykubenix-apps"
         assert target["objects"][0]["metadata"]["name"] == "api"
+
+    async def test_gitops_target_submodule_renders_into_its_target_only(self) -> None:
+        """A target's `modules` are a separate easykubenix instance whose
+        objects belong to that target and to nothing else.
+
+        The separation is the feature: bootstrap objects are what makes a
+        GitOps engine able to sync, so they cannot be synced by it. Leaking
+        them into `kubernetes.generated` would put them in the path of a
+        plain `ekn kubeapply` and of `ekn validate`, which is exactly the
+        lifecycle they need to stay out of.
+        """
+        result = await evaluate_file(NIX_TEST_FILE, "gitOpsSubmodule")
+        assert isinstance(result, dict)
+        targets = result["gitOpsTargets"]
+
+        # A target with only submodule objects and no routed ones still has
+        # to appear -- that is the normal shape for a bootstrap target.
+        assert sorted(targets) == ["apps", "bootstrap"]
+
+        bootstrap = targets["bootstrap"]["objects"]
+        assert [obj["metadata"]["name"] for obj in bootstrap] == ["root"]
+        # Read through the `parent` module argument, so the nested instance
+        # can point a root Application at the branch the parent syncs.
+        assert bootstrap[0]["data"] == {"branch": "deploy"}
+
+        # ...and nowhere else. `routed` is the parent's own object, and the
+        # only one in `generated`.
+        assert [obj["metadata"]["name"] for obj in result["generated"]] == ["routed"]
+        assert [obj["metadata"]["name"] for obj in targets["apps"]["objects"]] == ["routed"]
+
+    async def test_gitops_target_exposes_only_serializable_fields(self) -> None:
+        """`target` must stay exactly `{path, discriminator}`.
+
+        It is serialized to JSON for `ekn` (eval.py's `_GitOpsTargetRef` and
+        `_unpack_gitops_target` read those two), while the target submodule
+        itself now also holds `modules` and `instance` -- module functions
+        and a whole evaluated option tree. Passing the submodule through
+        whole would try to serialize those, so this asserts the key set
+        rather than just the values.
+        """
+        result = await evaluate_file(NIX_TEST_FILE, "gitOpsSubmodule")
+        assert isinstance(result, dict)
+
+        for name, entry in result["gitOpsTargets"].items():
+            assert sorted(entry["target"]) == ["discriminator", "path"], name
+
+        assert result["gitOpsTargets"]["bootstrap"]["target"] == {
+            "path": "bootstrap",
+            "discriminator": "easykubenix-bootstrap",
+        }
+        # The nested instance agrees with the prune scope a
+        # `--target bootstrap` apply will actually use.
+        assert result["nestedDiscriminator"] == "easykubenix-bootstrap"
 
     async def test_labels_annotations_are_coerced_by_default(self) -> None:
         result = await evaluate_file(NIX_TEST_FILE, "labelsAnnotationsCoercion")
@@ -225,6 +283,52 @@ class TestEknModule:
         assert "hello" in result
 
 
+class TestGitOpsTargetSubmoduleEndToEnd:
+    """The two CLI paths a bootstrap target is actually used through, against
+    a real evaluation rather than a hand-built shape.
+
+    Both are unchanged Python: the join happens in `kubernetes.gitOpsTargets`,
+    so `ekn commit` and `ekn kubeapply --target` see submodule objects through
+    the same fields they already read. These tests are what says so.
+    """
+
+    @staticmethod
+    def _probe(tmp_path: Path) -> Path:
+        probe = tmp_path / "bootstrap.nix"
+        probe.write_text(f"""
+            import {PROJECT_ROOT} {{
+              modules = [{{
+                gitOps.deployBranch = "deploy";
+                gitOps.targets.bootstrap = {{
+                  path = "bootstrap";
+                  modules = [{{
+                    kubernetes.objects.argocd.ConfigMap.root.data.key = "value";
+                  }}];
+                }};
+              }}];
+            }}
+        """)
+        return probe
+
+    async def test_commit_renders_submodule_objects_into_the_target_path(self, tmp_path: Path) -> None:
+        from ekn.gitops import branches, file_groups
+
+        result = await evaluate_gitops_manifests(self._probe(tmp_path), None, None, None)
+
+        assert branches(result) == ("deploy", None)
+        rendered = dict(file_groups(result))
+        assert "bootstrap/argocd/ConfigMap/root.yaml" in rendered
+        assert "key: value" in rendered["bootstrap/argocd/ConfigMap/root.yaml"]
+
+    async def test_kubeapply_target_applies_submodule_objects(self, tmp_path: Path) -> None:
+        cfg = await evaluate_kubeapply_config(self._probe(tmp_path), None, None, None, "bootstrap")
+
+        assert [obj["metadata"]["name"] for obj in cfg.objects] == ["root"]
+        # The target's own prune scope, not the instance-wide one -- pruning
+        # a bootstrap apply must not be able to reach anything else.
+        assert cfg.discriminator == "easykubenix-bootstrap"
+
+
 class TestAssertionsAndWarnings:
     """`assertions` and `warnings` are collected from every module, but a plain
     `lib.evalModules` has nothing playing the part NixOS' top-level.nix plays,
@@ -278,6 +382,28 @@ class TestAssertionsAndWarnings:
 
         with pytest.raises(nanopynix.NixError, match="deliberate probe failure"):
             await evaluate_file(probe, attr)
+
+    async def test_a_nested_instances_assertions_still_fire(self, tmp_path: Path) -> None:
+        """A GitOps target's `modules` are their own instance with their own
+        `assertions`. Nothing plumbs them up to the parent -- the nested
+        `kubernetes.nix` runs its own checker when its `generated` is forced,
+        and forcing the parent's `gitOpsTargets` is what forces that.
+        """
+        probe = tmp_path / "nested.nix"
+        probe.write_text(f"""
+            (import {PROJECT_ROOT} {{
+              modules = [{{
+                gitOps.deployBranch = "deploy";
+                gitOps.targets.bootstrap.modules = [{{
+                  assertions = [{{ assertion = false; message = "deliberate nested failure"; }}];
+                  kubernetes.objects.argocd.ConfigMap.root.data.key = "value";
+                }}];
+              }}];
+            }}).config
+        """)
+
+        with pytest.raises(nanopynix.NixError, match="deliberate nested failure"):
+            await evaluate_file(probe, "kubernetes.gitOpsTargets")
 
 
 class TestValidationConfig:
