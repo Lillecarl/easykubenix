@@ -11,8 +11,9 @@ HELM_ORDER_TAIL = {
     "CustomResourceDefinition": 70,
     "Deployment": 140,
     "APIService": 175,
-    "MutatingWebhookConfiguration": 180,
-    "ValidatingWebhookConfiguration": 185,
+    # Moved past the unlisted-kind band (1000) -- see easykubenix/ekn.nix.
+    "MutatingWebhookConfiguration": 1005,
+    "ValidatingWebhookConfiguration": 1010,
 }
 
 

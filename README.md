@@ -118,12 +118,13 @@ Objects apply in barriers ordered by `ekn.resourcePriority`, which defaults to
 Helm's `InstallOrder`: namespaces and CRDs go down before the things that need
 them, and CRDs are waited on until Established.
 
-A kind not in that list — every custom resource — applies near the end, but
-deliberately *ahead* of the admission webhook configurations rather than after
-them. Helm sorts unknown kinds after its whole list, which puts every custom
-resource behind the webhooks that intercept it; during a bootstrap the
-webhook's backend was applied seconds earlier and is not serving yet, so each
-intercepted write costs the webhook's full timeout.
+A kind not in that list — every custom resource — applies at 1000, leaving
+`186`–`999` for "late, but before custom resources" and `1001`+ for "after
+them". The admission webhook configurations are numbered into that last band,
+the one place this deviates from Helm: Helm sorts unknown kinds after its whole
+list, which leaves the webhooks ahead of every custom resource they intercept,
+and during a bootstrap the webhook's backend was applied seconds earlier and is
+not serving yet — so each intercepted write costs the webhook's full timeout.
 
 ### Kluctl integration (deprecated)
 

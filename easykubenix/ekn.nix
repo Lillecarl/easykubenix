@@ -85,21 +85,33 @@ in
         kind can be slotted between two neighbours without renumbering the
         rest.
 
-        A kind absent from this set applies at 179 -- after every listed kind
-        except the two webhook configurations at 180 and 185. That is what
-        puts custom resources after the CustomResourceDefinitions that
-        establish them, while still ahead of the admission webhooks that
-        would intercept them.
+        A kind absent from this set applies at 1000, which is every custom
+        resource. That gives three bands to number against:
 
-        Note this is deliberately *not* Helm's rule, which sorts unknown
-        kinds after its whole list and so applies every custom resource
-        behind the webhooks. Renumbering these past 179 reintroduces that:
-        during a bootstrap the webhook's backend is not serving yet, so each
-        intercepted write costs its full `timeoutSeconds`.
+        - `0`-`185`   Helm's order as-is
+        - `186`-`999` late, but still before custom resources
+        - `1000`      custom resources and anything else unlisted
+        - `1001`+     after custom resources
+
+        The two admission webhook configurations are moved into that last
+        band, which is the one place this deviates from Helm. Helm sorts
+        unknown kinds after its whole list, leaving the webhooks ahead of
+        every custom resource they intercept; during a bootstrap the
+        webhook's backing workload was applied seconds earlier and is not
+        serving yet, so each intercepted write costs the webhook's full
+        `timeoutSeconds`. Numbering them past the unlisted band is what
+        keeps an apply from stalling on a backend it is still bringing up.
       '';
-      default = lib.listToAttrs (
-        lib.imap0 (index: kind: lib.nameValuePair kind (index * 5)) helmInstallOrder
-      );
+      default =
+        lib.listToAttrs (lib.imap0 (index: kind: lib.nameValuePair kind (index * 5)) helmInstallOrder)
+        # Overriding two entries of the list above rather than reordering it,
+        # so the Helm order stays a verbatim transcription that can be diffed
+        # against upstream, and the deviation is one visible exception rather
+        # than a silent edit to the data.
+        // {
+          MutatingWebhookConfiguration = 1005;
+          ValidatingWebhookConfiguration = 1010;
+        };
     };
 
     cacheTo = lib.mkOption {
