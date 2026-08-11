@@ -225,6 +225,61 @@ class TestEknModule:
         assert "hello" in result
 
 
+class TestAssertionsAndWarnings:
+    """`assertions` and `warnings` are collected from every module, but a plain
+    `lib.evalModules` has nothing playing the part NixOS' top-level.nix plays,
+    so unless a rendered output forces them they are gathered and discarded.
+    `kubernetes.nix` routes its outputs through `lib.asserts.checkAssertWarn`
+    to close that; these are the tests that it stays closed.
+    """
+
+    @staticmethod
+    def _probe(tmp_path: Path, module_body: str) -> Path:
+        probe = tmp_path / "probe.nix"
+        probe.write_text(f"""
+            (import {PROJECT_ROOT} {{
+              modules = [{{
+                {module_body}
+                kubernetes.objects.default.ConfigMap.test.data.key = "hello";
+              }}];
+            }}).config
+        """)
+        return probe
+
+    async def test_warning_reaches_stderr(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """The regression this guards is silence, not a wrong value.
+
+        A Nix evaluation warning reaches this side only as a log event, and
+        the worker filters events by level *before* they hit the session bus
+        -- so at the old default verbosity of "error" every `config.warnings`
+        entry and every `mkRenamedOptionModule` deprecation notice was
+        discarded inside Nix. Manifests came out perfectly correct and the
+        user was told nothing, while `nix build` on the same config printed
+        the warning.
+        """
+        probe = self._probe(tmp_path, 'warnings = [ "deliberate probe warning" ];')
+
+        result = await evaluate_file(probe, "kubernetes.generated")
+
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert "deliberate probe warning" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("attr", ["kubernetes.generated", "kubernetes.generatedWithEkn"])
+    async def test_failing_assertion_aborts(self, tmp_path: Path, attr: str) -> None:
+        """Both rendered outputs, not just `generated`. `generatedWithEkn` is
+        the same objects with their `ekn` routing still attached, so reading it
+        must not be a way around a config's own assertions.
+        """
+        probe = self._probe(
+            tmp_path,
+            'assertions = [{ assertion = false; message = "deliberate probe failure"; }];',
+        )
+
+        with pytest.raises(nanopynix.NixError, match="deliberate probe failure"):
+            await evaluate_file(probe, attr)
+
+
 class TestValidationConfig:
     async def test_validation_config_builds(self) -> None:
         from ekn.eval import evaluate_validation_config

@@ -42,7 +42,13 @@ _SESSION_SETTINGS = NixSettings()
 # turn on verbosity/print-build-logs for its whole Validate -> cache-push ->
 # Commit chain (each step opens its own Session) without threading extra
 # parameters through every `evaluate_*` helper's signature.
-_VERBOSITY: ContextVar[LogLevelInput] = ContextVar("_verbosity", default="error")
+# "warn", not "error". The worker filters by level before anything reaches the
+# session bus, so at "error" a `builtins.warn` -- and with it every
+# `config.warnings` entry and every `mkRenamedOptionModule` deprecation notice
+# -- was discarded inside Nix and could not be recovered on this side at any
+# price. `_print_evaluation_warning` is what prints them once they arrive.
+# Everything above warn is still suppressed, so this adds no progress chatter.
+_VERBOSITY: ContextVar[LogLevelInput] = ContextVar("_verbosity", default="warn")
 _PRINT_BUILD_LOGS: ContextVar[bool] = ContextVar("_print_build_logs", default=False)
 
 
@@ -189,6 +195,43 @@ def _print_log_event(event: LogEvent | None) -> None:
         sys.stderr.write(message + "\n")
 
 
+# Nix's own log levels: 0 is an error, 1 a warning, and everything above is
+# progress chatter. `builtins.warn` -- and so `lib.warn`, `lib.showWarnings`
+# and every `config.warnings` entry -- arrives here as an `error` action at
+# level 1.
+_NIX_LOG_LEVEL_WARN = 1
+
+
+def _print_evaluation_warning(event: LogEvent | None) -> None:
+    """Forward Nix's evaluation warnings to stderr.
+
+    Without this they are dropped outright: an evaluation warning reaches
+    the client only as a log event on the session bus, and nothing was
+    subscribed to that bus unless `--print-build-logs` was passed. So a
+    config whose modules raise `warnings` -- an option deprecated by
+    `mkRenamedOptionModule`, say -- deployed silently under `ekn` while
+    `nix build` on the very same config printed the warning. Assertions were
+    never affected, since a `throw` propagates as an evaluation error.
+
+    Deliberately not gated on verbosity. A warning is not progress
+    reporting; it is the module system telling the user their config needs
+    attention, and needing a flag to see it defeats the point.
+    """
+    if event is None or event.action != "error":
+        return
+    info = event.error_info
+    if info is None or info.get("level") != _NIX_LOG_LEVEL_WARN:
+        return
+    message = event.message_without_ansi
+    if not message:
+        return
+    # Match `nix`'s own two prefixes so output lines up with what the same
+    # config prints under `nix build`: warnings raised by an expression say
+    # "evaluation warning", warnings from Nix itself just "warning".
+    prefix = "evaluation warning" if info.get("is_from_expr") else "warning"
+    sys.stderr.write(f"{prefix}: {message}\n")
+
+
 @contextmanager
 def verbose_session(verbosity: LogLevelInput, *, print_build_logs: bool) -> Generator[None]:
     """Turn up nanopynix's own logging for every `_session()` opened inside
@@ -233,12 +276,14 @@ async def _session() -> AsyncGenerator[Session]:
         # `helm template`'s IFD-built output in-process via fromYAML11Stream.
         primops=yaml_primops(),
     ) as session:
-        sub = session.subscribe(_print_log_event) if _PRINT_BUILD_LOGS.get() else None
+        # One subscription either way: `_print_log_event` already prints every
+        # event including the warnings, so subscribing both would print each
+        # warning twice.
+        sub = session.subscribe(_print_log_event if _PRINT_BUILD_LOGS.get() else _print_evaluation_warning)
         try:
             yield session
         finally:
-            if sub is not None:
-                sub.unsubscribe()
+            sub.unsubscribe()
 
 
 async def _resolve_proxy(

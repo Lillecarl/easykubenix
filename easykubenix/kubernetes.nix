@@ -145,16 +145,20 @@ let
   # more pressingly, made `mkRenamedOptionModule`'s deprecation notice
   # invisible, which is the whole point of keeping a renamed option around.
   #
-  # `generated` and `gitOpsTargets` are the two universal outputs: rendering
-  # manifests goes through the first, applying a single GitOps target through
-  # the second. Routing both through here means neither can be produced
-  # without the checks having run.
+  # So every fully-rendered output goes through here: `generated`,
+  # `generatedWithEkn` (the same objects with their `ekn` routing still
+  # attached) and `gitOpsTargets`. `generatedByPath` and everything in
+  # internal.nix are built from `generated`, so they inherit it.
   #
-  # Anything defining an assertion or warning must not read `generated` or
-  # `gitOpsTargets` to build its message -- that closes a loop through this
+  # `resources` deliberately does not. It is the pre-render option tree rather
+  # than an output, and it is the natural thing for an assertion message to
+  # read -- see below.
+  #
+  # Anything defining an assertion or warning must not read any of the three
+  # checked outputs to build its message -- that closes a loop through this
   # function and evaluation hits infinite recursion rather than a readable
-  # error. Assert on the inputs an object was built from, not on the
-  # rendered result.
+  # error. Assert on the inputs an object was built from (`resources`, or the
+  # module's own options), not on the rendered result.
   checked = lib.asserts.checkAssertWarn config.assertions config.warnings;
 in
 {
@@ -634,7 +638,7 @@ in
       ]
     );
 
-    generatedWithEkn = allGenerated;
+    generatedWithEkn = checked allGenerated;
 
     gitOpsTargets =
       let
