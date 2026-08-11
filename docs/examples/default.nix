@@ -62,8 +62,9 @@ in
   packages = {
     inherit (examples.basic) manifestJSON manifestYAMLFile;
     # Not part of `checks`: this one boots a real etcd and kube-apiserver, so
-    # it is run (`nix run --file ./checks.nix validationScript`) rather than
-    # built.
+    # it is run (`nix run --file ./nix packages.validationScript` from the
+    # repository root) rather than built. ../../checks.nix exposes only
+    # `checks`, so it cannot reach this.
     inherit (examples.validation) validationScript;
   };
 }

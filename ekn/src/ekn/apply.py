@@ -29,16 +29,17 @@ DEFAULT_DISCRIMINATOR_LABEL = "ekn.dev/discriminator"
 # kube-prometheus-stack that is two 10s webhooks over 19 PrometheusRules:
 # roughly six minutes of an apply doing nothing.
 #
-# So this sits above Helm's whole range (which tops out at 185) but below
-# anything `ekn.resourcePriority` numbers past it. That leaves 186..999 for
-# "late, but before custom resources" and 1001+ for "after custom resources",
-# which is where easykubenix/ekn.nix puts the webhook configurations.
+# So this sits above Helm's whole range (numbered in tens, topping out at 380)
+# but below anything `ekn.resourcePriority` numbers past it. That leaves
+# 381..999 for "late, but before custom resources" and 1001+ for "after custom
+# resources", which is where easykubenix/ekn.nix puts APIService and the two
+# webhook configurations.
 #
 # tests/test_eval.py asserts that relationship against the real evaluated
 # option -- it is the only thing tying these numbers to that file, and it
 # spans two languages, so renumbering either side fails loudly rather than
 # silently reintroducing the stall.
-_DEFAULT_BARRIER_PRIORITY = 1000
+DEFAULT_BARRIER_PRIORITY = 1000
 
 type Manifest = dict[str, JsonValue]
 
@@ -52,14 +53,17 @@ def barriers(
     `resource_priority` is `ekn.resourcePriority` (Helm's InstallOrder by
     default): objects whose kind has a lower number land in an earlier
     barrier -- fully applied, and for CRDs waited on to become Established,
-    before the next barrier starts. Kinds with no configured priority all
-    land together in one final barrier after every configured kind.
+    before the next barrier starts.
+
+    Kinds with no configured priority share a barrier at
+    `DEFAULT_BARRIER_PRIORITY`, which is *not* last: kinds numbered above it
+    apply afterwards. See that constant for why.
     """
     grouped: dict[int, list[Manifest]] = {}
     for obj in objects:
         kind = obj.get("kind", "")
         kind_str = kind if isinstance(kind, str) else ""
-        priority = resource_priority.get(kind_str, _DEFAULT_BARRIER_PRIORITY)
+        priority = resource_priority.get(kind_str, DEFAULT_BARRIER_PRIORITY)
         grouped.setdefault(priority, []).append(obj)
     return [grouped[priority] for priority in sorted(grouped)]
 
@@ -265,6 +269,7 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
 
 
 __all__ = [
+    "DEFAULT_BARRIER_PRIORITY",
     "DEFAULT_DISCRIMINATOR_LABEL",
     "Manifest",
     "apply_and_prune",

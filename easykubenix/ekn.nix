@@ -52,6 +52,28 @@ let
     "MutatingWebhookConfiguration"
     "ValidatingWebhookConfiguration"
   ];
+
+  resourcePriorityDefaults =
+    lib.listToAttrs (lib.imap1 (index: kind: lib.nameValuePair kind (index * 10)) helmInstallOrder)
+    # These three keep their place in the list above -- it stays a verbatim
+    # transcription -- and are renumbered here, so the deviation from Helm is
+    # three visible lines rather than an edit to the data.
+    #
+    # Their cost is paid by the requests that come after them, not by creating
+    # them: an admission webhook configuration makes the API server call its
+    # backing Service on every matching write, and an aggregated APIService
+    # hands that group's discovery to one, so a backend that is not serving
+    # fails discovery outright rather than merely stalling a write. During a
+    # bootstrap that backend was applied seconds earlier and is not ready, so
+    # all three have to land after everything they can intercept -- including
+    # custom resources, which are unlisted and so sort at 1000 (see
+    # DEFAULT_BARRIER_PRIORITY in ekn/src/ekn/apply.py; tests/test_eval.py
+    # asserts the two sides agree).
+    // {
+      APIService = 1010;
+      MutatingWebhookConfiguration = 1020;
+      ValidatingWebhookConfiguration = 1030;
+    };
 in
 {
   options.ekn = {
@@ -81,37 +103,28 @@ in
         for CustomResourceDefinitions, waited on to become Established)
         before the next barrier starts.
 
-        Defaults to Helm's `InstallOrder`, numbered in steps of five so a
-        kind can be slotted between two neighbours without renumbering the
-        rest.
+        Defaults to Helm's `InstallOrder`, numbered in steps of ten so kinds
+        can be slotted between two neighbours without renumbering the rest.
 
         A kind absent from this set applies at 1000, which is every custom
-        resource. That gives three bands to number against:
+        resource. That gives four bands to number against:
 
-        - `0`-`185`   Helm's order as-is
-        - `186`-`999` late, but still before custom resources
+        - `10`-`380`  Helm's order as-is
+        - `381`-`999` late, but still before custom resources
         - `1000`      custom resources and anything else unlisted
         - `1001`+     after custom resources
 
-        The two admission webhook configurations are moved into that last
-        band, which is the one place this deviates from Helm. Helm sorts
-        unknown kinds after its whole list, leaving the webhooks ahead of
-        every custom resource they intercept; during a bootstrap the
-        webhook's backing workload was applied seconds earlier and is not
-        serving yet, so each intercepted write costs the webhook's full
-        `timeoutSeconds`. Numbering them past the unlisted band is what
-        keeps an apply from stalling on a backend it is still bringing up.
+        `APIService` and the two admission webhook configurations sit in that
+        last band, which is the one place this deviates from Helm. Helm sorts
+        unknown kinds after its whole list, leaving all three ahead of every
+        custom resource they intercept; during a bootstrap their backing
+        workload was applied seconds earlier and is not serving yet, so each
+        intercepted request costs a full timeout or fails discovery outright.
+
+        Definitions merge per key, so setting one kind keeps the defaults for
+        every other. Replacing the set wholesale takes `lib.mkForce`.
       '';
-      default =
-        lib.listToAttrs (lib.imap0 (index: kind: lib.nameValuePair kind (index * 5)) helmInstallOrder)
-        # Overriding two entries of the list above rather than reordering it,
-        # so the Helm order stays a verbatim transcription that can be diffed
-        # against upstream, and the deviation is one visible exception rather
-        # than a silent edit to the data.
-        // {
-          MutatingWebhookConfiguration = 1005;
-          ValidatingWebhookConfiguration = 1010;
-        };
+      default = resourcePriorityDefaults;
     };
 
     cacheTo = lib.mkOption {
@@ -142,4 +155,15 @@ in
       '';
     };
   };
+
+  # An option's `default` is used only when it has no definitions at all, so a
+  # config setting one kind of `resourcePriority` would otherwise drop the
+  # other 38 -- `attrsOf` merges *definitions* per key, and a default is not a
+  # definition. Defining it here at `mkDefault` priority makes each key its own
+  # definition, so a user's key wins and every other key survives.
+  #
+  # The `default` above is then never the value that gets used; it stays
+  # because it is what the generated option docs render, and because both come
+  # from the same binding they cannot drift.
+  config.ekn.resourcePriority = lib.mapAttrs (_: lib.mkDefault) resourcePriorityDefaults;
 }

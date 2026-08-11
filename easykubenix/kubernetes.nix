@@ -155,15 +155,7 @@ let
   # function and evaluation hits infinite recursion rather than a readable
   # error. Assert on the inputs an object was built from, not on the
   # rendered result.
-  checked =
-    value:
-    let
-      failed = map (a: a.message) (lib.filter (a: !a.assertion) config.assertions);
-    in
-    if failed != [ ] then
-      throw "Failed assertions:\n${lib.concatMapStringsSep "\n" (message: "- ${message}") failed}"
-    else
-      lib.showWarnings config.warnings value;
+  checked = lib.asserts.checkAssertWarn config.assertions config.warnings;
 in
 {
   imports = [

@@ -115,16 +115,19 @@ The label value comes from `ekn.discriminator`, or from
 target can never reach another's objects.
 
 Objects apply in barriers ordered by `ekn.resourcePriority`, which defaults to
-Helm's `InstallOrder`: namespaces and CRDs go down before the things that need
-them, and CRDs are waited on until Established.
+Helm's `InstallOrder` numbered in tens (`10`–`380`): namespaces and CRDs go down
+before the things that need them, and CRDs are waited on until Established. The
+steps of ten leave room to slot a kind between two neighbours without
+renumbering the rest.
 
 A kind not in that list — every custom resource — applies at 1000, leaving
-`186`–`999` for "late, but before custom resources" and `1001`+ for "after
-them". The admission webhook configurations are numbered into that last band,
-the one place this deviates from Helm: Helm sorts unknown kinds after its whole
-list, which leaves the webhooks ahead of every custom resource they intercept,
-and during a bootstrap the webhook's backend was applied seconds earlier and is
-not serving yet — so each intercepted write costs the webhook's full timeout.
+`381`–`999` for "late, but before custom resources" and `1001`+ for "after
+them". `APIService` and the two admission webhook configurations are numbered
+into that last band, the one place this deviates from Helm: Helm sorts unknown
+kinds after its whole list, which leaves all three ahead of every custom
+resource they intercept. During a bootstrap their backing workload was applied
+seconds earlier and is not serving yet, so each intercepted request costs a full
+timeout — or, for an aggregated `APIService`, fails discovery outright.
 
 ### Kluctl integration (deprecated)
 

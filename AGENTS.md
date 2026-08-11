@@ -9,6 +9,10 @@
   repository's own (`ekn-sandbox`, `nixfmt`), the same thing CI builds. Nothing
   in this repository is gated behind a flake command; `nix build --file`,
   `nix run --file` and `nix-shell --run` must always work.
+- `nix run --file ./nix packages.validationScript` — the validation gate.
+  Deliberately outside `checks.all` because it boots a real etcd and
+  kube-apiserver, so it is run rather than built. `checks.nix` exposes only
+  `checks`, so this one needs `./nix` rather than `./checks.nix`.
 
 Every `.nix` file is nixfmt'd, and `checks.nixfmt` enforces it over the whole
 tree — it filters the repository down to `*.nix` by dropping dot-directories,
