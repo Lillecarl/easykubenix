@@ -158,6 +158,50 @@ with what the apply uses. Read the parent's *inputs* through `parent`
 (`gitOps.deployBranch`, `ekn.discriminator`); reading its rendered outputs closes
 a loop back through the nested instance and recurses.
 
+### Handing a bootstrap target over
+
+Bootstrapping is only half the job: the same objects usually have to become
+ordinary managed resources afterwards. Two knobs on the target arrange that, and
+they are deliberately separate mechanisms.
+
+```nix
+gitOps.targets.bootstrap = {
+  path = "bootstrap";
+  modules = [ ./bootstrap/argocd.nix ];
+
+  # who owns each *field*
+  fieldManager = "argocd-controller";
+
+  # who owns the *object*
+  annotations."argocd.argoproj.io/tracking-id" = ekn.lib.argocdTrackingId {
+    app = "argocd";
+    namespace = "argocd";
+  };
+};
+```
+
+`fieldManager` is apply-time only and never appears in the rendered manifests.
+Applying as the successor rather than as `ekn` is what completes the handover:
+server-side apply only drops a field when its *owning* manager stops declaring
+it, and a bootstrap apply never runs again — so as a distinct manager, `ekn`
+keeps owning every field the successor does not declare, permanently. It also
+removes the need for `Force=true`. The cost is that a second apply of the same
+target silently overwrites the successor's fields instead of reporting a
+conflict, which is acceptable only because a bootstrap target runs once.
+
+`labels` and `annotations` go the other way: they are baked into the rendered
+manifests, so the committed YAML and the applied object agree. A value may be a
+function of the object rather than a string, for metadata that has to encode the
+object's own identity — ArgoCD's `tracking-id` is `<app>:<group>/<kind>:<ns>/<name>`,
+so a constant would be wrong on all but one object, and wrong here fails
+*silently*: ArgoCD reads a non-self-referencing id as naming something else and
+then never prunes the object. `ekn.lib.argocdTrackingId` builds it, and returns
+`null` — meaning "no entry" — for CRDs, which ArgoCD deliberately never stamps.
+
+Target metadata wins over what the object already carries. Helm charts routinely
+set `app.kubernetes.io/instance` to their release name, which is exactly the key
+a GitOps engine may be reading to decide ownership.
+
 ### Kluctl integration (deprecated)
 
 `kluctl` is a CLI and GitOps tool that deploys manifests, and easykubenix can

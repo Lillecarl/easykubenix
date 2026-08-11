@@ -78,6 +78,93 @@
                   rename all of them at once.
                 '';
               };
+              fieldManager = lib.mkOption {
+                type = lib.types.str;
+                default = "ekn";
+                description = ''
+                  Server-side-apply field manager `ekn kubeapply --target
+                  ${name}` writes as. Apply-time only -- it never appears in
+                  the rendered manifests, because it is a property of who
+                  applied an object rather than of the object.
+
+                  Set it to the name of the controller that takes the
+                  objects over afterwards, which for a bootstrap target is
+                  the point of the whole exercise. Two managers declaring the
+                  same field is an SSA conflict, forcing `Force=true` on the
+                  successor's side, and worse: SSA only drops a field when
+                  its owning manager stops declaring it, so every field `ekn`
+                  set and the successor does not stays owned by `ekn`
+                  forever, because a bootstrap apply never runs again.
+                  Applying as the successor makes the handover complete
+                  instead -- fields the bootstrap set and steady state does
+                  not are simply removed.
+
+                  The cost is that a *second* apply of this target silently
+                  overwrites the successor's fields instead of reporting a
+                  conflict, since they are now the same manager. That is the
+                  trade, and it is acceptable only because a bootstrap target
+                  runs once by definition.
+                '';
+                example = "argocd-controller";
+              };
+              labels = lib.mkOption {
+                type = lib.types.attrsOf (
+                  lib.types.either lib.types.str (lib.types.functionTo (lib.types.nullOr lib.types.str))
+                );
+                default = { };
+                description = ''
+                  Labels stamped onto every object in this target -- both the
+                  ones routed here with `ekn.gitOpsTarget` and the ones
+                  `modules` renders. Baked into the rendered manifests, so the
+                  committed YAML and what `ekn kubeapply --target ${name}`
+                  applies agree.
+
+                  A value may be a function of the object rather than a
+                  string, for metadata that has to encode the object's own
+                  identity -- `ekn.lib.argocdTrackingId` is one. Such a
+                  function may return `null` to leave that one object alone,
+                  which is not a nicety: ArgoCD deliberately puts no tracking
+                  annotation on a CRD, so stamping one anyway would make every
+                  CRD permanently OutOfSync.
+
+                  These win over labels the object already carries. That is
+                  deliberate and it matters: Helm charts routinely set
+                  `app.kubernetes.io/instance` to their release name, which
+                  is exactly the key a GitOps engine may be using to decide
+                  ownership.
+
+                  Scoped to this target's rendered output. An object routed
+                  here also appears in `kubernetes.generated`, which is not
+                  target-scoped and carries no stamp -- so a whole-`generated`
+                  apply and a `--target` apply of the same object differ.
+                  Bootstrap objects are unaffected, existing nowhere but here.
+                '';
+                example = lib.literalExpression ''{ "app.kubernetes.io/instance" = "root"; }'';
+              };
+              annotations = lib.mkOption {
+                type = lib.types.attrsOf (
+                  lib.types.either lib.types.str (lib.types.functionTo (lib.types.nullOr lib.types.str))
+                );
+                default = { };
+                description = ''
+                  Annotations stamped onto every object in this target, with
+                  the same semantics as `labels` above.
+
+                  The per-object form is the useful one here: ArgoCD's
+                  `argocd.argoproj.io/tracking-id` -- its default ownership
+                  mechanism since 3.0 -- encodes each object's own
+                  group/kind/namespace/name, so a constant cannot express it.
+                  See `ekn.lib.argocdTrackingId`.
+                '';
+                example = lib.literalExpression ''
+                  {
+                    "argocd.argoproj.io/tracking-id" = ekn.lib.argocdTrackingId {
+                      app = "root";
+                      namespace = "default";
+                    };
+                  }
+                '';
+              };
               modules = lib.mkOption {
                 type = lib.types.listOf lib.types.deferredModule;
                 default = [ ];

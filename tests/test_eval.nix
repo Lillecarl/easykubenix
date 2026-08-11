@@ -237,11 +237,74 @@ let
       }
     ];
   };
+
+  # A target that names its successor as field manager and stamps tracking
+  # metadata onto everything it renders. Both halves of the handover a
+  # bootstrap target needs: who applied the fields, and who owns the objects.
+  easyGitOpsTargetMetadata = import ../. {
+    inherit pkgs;
+    modules = [
+      (
+        { ekn, ... }:
+        {
+          gitOps.deployBranch = "deploy";
+          gitOps.targets.apps.path = "clusters/home/apps";
+          # Routed here from the parent, and stamped exactly like a submodule
+          # object -- a target's metadata covers both sources.
+          kubernetes.objects.default.ConfigMap.routed = {
+            ekn.gitOpsTarget = "bootstrap";
+            data.key = "from-parent";
+          };
+          # The control: a target declaring no metadata stamps none, so the
+          # assertions above are about the declaration rather than about
+          # being in a target at all.
+          kubernetes.objects.default.ConfigMap.unstamped = {
+            ekn.gitOpsTarget = "apps";
+            data.key = "ordinary";
+          };
+          gitOps.targets.bootstrap = {
+            path = "bootstrap";
+            fieldManager = "argocd-controller";
+            labels = {
+              # Static, and colliding with a label the object already carries:
+              # the target's value has to win, since a Helm chart setting
+              # `app.kubernetes.io/instance` to its release name is exactly
+              # what would otherwise defeat the ownership stamp.
+              "app.kubernetes.io/instance" = "argocd";
+              # A function of the object, the shape argocdTrackingId has.
+              "ekn.dev/kind" = object: object.kind;
+            };
+            annotations."argocd.argoproj.io/tracking-id" = ekn.lib.argocdTrackingId {
+              app = "argocd";
+              namespace = "argocd";
+            };
+            modules = [
+              {
+                # Namespaced, cluster-scoped (`none`), and a CRD -- the three
+                # cases argocdTrackingId distinguishes. The CRD gets no
+                # annotation at all, because ArgoCD never stamps one and a
+                # stamp it does not render is a permanent diff.
+                kubernetes.objects.argocd.ConfigMap.root = {
+                  metadata.labels."app.kubernetes.io/instance" = "from-chart";
+                  data.key = "from-bootstrap";
+                };
+                kubernetes.objects.none.Namespace.argocd = { };
+                kubernetes.objects.none.CustomResourceDefinition."widgets.example.com" = {
+                  spec.group = "example.com";
+                };
+              }
+            ];
+          };
+        }
+      )
+    ];
+  };
 in
 {
   eknRouting = {
     inherit (easy.config.kubernetes) generatedByPath gitOpsTargets;
   };
+  gitOpsTargetMetadata = easyGitOpsTargetMetadata.config.kubernetes.gitOpsTargets;
   gitOpsSubmodule = {
     inherit (easyGitOpsSubmodule.config.kubernetes) generated gitOpsTargets;
     nestedDiscriminator =

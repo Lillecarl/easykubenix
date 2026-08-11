@@ -42,6 +42,21 @@
       dex.enabled = false;
       notifications.enabled = false;
       applicationSet.enabled = false;
+
+      # Declared rather than inherited. ArgoCD 3.0 changed this default from
+      # `label` to `annotation`, and the bootstrap target stamps
+      # `argocd.argoproj.io/tracking-id` on the objects below -- which only
+      # means anything under `annotation`. Pinning it here keeps the two ends
+      # agreeing no matter which chart version this is, instead of making the
+      # adoption silently depend on it.
+      #
+      # `annotation`, not `annotation+label`: the extra label is informational
+      # under that mode (ArgoCD still tracks by the annotation), it is
+      # truncated to 63 characters, and it collides with the
+      # `app.kubernetes.io/instance` Helm charts set to their own release
+      # name -- including this one. It is only worth adding if something else
+      # in the cluster reads that label.
+      configs.cm."application.resourceTrackingMethod" = "annotation";
     };
   };
 
@@ -72,6 +87,44 @@
       };
       syncPolicy.automated = {
         prune = true;
+        selfHeal = true;
+      };
+    };
+  };
+
+  # ArgoCD adopting its own installation. This is what makes the tracking
+  # annotation on cluster.nix's bootstrap target mean something: every object
+  # in this file is rendered into `bootstrap/` and applied once by hand, and
+  # this Application then syncs that same folder from then on. Because the
+  # hand-applied copies already carry `tracking-id: argocd:...`, ArgoCD adopts
+  # them instead of ignoring them -- and because they were applied as
+  # `argocd-controller`, it inherits their fields outright rather than
+  # conflicting over them.
+  #
+  # Without this, upgrading ArgoCD would mean re-running the bootstrap by
+  # hand, and any object the bootstrap creates that a later revision drops
+  # would linger forever with nothing that would ever prune it.
+  kubernetes.objects.argocd.Application.argocd = {
+    spec = {
+      project = "default";
+      source = {
+        repoURL = parent.clusterRepoURL;
+        targetRevision = parent.gitOps.deployBranch;
+        path = parent.gitOps.targets.bootstrap.path;
+      };
+      destination = {
+        server = "https://kubernetes.default.svc";
+        # Matches the `namespace` given to `argocdTrackingId`: it is the
+        # fallback the tracking-id records for cluster-scoped objects, so the
+        # two must agree or ArgoCD reads the ids as naming something else.
+        namespace = "argocd";
+      };
+      syncPolicy.automated = {
+        # `prune = false`, unlike the root Application. Pruning here is
+        # ArgoCD deleting its own controller the moment this folder is
+        # misrendered, and it would be doing it to itself -- so it could not
+        # recover without another hand bootstrap.
+        prune = false;
         selfHeal = true;
       };
     };

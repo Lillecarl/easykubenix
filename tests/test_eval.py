@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import anyio
 import nanopynix
@@ -8,7 +9,7 @@ import pytest
 from nanopynix.rpc import Session
 from nanopynix_helpers.eval_target import EvaluationTargetError
 
-from ekn.apply import DEFAULT_BARRIER_PRIORITY
+from ekn.apply import DEFAULT_BARRIER_PRIORITY, DEFAULT_FIELD_MANAGER
 from ekn.eval import (
     evaluate_file,
     evaluate_gitops_manifests,
@@ -145,24 +146,26 @@ class TestEknModule:
         assert [obj["metadata"]["name"] for obj in targets["apps"]["objects"]] == ["routed"]
 
     async def test_gitops_target_exposes_only_serializable_fields(self) -> None:
-        """`target` must stay exactly `{path, discriminator}`.
+        """`target` must stay exactly `{path, discriminator, fieldManager}`.
 
         It is serialized to JSON for `ekn` (eval.py's `_GitOpsTargetRef` and
-        `_unpack_gitops_target` read those two), while the target submodule
-        itself now also holds `modules` and `instance` -- module functions
-        and a whole evaluated option tree. Passing the submodule through
-        whole would try to serialize those, so this asserts the key set
-        rather than just the values.
+        `_unpack_gitops_target` read those three), while the target submodule
+        itself also holds `modules` and `instance` -- module functions and a
+        whole evaluated option tree -- plus `labels`/`annotations`, whose
+        values may be functions. Passing the submodule through whole would
+        try to serialize all of that, so this asserts the key set rather than
+        just the values.
         """
         result = await evaluate_file(NIX_TEST_FILE, "gitOpsSubmodule")
         assert isinstance(result, dict)
 
         for name, entry in result["gitOpsTargets"].items():
-            assert sorted(entry["target"]) == ["discriminator", "path"], name
+            assert sorted(entry["target"]) == ["discriminator", "fieldManager", "path"], name
 
         assert result["gitOpsTargets"]["bootstrap"]["target"] == {
             "path": "bootstrap",
             "discriminator": "easykubenix-bootstrap",
+            "fieldManager": "ekn",
         }
         # The nested instance agrees with the prune scope a
         # `--target bootstrap` apply will actually use.
@@ -283,6 +286,107 @@ class TestEknModule:
         assert "hello" in result
 
 
+class TestGitOpsTargetMetadata:
+    """A bootstrap target impersonating the controller that takes over.
+
+    Two independent mechanisms, deliberately kept apart: `fieldManager` is
+    apply-time only and decides who owns each *field*, while
+    `labels`/`annotations` are baked into the rendered manifests and decide
+    whether the GitOps engine considers the *object* its own at all.
+    """
+
+    @staticmethod
+    def _by_name(entry: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {obj["metadata"]["name"]: obj for obj in entry["objects"]}
+
+    async def test_field_manager_is_apply_time_only(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "gitOpsTargetMetadata")
+        assert isinstance(result, dict)
+
+        assert result["bootstrap"]["target"]["fieldManager"] == "argocd-controller"
+        # An ordinary target keeps the default, so a normal apply stays
+        # honest about who wrote what.
+        assert result["apps"]["target"]["fieldManager"] == "ekn"
+
+        # Never in the manifests: it is a property of who applied an object,
+        # not of the object. `ekn commit` writes these to git.
+        for obj in result["bootstrap"]["objects"]:
+            assert "fieldManager" not in obj
+            assert "fieldManager" not in obj["metadata"]
+
+    async def test_metadata_covers_routed_and_submodule_objects_alike(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "gitOpsTargetMetadata")
+        assert isinstance(result, dict)
+        objects = self._by_name(result["bootstrap"])
+
+        # `routed` comes from the parent via `ekn.gitOpsTarget`, `root` from
+        # the target's own `modules`. A target's metadata is about the target,
+        # so both sources get it.
+        assert sorted(objects) == ["argocd", "root", "routed", "widgets.example.com"]
+        for name in ("routed", "root"):
+            assert objects[name]["metadata"]["labels"]["ekn.dev/kind"] == "ConfigMap", name
+
+    async def test_target_labels_win_over_the_object_s_own(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "gitOpsTargetMetadata")
+        assert isinstance(result, dict)
+        root = self._by_name(result["bootstrap"])["root"]
+
+        # `root` declares `app.kubernetes.io/instance = from-chart`, the way a
+        # Helm chart sets it to its release name. That is exactly the key a
+        # GitOps engine may read to decide ownership, so losing this fight
+        # would defeat the stamp.
+        assert root["metadata"]["labels"]["app.kubernetes.io/instance"] == "argocd"
+
+    async def test_tracking_id_encodes_each_object_s_own_identity(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "gitOpsTargetMetadata")
+        assert isinstance(result, dict)
+        objects = self._by_name(result["bootstrap"])
+
+        def tracking(name: str) -> str | None:
+            return objects[name]["metadata"].get("annotations", {}).get("argocd.argoproj.io/tracking-id")
+
+        # A constant would be wrong on all but one object -- and wrong here
+        # fails silently, because ArgoCD reads a non-self-referencing id as
+        # naming something else and then never prunes the object.
+        assert tracking("root") == "argocd:/ConfigMap:argocd/root"
+        # Cluster-scoped (`none` namespace): no `metadata.namespace`, so it
+        # falls back to the Application's destination namespace, as ArgoCD
+        # itself does.
+        assert tracking("argocd") == "argocd:/Namespace:argocd/argocd"
+        # apiextensions.k8s.io is a real group, unlike the core group above.
+        assert objects["widgets.example.com"]["apiVersion"] == "apiextensions.k8s.io/v1"
+
+    async def test_crds_are_declined_rather_than_stamped(self) -> None:
+        """A function returning `null` leaves that one object alone.
+
+        ArgoCD's repo-server skips CRDs when it stamps rendered manifests
+        (`!kube.IsCRD(target)`), and `Normalize` skips them again on the live
+        side. A tracking annotation ArgoCD's desired state never contains but
+        the live object does is a diff on every sync, forever -- on exactly
+        the objects a bootstrap target is most likely applying.
+        """
+        result = await evaluate_file(NIX_TEST_FILE, "gitOpsTargetMetadata")
+        assert isinstance(result, dict)
+        crd = self._by_name(result["bootstrap"])["widgets.example.com"]
+
+        assert "argocd.argoproj.io/tracking-id" not in crd["metadata"].get("annotations", {})
+        # Declining one value must not suppress the others, and must not
+        # leave an empty `annotations: {}` behind either.
+        assert "annotations" not in crd["metadata"]
+        assert crd["metadata"]["labels"]["ekn.dev/kind"] == "CustomResourceDefinition"
+
+    async def test_a_target_declaring_no_metadata_stamps_none(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "gitOpsTargetMetadata")
+        assert isinstance(result, dict)
+        unstamped = self._by_name(result["apps"])["unstamped"]
+
+        # The control for everything above: being in a target is not what
+        # stamps an object, declaring the metadata is. `metadata` here is
+        # untouched -- no empty `labels: {}` either, which would show up as a
+        # spurious field in every committed manifest.
+        assert sorted(unstamped["metadata"]) == ["name", "namespace"]
+
+
 class TestGitOpsTargetSubmoduleEndToEnd:
     """The two CLI paths a bootstrap target is actually used through, against
     a real evaluation rather than a hand-built shape.
@@ -301,6 +405,8 @@ class TestGitOpsTargetSubmoduleEndToEnd:
                 gitOps.deployBranch = "deploy";
                 gitOps.targets.bootstrap = {{
                   path = "bootstrap";
+                  fieldManager = "argocd-controller";
+                  labels."app.kubernetes.io/instance" = "argocd";
                   modules = [{{
                     kubernetes.objects.argocd.ConfigMap.root.data.key = "value";
                   }}];
@@ -318,7 +424,15 @@ class TestGitOpsTargetSubmoduleEndToEnd:
         assert branches(result) == ("deploy", None)
         rendered = dict(file_groups(result))
         assert "bootstrap/argocd/ConfigMap/root.yaml" in rendered
-        assert "key: value" in rendered["bootstrap/argocd/ConfigMap/root.yaml"]
+        manifest = rendered["bootstrap/argocd/ConfigMap/root.yaml"]
+        assert "key: value" in manifest
+        # The target's labels are baked in, so the committed YAML and what a
+        # `--target bootstrap` apply sends are the same object. Whether a
+        # GitOps engine adopts it is decided by what is in git.
+        assert "app.kubernetes.io/instance: argocd" in manifest
+        # ...and `fieldManager` is not, because it says who applied an object
+        # rather than anything about the object.
+        assert "fieldManager" not in manifest
 
     async def test_kubeapply_target_applies_submodule_objects(self, tmp_path: Path) -> None:
         cfg = await evaluate_kubeapply_config(self._probe(tmp_path), None, None, None, "bootstrap")
@@ -327,6 +441,26 @@ class TestGitOpsTargetSubmoduleEndToEnd:
         # The target's own prune scope, not the instance-wide one -- pruning
         # a bootstrap apply must not be able to reach anything else.
         assert cfg.discriminator == "easykubenix-bootstrap"
+        # Applied as the controller that takes over, so SSA hands the fields
+        # across instead of leaving `ekn` owning them permanently.
+        assert cfg.field_manager == "argocd-controller"
+        assert cfg.objects[0]["metadata"]["labels"] == {"app.kubernetes.io/instance": "argocd"}
+
+    async def test_field_manager_defaults_without_a_target(self, tmp_path: Path) -> None:
+        # No `--target`: the objects come from `kubernetes.generated`, which
+        # belongs to no target and so has nobody to name a manager.
+        probe = tmp_path / "plain.nix"
+        probe.write_text(f"""
+            import {PROJECT_ROOT} {{
+              modules = [{{
+                kubernetes.objects.default.ConfigMap.plain.data.key = "value";
+              }}];
+            }}
+        """)
+
+        cfg = await evaluate_kubeapply_config(probe, None, None, None, None)
+
+        assert cfg.field_manager == DEFAULT_FIELD_MANAGER
 
 
 class TestAssertionsAndWarnings:

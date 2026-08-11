@@ -22,6 +22,7 @@ from nanopynix_helpers.fod import (
 )
 from pydantic import BaseModel, Field, StringConstraints
 
+from ekn.apply import DEFAULT_FIELD_MANAGER
 from ekn.gitops import load_raw_manifest
 
 # `JsonValue` and `LogEvent` are type-only despite the pydantic models below:
@@ -69,10 +70,10 @@ class GitOpsBranches(BaseModel):
 
 
 class _GitOpsTargetRef(BaseModel):
-    """`gitOps.targets.<name>` itself -- see easykubenix's gitops.nix. Just a
-    `{path}` today, but modeled as its own submodule (not flattened to a bare
-    string) since that's the real Nix shape and easykubenix may grow more
-    fields on it later."""
+    """`gitOps.targets.<name>` as it reaches Python -- see easykubenix's
+    gitops.nix, which narrows the submodule to the fields that survive
+    serialization. Only `path` is read on the render path; `discriminator` and
+    `fieldManager` are read on the apply path (see `_unpack_gitops_target`)."""
 
     path: _NonEmptyStr
 
@@ -125,6 +126,7 @@ class SopsAgeIdentity(BaseModel):
 class KubeApplyConfigResult(BaseModel):
     objects: list[dict[str, Any]]
     discriminator: str
+    field_manager: str
     resource_priority: dict[str, int]
     sops_age_identities: list[SopsAgeIdentity]
 
@@ -567,10 +569,11 @@ async def evaluate_gitops_manifests(
 def _unpack_gitops_target(
     gitops_targets: JsonValue,
     target: str,
-) -> tuple[list[dict[str, Any]], list[JsonValue], str]:
-    """Pull one `kubernetes.gitOpsTargets` entry apart into the three things
+) -> tuple[list[dict[str, Any]], list[JsonValue], str, str]:
+    """Pull one `kubernetes.gitOpsTargets` entry apart into the four things
     a `--target` apply needs: its objects (with `.ekn` routing metadata
-    stripped), its raw-file paths, and its own discriminator.
+    stripped), its raw-file paths, its own discriminator, and the field
+    manager to apply as.
 
     Split out of `evaluate_kubeapply_config` purely to keep that function
     under the complexity limit -- every branch here is a shape guard over a
@@ -608,7 +611,11 @@ def _unpack_gitops_target(
     if not isinstance(discriminator, str):
         raise TypeError(f"gitops target {target!r} has no discriminator")
 
-    return objects, raw_file_paths, discriminator
+    field_manager = resolved_target.get("fieldManager")
+    if not isinstance(field_manager, str):
+        raise TypeError(f"gitops target {target!r} has no fieldManager")
+
+    return objects, raw_file_paths, discriminator, field_manager
 
 
 async def evaluate_kubeapply_config(
@@ -644,7 +651,7 @@ async def evaluate_kubeapply_config(
             proxy = proxy.attr("config")
 
         if target:
-            objects, raw_file_paths, discriminator = _unpack_gitops_target(
+            objects, raw_file_paths, discriminator, field_manager = _unpack_gitops_target(
                 await proxy.attr("kubernetes").attr("gitOpsTargets").to_python(),
                 target,
             )
@@ -660,6 +667,10 @@ async def evaluate_kubeapply_config(
                 entry["path"] for entry in raw_files if isinstance(entry, dict) and isinstance(entry.get("path"), str)
             ]
             discriminator = await proxy.attr("ekn").attr("discriminator").to_python()
+            # Only a GitOps target can name a field manager. A whole-`generated`
+            # apply has no successor to hand ownership to -- it *is* the steady
+            # state, and it runs again, so keeping conflict detection is right.
+            field_manager = DEFAULT_FIELD_MANAGER
 
         # Read here, in Python -- not by having Nix `builtins.readFile` +
         # `fromJSON`/eval it, which is exactly the round-trip
@@ -676,6 +687,7 @@ async def evaluate_kubeapply_config(
             {
                 "objects": objects,
                 "discriminator": discriminator,
+                "field_manager": field_manager,
                 "resource_priority": resource_priority,
                 "sops_age_identities": sops_age_identities,
             }

@@ -132,8 +132,20 @@ path and kept out of `kubernetes.generated`. A plain `ekn kubeapply` and
 :language: nix
 ```
 
-The bootstrap instance itself installs ArgoCD from its chart and declares the
-root Application:
+`fieldManager` and `annotations` above are the handover. Applying as
+`argocd-controller` rather than as `ekn` is what lets server-side apply transfer
+the fields: SSA only drops a field when its *owning* manager stops declaring it,
+and a bootstrap apply never runs again, so a distinct `ekn` manager would keep
+owning everything ArgoCD does not declare, forever. The tracking annotation is
+the separate question of whether ArgoCD considers the object its own at all —
+and it is per-object, because the id encodes the object's own
+group/kind/namespace/name. `ekn.lib.argocdTrackingId` builds it and declines
+CRDs, which ArgoCD never stamps and which would otherwise sit permanently
+OutOfSync.
+
+The bootstrap instance itself installs ArgoCD from its chart, declares the root
+Application, and — the other half of the handover — a second Application that
+adopts the bootstrap folder, so upgrading ArgoCD stops being a manual step:
 
 ```{literalinclude} ./examples/bootstrap/argocd.nix
 :language: nix

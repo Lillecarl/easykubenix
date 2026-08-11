@@ -16,14 +16,34 @@ let
   bootstrap = ekn.config.gitOps.targets.bootstrap.instance;
 
   targets = ekn.config.kubernetes.gitOpsTargets;
+
+  bootstrapObject =
+    kind: name:
+    lib.findFirst (
+      o: o.kind == kind && o.metadata.name == name
+    ) (throw "no ${kind}/${name} in bootstrap") targets.bootstrap.objects;
+  trackingId = object: object.metadata.annotations."argocd.argoproj.io/tracking-id" or null;
+
   routingJSON = builtins.toJSON {
     bootstrapPath = targets.bootstrap.target.path;
     appsPath = targets.apps.target.path;
     bootstrapKinds = map (o: "${o.kind}/${o.metadata.name}") targets.bootstrap.objects;
     appsKinds = map (o: "${o.kind}/${o.metadata.name}") targets.apps.objects;
     generatedKinds = map (o: "${o.kind}/${o.metadata.name}") ekn.config.kubernetes.generated;
-    rootApplication =
-      (lib.findFirst (o: o.kind == "Application") null targets.bootstrap.objects).spec.source;
+
+    rootApplication = (bootstrapObject "Application" "root").spec.source;
+    selfApplication = (bootstrapObject "Application" "argocd").spec.source;
+
+    bootstrapFieldManager = targets.bootstrap.target.fieldManager;
+    appsFieldManager = targets.apps.target.fieldManager;
+
+    # One namespaced object, one cluster-scoped one, one CRD -- the three
+    # cases the tracking-id function distinguishes.
+    trackingNamespaced = trackingId (bootstrapObject "ServiceAccount" "argocd-server");
+    trackingClusterScoped = trackingId (bootstrapObject "Namespace" "argocd");
+    trackingCRD = trackingId (bootstrapObject "CustomResourceDefinition" "applications.argoproj.io");
+    # ...and the untargeted side, which must be stamped by nothing.
+    trackingApps = trackingId (lib.head targets.apps.objects);
   };
 in
 {
@@ -80,6 +100,29 @@ in
         expect "root app branch" '.rootApplication.targetRevision' 'deploy'
         expect "root app path" '.rootApplication.path' 'clusters/example/apps'
         expect "root app repo" '.rootApplication.repoURL' 'https://github.com/example/cluster.git'
+
+        # ...and the Application that adopts the bootstrap folder itself
+        # points back at the target it was rendered into.
+        expect "self app path" '.selfApplication.path' 'bootstrap'
+
+        # The bootstrap applies as its successor, so the handover completes;
+        # an ordinary target keeps the default and stays honest about who
+        # wrote what.
+        expect "bootstrap field manager" '.bootstrapFieldManager' 'argocd-controller'
+        expect "apps field manager" '.appsFieldManager' 'ekn'
+
+        # Tracking ids are per-object, and encode the object's own identity.
+        expect "namespaced tracking id" '.trackingNamespaced' \
+          'argocd:/ServiceAccount:argocd/argocd-server'
+        # Cluster-scoped: no metadata.namespace, so it falls back to the
+        # Application's destination namespace, same as ArgoCD does.
+        expect "cluster-scoped tracking id" '.trackingClusterScoped' \
+          'argocd:/Namespace:argocd/argocd'
+        # CRDs get none at all -- ArgoCD never stamps them, so stamping one
+        # here would be a diff on every sync forever.
+        expect "CRD tracking id" '.trackingCRD' 'null'
+        # And a target that declares no metadata stamps none.
+        expect "apps tracking id" '.trackingApps' 'null'
 
         echo "PASS: bootstrap routing" > "$out"
       '';

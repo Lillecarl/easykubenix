@@ -730,6 +730,7 @@ class KubeApply(EknCommand):
                 objects,
                 api=api,
                 discriminator=cfg.discriminator,
+                field_manager=cfg.field_manager,
                 resource_priority=cfg.resource_priority,
                 prune=self.prune,
             )

@@ -41,6 +41,14 @@ DEFAULT_DISCRIMINATOR_LABEL = "ekn.dev/discriminator"
 # silently reintroducing the stall.
 DEFAULT_BARRIER_PRIORITY = 1000
 
+# Server-side-apply field manager, unless a caller names another. A GitOps
+# target can (`gitOps.targets.<name>.fieldManager`), so that a bootstrap apply
+# can hand its objects to the controller that takes them over rather than
+# leaving every field it set owned by `ekn` forever -- SSA only releases a
+# field when its owning manager stops declaring it, and a bootstrap apply
+# never runs again.
+DEFAULT_FIELD_MANAGER = "ekn"
+
 type Manifest = dict[str, JsonValue]
 
 
@@ -179,7 +187,7 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     discriminator: str,
     discriminator_label: str = DEFAULT_DISCRIMINATOR_LABEL,
     resource_priority: dict[str, int] | None = None,
-    field_manager: str = "ekn",
+    field_manager: str = DEFAULT_FIELD_MANAGER,
     crd_establish_timeout: int = 60,
     prune: bool = True,
     prune_kinds: set[str] | None = None,
@@ -271,6 +279,7 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
 __all__ = [
     "DEFAULT_BARRIER_PRIORITY",
     "DEFAULT_DISCRIMINATOR_LABEL",
+    "DEFAULT_FIELD_MANAGER",
     "Manifest",
     "apply_and_prune",
     "apply_one",

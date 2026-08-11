@@ -164,6 +164,11 @@ let
         # see `mkInstance` above for what it does and does not share with
         # the instance calling it.
         inherit mkInstance;
+        # ArgoCD's per-object `argocd.argoproj.io/tracking-id` value, for a
+        # `gitOps.targets.<name>.annotations` entry -- the one piece of
+        # controller-specific knowledge here, kept as an opt-in helper so
+        # `gitOps.targets` itself stays neutral. See argocdTrackingId.nix.
+        argocdTrackingId = import ./easykubenix/lib/argocdTrackingId.nix { inherit lib; };
         # Recursive JSON-ish value type (drop-in replacement for
         # `pkgs.formats.json{}.type`/`settingsFormat.type`) that also
         # accepts an attrset-keyed-by-`name` shorthand anywhere a list

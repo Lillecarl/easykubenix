@@ -681,6 +681,47 @@ in
         allTargetNames = lib.unique (
           lib.attrNames objectsByTarget ++ lib.attrNames rawFilesByTarget ++ lib.attrNames submodulesByTarget
         );
+
+        # Stamp a target's `labels`/`annotations` onto one of its objects.
+        #
+        # A value may be a function of the object rather than a string --
+        # ArgoCD's tracking-id annotation encodes each object's own
+        # group/kind/namespace/name, so a constant cannot express it (see
+        # lib/argocdTrackingId.nix).
+        #
+        # The target's entries win over the object's own. Helm charts
+        # routinely set `app.kubernetes.io/instance` to their release name,
+        # which is exactly the key a GitOps engine may be reading to decide
+        # what belongs to it, so losing that fight would defeat the point.
+        stampTargetMetadata =
+          declared: object:
+          let
+            merge =
+              field: defined:
+              let
+                # A function may return `null` to decline this object --
+                # ArgoCD puts no tracking annotation on a CRD, and stamping
+                # one anyway is a permanent diff (see lib/argocdTrackingId.nix).
+                # Declining leaves whatever the object already had, rather
+                # than removing it: "no opinion", not "unset".
+                resolved = lib.filterAttrs (_: value: value != null) (
+                  lib.mapAttrs (_: value: if lib.isFunction value then value object else value) defined
+                );
+                merged = (object.metadata.${field} or { }) // resolved;
+              in
+              # Guarded on the result, not on `defined`: a target whose every
+              # value declined must not leave `labels: {}` behind on an object
+              # that had none.
+              lib.optionalAttrs (merged != { }) { ${field} = merged; };
+          in
+          if declared.labels == { } && declared.annotations == { } then
+            object
+          else
+            object
+            // {
+              metadata =
+                object.metadata // merge "labels" declared.labels // merge "annotations" declared.annotations;
+            };
       in
       checked (
         lib.listToAttrs (
@@ -700,15 +741,21 @@ in
                 # Named fields, not the whole `declared` submodule. This is
                 # serialized to JSON for `ekn` (see eval.py's
                 # `_GitOpsTargetRef` and `_unpack_gitops_target`, which read
-                # exactly these two), and the submodule also carries
+                # exactly these three), and the submodule also carries
                 # `modules` and `instance` -- module functions and an entire
                 # evaluated option tree. Passing it whole would try to
                 # serialize those.
+                #
+                # `labels`/`annotations` are left out for a different reason:
+                # they are stamped into `objects` below, so they are already
+                # in both the committed manifests and the apply. Their values
+                # may be functions too.
                 target = {
-                  inherit (declared) path discriminator;
+                  inherit (declared) path discriminator fieldManager;
                 };
-                objects =
-                  (objectsByTarget.${name} or [ ]) ++ (if submodule == null then [ ] else submodule.generated);
+                objects = map (stampTargetMetadata declared) (
+                  (objectsByTarget.${name} or [ ]) ++ (if submodule == null then [ ] else submodule.generated)
+                );
                 # Paths only, deliberately not read/parsed here -- reading them
                 # would mean round-tripping their content through Nix's
                 # attrset representation, exactly what rawFiles exists to
