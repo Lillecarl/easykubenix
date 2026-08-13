@@ -16,6 +16,19 @@ let
   # override when there is no channel to point at -- the lockfile is the
   # fallback, and pinned inputs are what CI should be building from anyway.
   channelNixpkgs = builtins.tryEval <nixpkgs>;
+
+  # The development checkouts live in ~/Code on both machines this is worked
+  # on, but "~" is spelled differently on each: /home/lillecarl on the NixOS
+  # box, /Users/lillecarl on the Mac.
+  #
+  # A wrong root here matters more than it usually would, precisely because of
+  # the fallback documented below: a path that does not exist is not an error,
+  # so the build quietly uses the *lockfile's* nanopynix instead. A local fix
+  # to nanopynix then appears to do nothing at all -- much harder to notice
+  # than a failure. Seen for real on macOS, where the whole toolchain silently
+  # resolved to a months-old pin.
+  codeDir =
+    if builtins.pathExists /home/lillecarl/Code then /home/lillecarl/Code else /Users/lillecarl/Code;
 in
 flake-compatish {
   source = ../.;
@@ -25,7 +38,7 @@ flake-compatish {
   overrides = {
     adios = ../../adios;
     self = ../.;
-    nanopynix = /home/lillecarl/Code/nanopynix;
+    nanopynix = codeDir + "/nanopynix";
   }
   // (if channelNixpkgs.success then { nixpkgs = channelNixpkgs.value; } else { });
 }
