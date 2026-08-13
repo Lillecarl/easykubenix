@@ -46,11 +46,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1784909712,
-        "narHash": "sha256-vPqYev41w0iDbwq5PX7JZzyQBq1EICWm/b0n3he6c4Y=",
+        "lastModified": 1786375512,
+        "narHash": "sha256-5OSRk0DLS5+KmnEyrD4v3+Q9RBVHGZsrdod/CY+WM/0=",
         "owner": "Lillecarl",
         "repo": "easykubenix",
-        "rev": "4eb9adc5461a6e09808640ba230f53fef6c61a5b",
+        "rev": "550054e28c9d72dc7724182aece09f27af32811a",
         "type": "github"
       },
       "original": {
@@ -100,11 +100,11 @@
         "tree-sitter-nix-numtide": "tree-sitter-nix-numtide"
       },
       "locked": {
-        "lastModified": 1786373139,
-        "narHash": "sha256-oFzY6JCLXXP4LajKOpVqDHAS/Y2DymecXTo17tiPNok=",
+        "lastModified": 1786649394,
+        "narHash": "sha256-BSwXH3qnJetv1Si83Y4J11Itu3oP3ejritkDWmF/Xt4=",
         "owner": "lillecarl",
         "repo": "nanopynix",
-        "rev": "b5082e5a3e2a0f147508ff0a74cbb760a288a017",
+        "rev": "6e2687b299e6d4633d7ff4bee935b7964a5734a0",
         "type": "github"
       },
       "original": {
