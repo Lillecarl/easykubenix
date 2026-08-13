@@ -63,6 +63,27 @@ let
     pythonSet = eknPythonSet;
     completions.var = "_EKN_COMPLETE";
     caBundle = true;
+
+    # `ekn/src/ekn/sops.py` runs both of these as subprocesses: `age-keygen`
+    # to mint a keypair for each `kubernetes.sopsAgeIdentities` entry that is
+    # missing one, and `sops` to encrypt and decrypt with it. They are
+    # implementation details of this program, not tools a caller chooses, so
+    # they belong in its own closure.
+    #
+    # Until now they came from the ambient PATH, which meant `ekn kubeapply`
+    # worked only where someone happened to have installed them -- the dev
+    # shell below lists `age` for exactly that reason. On a machine without
+    # them the bootstrap died mid-apply with
+    # `FileNotFoundError: [Errno 2] No such file or directory: 'age-keygen'`,
+    # after it had already reached the cluster.
+    #
+    # `kubectl` and `git`, which the CLI also shells out to, are deliberately
+    # NOT here: those are the operator's own tools, with the operator's own
+    # config and credential helpers behind them.
+    pathInputs = [
+      pkgs.age
+      pkgs.sops
+    ];
   };
 
   # The environment the test suite and the dev shell run in: one venv holding
