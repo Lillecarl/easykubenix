@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, cast
 
@@ -180,6 +181,44 @@ def _with_discriminator_label(spec: Manifest, label: str, value: str) -> Manifes
     return labeled
 
 
+async def _wait_established(crd: APIObject, timeout: float) -> None:
+    """Wait for one CRD to report Established, tolerating a status that is not there yet.
+
+    `kr8s`' own `wait` reads `.status.conditions` and hands it to
+    `list_dict_unpack`, which iterates its argument. A CRD the API server
+    has accepted but not yet given a status has no `conditions` at all, so
+    that argument is `None` and the call raises::
+
+        TypeError: 'NoneType' object is not iterable
+
+    A race, and a narrow one -- the apiextensions controller fills the
+    status in well under a second -- so it passes almost every time and
+    then kills a bootstrap that happens to lose it. Seen against a
+    freshly-created `applicationsets.argoproj.io`, mid-apply, with the
+    barriers before it already in the cluster.
+
+    Retrying is the whole fix: the next read finds a status. Only
+    `TypeError` is swallowed, and only until the deadline the caller
+    already asked for, so a CRD that genuinely never establishes still
+    fails rather than spinning.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            msg = f"CRD {crd.name} did not become Established within {timeout}s"
+            raise TimeoutError(msg)
+        try:
+            await crd.wait("condition=Established", timeout=remaining)
+        except TypeError:
+            # No status yet. Let the controller get there rather than
+            # hammering the API server, then look again.
+            _log.debug("CRD has no status yet, retrying", name=crd.name)
+            await asyncio.sleep(0.5)
+            continue
+        return
+
+
 async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt, see TODO.md
     objects: list[Manifest],
     *,
@@ -241,7 +280,7 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
         if crds:
             _log.info("waiting for CRDs to become Established", count=len(crds), timeout=crd_establish_timeout)
         for crd in crds:
-            await crd.wait("condition=Established", timeout=crd_establish_timeout)
+            await _wait_established(crd, crd_establish_timeout)
 
     if not prune:
         return
