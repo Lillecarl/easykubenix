@@ -61,7 +61,11 @@ let
   eknCli = nanopynix.mkApp {
     name = "ekn";
     pythonSet = eknPythonSet;
-    completions.var = "_EKN_COMPLETE";
+    # `true`, and not an environment variable. `mkApp` renders the three
+    # completion scripts from argcomplete's own `shell_integration.shellcode`,
+    # which needs the name of the program and nothing else. The clypi shape
+    # this replaces named the variable clypi looked for.
+    completions = true;
     caBundle = true;
 
     # `ekn/src/ekn/sops.py` runs both of these as subprocesses: `age-keygen`

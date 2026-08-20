@@ -10,9 +10,9 @@
   sops,
   age,
   # This repository's own venv -- see `eknDevEnv` in ../default.nix. One
-  # environment holding `ekn`'s whole dependency closure (kr8s, clypi, pygit2,
-  # pydantic, structlog, rich, pyyaml, anyio) together with `nanopynix` and
-  # its `test` extra, which is what brings pytest.
+  # environment holding `ekn`'s whole dependency closure (kr8s, argcomplete,
+  # pygit2, pydantic, structlog, rich, pyyaml, anyio) together with
+  # `nanopynix` and its `test` extra, which is what brings pytest.
   #
   # `ekn`'s *source* lives in ../ekn, and pytest reads it from there via
   # `pythonpath` in ../pytest.ini rather than from this venv. What the venv

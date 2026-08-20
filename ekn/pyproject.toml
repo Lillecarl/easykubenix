@@ -13,7 +13,16 @@ dependencies = [
   "nanopynix-helpers",
   "pygit2",
   "pyyaml",
-  "clypi",
+  # `argcomplete`, and not `clypi`. The parser is `argparse`, from the standard
+  # library, so this dependency answers a Tab press and nothing else.
+  #
+  # nanopynix drove every candidate on a pty in bash, zsh and fish, and kept
+  # this one: the shell sends it the raw command line and the cursor offset
+  # rather than a list of words, so a value holding `:` or `=` survives.
+  # `--flake .#app` and `--attr=kube` are those shapes, and they are what `ekn`
+  # is typed with. clypi published no way to reach its completion script at
+  # all, and resolved the shell through `$SHELL`.
+  "argcomplete",
   "kr8s",
   "anyio",
   "structlog",

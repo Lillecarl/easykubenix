@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import sys
 from pathlib import Path as _Path
-from typing import TYPE_CHECKING, Literal, NoReturn, cast, override
+from typing import TYPE_CHECKING, Literal, NoReturn, cast
 
 import anyio
 import anyio.to_thread
@@ -15,12 +14,12 @@ import pygit2
 import rich.traceback
 import structlog
 from anyio import Path
-from clypi import Command, Positional, arg
 from nanopynix import NixError
 from nanopynix.models import JsonValue
 from nanopynix.primops import from_yaml11_stream, from_yaml_stream, to_yaml
 from pydantic import TypeAdapter, ValidationError
 
+from ekn._cli import Command, build_parser, complete, dispatch, opt, pos
 from ekn.apply import apply_and_prune
 from ekn.clusterdiff import cluster_diff
 from ekn.eval import (
@@ -60,9 +59,15 @@ from ekn.sops import ensure_age_identities, maybe_decrypt
 from ekn.validation import EphemeralControlPlane, exec_capture, prepare_validation_objects
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
 _log = structlog.get_logger()
+
+#: What `ekn deploy --verbosity` accepts. nanopynix' own `LogLevelInput` is
+#: `str | int | LogLevel`, which says nothing to a parser; these are the eight
+#: names Nix knows, so argparse rejects anything else and the shell offers them
+#: on Tab.
+type LogLevel = Literal["error", "warn", "notice", "info", "talkative", "chatty", "debug", "vomit"]
 
 
 def _report_nix_error(exc: NixError) -> NoReturn:
@@ -137,43 +142,40 @@ async def _evaluate_gitops(
         _report_validation_error("GitOps config", exc)
 
 
-class EknCommand(Command):
-    """The base of every ekn command, which owns which stream carries what.
+class NixCommand(Command):
+    """A command that reads a Nix entry point: a file, or a flake reference.
 
-    **stdout carries the answer of a command, and nothing else.** A usage
-    message that lands there is read as data by whatever reads the command.
-    ``clypi.Command.print_help`` writes to stdout whether the caller asked for
-    help or mistyped the command line, and ``ClypiConfig`` names no stream, so
-    this overrides the second case. ``--help`` keeps stdout, because the caller
-    asked for it.
-
-    **A copy of ``pynix._settings.PynixCommand``, and not an import of it.**
-    ekn cannot import pynix: ``pynix`` imports ``ekn.cli`` to mount it as a
-    subcommand, and it tolerates the import failing, so ekn runs on its own.
-    The ``check-ekn-sandbox`` gate runs it that way. An import here would turn
-    an optional dependency into a cycle.
+    **Declared once, and inherited.** `Command.__init_subclass__` walks the MRO,
+    so a subclass gets these without redeclaring them. Under clypi each command
+    parsed only what its own class body declared, so the same lines stood in
+    front of every command in this file, `inherited=True` and all.
     """
 
-    @classmethod
-    @override
-    def print_help(cls, exception: Exception | None = None) -> NoReturn:
-        if exception is None:
-            super().print_help(exception)
-        with contextlib.redirect_stdout(sys.stderr):
-            super().print_help(exception)
+    file: _Path | None = opt(None, short="f", help="Nix file to evaluate.")
+    flake: str | None = opt(
+        None, help="Flake reference (e.g. '.#myconfig'). Evaluates outputs.eknConfig.<system>.<attr>."
+    )
 
 
-class Eval(EknCommand):
+class AttrCommand(NixCommand):
+    """A Nix command that also takes a path inside the evaluated result.
+
+    Separate from `NixCommand` for one command: `pushcache` has an `--attr` of
+    its own, which the caller must give and which names what to build. A
+    subclass cannot narrow an inherited `str | None` to `str`.
+    """
+
+    attr: str | None = opt(None, short="A", help="Dot-separated attribute path within the evaluation result.")
+
+
+class Eval(AttrCommand):
     """Evaluate Nix and dump JSON."""
 
-    file: _Path | None = arg(None, short="f", inherited=True)
-    flake: str | None = arg(None, inherited=True)
-    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
-    update_fod: bool = arg(
+    update_fod: bool = opt(
         False,
         help="On a fixed-output hash mismatch, patch --source-file's plain-string hash literal with Nix's reported hash and retry.",
     )
-    source_file: _Path | None = arg(
+    source_file: _Path | None = opt(
         None,
         help="Nix file containing the fixed-output hash literal to patch (required with --update-fod).",
     )
@@ -200,12 +202,8 @@ class Eval(EknCommand):
         sys.stdout.write("\n")
 
 
-class Render(EknCommand):
+class Render(AttrCommand):
     """Render Kubernetes manifests as YAML on stdout."""
-
-    file: _Path | None = arg(None, short="f", inherited=True)
-    flake: str | None = arg(None, inherited=True)
-    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
 
     async def run(self) -> None:
         uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
@@ -221,12 +219,8 @@ class Render(EknCommand):
             sys.stdout.write(content)
 
 
-class Diff(EknCommand):
+class Diff(AttrCommand):
     """Diff GitOps-routed manifests against the deploy branch."""
-
-    file: _Path | None = arg(None, short="f", inherited=True)
-    flake: str | None = arg(None, inherited=True)
-    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
 
     async def run(self) -> None:
         deploy_branch, _source_branch, files = await _resolve_gitops(self.file, self.flake, self.attr)
@@ -324,20 +318,17 @@ async def _finalize_commit(  # noqa: PLR0913 -- tracked complexity/arg-count deb
         await _git_push(remote, deploy_branch, source_branch)
 
 
-class Commit(EknCommand):
+class Commit(AttrCommand):
     """Render manifests and write them to the GitOps deploy (and paired
     source) branch."""
 
-    file: _Path | None = arg(None, short="f", inherited=True)
-    flake: str | None = arg(None, inherited=True)
-    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
-    message: str | None = arg(None, short="m", help="Commit message.")
-    push: bool = arg(
+    message: str | None = opt(None, short="m", help="Commit message.")
+    push: bool = opt(
         False,
         help="git push the committed GitOps branch(es) to their remote afterwards -- "
         "commits are only ever made locally, and ArgoCD/Flux read from the remote.",
     )
-    remote: str = arg("origin", help="Remote to push GitOps branch(es) to (with --push).")
+    remote: str = opt("origin", help="Remote to push GitOps branch(es) to (with --push).")
 
     async def run(self) -> None:
         deploy_branch, source_branch, files = await _resolve_gitops(self.file, self.flake, self.attr)
@@ -420,12 +411,8 @@ async def _push_ekn_cache(file: _Path | None, flake: str | None, attr: str | Non
     _log.info(f"pushed {cache_package_out} to {cache_to}")
 
 
-class Validate(EknCommand):
+class Validate(AttrCommand):
     """Boot real etcd+kube-apiserver, apply manifests, and run kubeconform."""
-
-    file: _Path | None = arg(None, short="f", inherited=True)
-    flake: str | None = arg(None, inherited=True)
-    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
 
     async def run(self) -> None:
         if self.file is not None:
@@ -504,35 +491,21 @@ class Deploy(Commit):
     default (see --cache-allow-failure).
     """
 
-    # clypi only parses fields declared directly on the class being
-    # instantiated for that CLI node -- Deploy(Commit) inheriting a field
-    # in Python (file/flake/attr included, not just push/remote/message)
-    # doesn't expose it as a flag on the sibling 'deploy' subcommand unless
-    # redeclared here too, `inherited=True` or not. `inherited=True` only
-    # changes value-resolution/help-grouping semantics ("this value comes
-    # from a parent node in the actual CLI tree"), not whether the field
-    # needs (re)declaring on each command node that wants to parse it.
-    file: _Path | None = arg(None, short="f", inherited=True)
-    flake: str | None = arg(None, inherited=True)
-    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
-    no_verify: bool = arg(
+    # `--file`, `--flake`, `--attr`, `--message`, `--push` and `--remote` are
+    # not here, and that is the point: `Command.__init_subclass__` walks the
+    # MRO, so `deploy` parses every option `commit` declares. clypi parsed only
+    # what the class body itself declared, so all six stood here as well.
+    no_verify: bool = opt(
         False,
         help="Skip temporary API-server and kubeconform verification.",
     )
-    message: str | None = arg(None, short="m", help="Commit message.")
-    push: bool = arg(
-        False,
-        help="git push each committed GitOps branch to its remote afterwards -- "
-        "commit_manifests only ever commits locally, and ArgoCD/Flux read from the remote.",
-    )
-    remote: str = arg("origin", help="Remote to push GitOps branches to (with --push).")
-    cache_allow_failure: bool = arg(
+    cache_allow_failure: bool = opt(
         False,
         help="Log a warning and continue if the pre-deploy cache push fails, instead of aborting. "
         "Off by default -- CSI-mounted pods will fail to start if referenced store paths were "
         "never pushed, so a failed push should normally block the deploy.",
     )
-    verbosity: str = arg(
+    verbosity: LogLevel = opt(
         "error",
         short="v",
         help="Nix log verbosity for every eval/build nanopynix does during this deploy "
@@ -540,7 +513,7 @@ class Deploy(Commit):
         "--print-build-logs` only covers building the ekn CLI package itself, not what "
         "it does at runtime -- this is the runtime equivalent.",
     )
-    print_build_logs: bool = arg(
+    print_build_logs: bool = opt(
         False,
         help="Stream build/eval log lines from nanopynix's worker to stderr as they "
         "happen, for visibility into what's taking long during Validate/cache-push/Commit.",
@@ -584,7 +557,7 @@ class Deploy(Commit):
         await try_jj_status(".")
 
 
-class Rollback(EknCommand):
+class Rollback(AttrCommand):
     """Roll back the GitOps deploy (and paired source) branch to an older
     commit -- forward-only, replays the old tree as a *new* commit, never
     resets or force-pushes anything.
@@ -596,22 +569,19 @@ class Rollback(EknCommand):
     during normal testing, when Nix eval is healthy.
     """
 
-    deploy_branch: str | None = arg(
+    deploy_branch: str | None = opt(
         None,
         help="Deploy branch to roll back, bypassing Nix evaluation entirely. Mutually exclusive with --file/--flake.",
     )
-    source_branch: str | None = arg(
+    source_branch: str | None = opt(
         None,
         help="Paired source branch to roll back alongside --deploy-branch (optional).",
     )
-    file: _Path | None = arg(None, short="f", inherited=True)
-    flake: str | None = arg(None, inherited=True)
-    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
-    to: str | None = arg(None, help="Roll back to this specific commit-ish instead of walking --steps-back.")
-    steps_back: int = arg(1, help="Number of deploy-branch first-parent steps to roll back, when --to is not given.")
-    push: bool = arg(False, help="git push the rolled-back branch(es) to their remote afterwards.")
-    remote: str = arg("origin", help="Remote to push to (with --push).")
-    verify: bool = arg(
+    to: str | None = opt(None, help="Roll back to this specific commit-ish instead of walking --steps-back.")
+    steps_back: int = opt(1, help="Number of deploy-branch first-parent steps to roll back, when --to is not given.")
+    push: bool = opt(False, help="git push the rolled-back branch(es) to their remote afterwards.")
+    remote: str = opt("origin", help="Remote to push to (with --push).")
+    verify: bool = opt(
         False,
         help="Run Validate against the restored tree before finalizing -- requires --file/--flake. "
         "Off by default: an incident rollback should be fast, and the restored tree was already "
@@ -666,7 +636,7 @@ class Rollback(EknCommand):
         await try_jj_status(".")
 
 
-class KubeApply(EknCommand):
+class KubeApply(AttrCommand):
     """Apply Kubernetes objects directly against the current kubeconfig
     context: server-side apply in barrier order, with optional pruning.
 
@@ -684,22 +654,17 @@ class KubeApply(EknCommand):
     support) declares it there instead of a bespoke bootstrap script.
     """
 
-    @classmethod
-    def prog(cls) -> str:
-        return "kubeapply"
+    cli_name = "kubeapply"
 
-    file: _Path | None = arg(None, short="f", inherited=True)
-    flake: str | None = arg(None, inherited=True)
-    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
-    target: str | None = arg(
+    target: str | None = opt(
         None,
         help="Apply only this GitOps target's objects (kubernetes.gitOpsTargets). Omit for the full kubernetes.generated set.",
     )
-    prune: bool = arg(
+    prune: bool = opt(
         False,
         help="Delete previously-applied objects no longer present in this apply. Scoped to this apply's discriminator: the target's own with --target, otherwise ekn.discriminator.",
     )
-    confirm_context: str | None = arg(
+    confirm_context: str | None = opt(
         None,
         help="Prompt for confirmation unless the current kubectl context ends with this name.",
     )
@@ -738,7 +703,7 @@ class KubeApply(EknCommand):
             _report_server_error("apply", exc)
 
 
-class ClusterDiff(EknCommand):
+class ClusterDiff(AttrCommand):
     """Diff Kubernetes objects against the live cluster.
 
     Unlike `ekn diff` (which compares against the previous GitOps commit),
@@ -749,14 +714,9 @@ class ClusterDiff(EknCommand):
     applied, pruned, or waited on.
     """
 
-    @classmethod
-    def prog(cls) -> str:
-        return "clusterdiff"
+    cli_name = "clusterdiff"
 
-    file: _Path | None = arg(None, short="f", inherited=True)
-    flake: str | None = arg(None, inherited=True)
-    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
-    target: str | None = arg(
+    target: str | None = opt(
         None,
         help="Diff only this GitOps target's objects (kubernetes.gitOpsTargets). Omit for the full kubernetes.generated set.",
     )
@@ -781,7 +741,7 @@ class ClusterDiff(EknCommand):
             _log.info("no differences")
 
 
-class PushCache(EknCommand):
+class PushCache(NixCommand):
     """Build a Nix attribute and copy its realised closure to a remote store.
 
     Manual/ad-hoc escape hatch (or for CI) for pushing an arbitrary
@@ -790,19 +750,18 @@ class PushCache(EknCommand):
     no flags needed (see `Deploy`).
     """
 
-    @classmethod
-    def prog(cls) -> str:
-        return "pushcache"
+    cli_name = "pushcache"
 
-    file: _Path | None = arg(None, short="f", inherited=True)
-    flake: str | None = arg(None, inherited=True)
-    attr: str = arg(help="Dot-separated attribute path to build and push, e.g. 'kubenix.config.kluctl.projectDir'.")
-    to: str = arg(help="Destination store URI, e.g. ssh-ng://nix@host:2222")
-    substitute_on_destination: bool = arg(
+    attr: str = opt(
+        required=True, help="Dot-separated attribute path to build and push, e.g. 'kubenix.config.kluctl.projectDir'."
+    )
+    to: str = opt(required=True, help="Destination store URI, e.g. ssh-ng://nix@host:2222")
+    substitute_on_destination: bool = opt(
         True,
+        negatable=True,
         help="Let the destination substitute from its own configured caches instead of streaming everything.",
     )
-    check_sigs: bool = arg(
+    check_sigs: bool = opt(
         False,
         help="Verify signatures when copying (off by default, matching kluctl's existing preDeployScript).",
     )
@@ -818,7 +777,7 @@ class PushCache(EknCommand):
         )
 
 
-class SplitManifest(EknCommand):
+class SplitManifest(Command):
     """Split a JSON manifest list into a namespace/kind/name.yaml directory tree.
 
     Internal: used by easykubenix's `manifestYAMLDir` derivation so the whole
@@ -826,8 +785,8 @@ class SplitManifest(EknCommand):
     object. Not intended for interactive use.
     """
 
-    json_file: Positional[_Path]
-    out_dir: Positional[_Path]
+    json_file: _Path = pos(help="JSON file holding the manifest list.")
+    out_dir: _Path = pos(help="Directory to write the namespace/kind/name.yaml tree into.")
 
     async def run(self) -> None:
         data: JsonValue = json.loads(await Path(str(self.json_file)).read_text())
@@ -841,7 +800,7 @@ class SplitManifest(EknCommand):
             await dest.write_text(content)
 
 
-class ApplyManifest(EknCommand):
+class ApplyManifest(Command):
     """Apply an already-evaluated manifest JSON file against $KUBECONFIG.
 
     Internal: the apply step of easykubenix's `validation.script`, which
@@ -857,17 +816,15 @@ class ApplyManifest(EknCommand):
     interactive use; use `ekn kubeapply` for that.
     """
 
-    @classmethod
-    def prog(cls) -> str:
-        return "_applyManifest"
+    cli_name = "_applyManifest"
 
-    manifest_file: Positional[_Path]
-    discriminator: str = arg(help="Value for the ekn.dev/discriminator label (ekn.discriminator).")
-    resource_priority_file: _Path | None = arg(
+    manifest_file: _Path = pos(help="JSON file holding the already-evaluated manifest list.")
+    discriminator: str = opt(required=True, help="Value for the ekn.dev/discriminator label (ekn.discriminator).")
+    resource_priority_file: _Path | None = opt(
         None,
         help="JSON file holding ekn.resourcePriority ({kind: int}). Omitted means no barrier ordering.",
     )
-    novalidate_keys_file: _Path | None = arg(
+    novalidate_keys_file: _Path | None = opt(
         None,
         help="JSON file holding kubernetes.novalidateKeys ({kind, namespace, name} objects) to skip.",
     )
@@ -913,7 +870,7 @@ _YAML_STREAM_PARSERS: dict[str, Callable[[str], list[JsonValue]]] = {
 }
 
 
-class YamlToJson(EknCommand):
+class YamlToJson(Command):
     """Parse a YAML document stream on stdin and dump it as a JSON array on stdout.
 
     Internal: the IFD-derivation fallback importyaml.nix shells out to when
@@ -925,14 +882,12 @@ class YamlToJson(EknCommand):
     this replaced. Not intended for interactive use.
     """
 
-    yaml_version: Literal["yaml11", "yaml12"] = arg(
+    cli_name = "_yamlToJson"
+
+    yaml_version: Literal["yaml11", "yaml12"] = opt(
         "yaml12",
         help="YAML version to parse the input stream with.",
     )
-
-    @classmethod
-    def prog(cls) -> str:
-        return "_yamlToJson"
 
     async def run(self) -> None:
         source = sys.stdin.read()
@@ -944,7 +899,7 @@ class YamlToJson(EknCommand):
         sys.stdout.buffer.write(_json_value_list_adapter.dump_json(docs))
 
 
-class JsonToYaml(EknCommand):
+class JsonToYaml(Command):
     """Parse a JSON value on stdin and dump it as YAML on stdout.
 
     Internal: the reverse of `_yamlToJson`, reusing nanopynix's `to_yaml`
@@ -953,9 +908,7 @@ class JsonToYaml(EknCommand):
     in-process `toYAML` primop. Not intended for interactive use.
     """
 
-    @classmethod
-    def prog(cls) -> str:
-        return "_jsonToYAML"
+    cli_name = "_jsonToYAML"
 
     async def run(self) -> None:
         data = sys.stdin.buffer.read()
@@ -967,33 +920,35 @@ class JsonToYaml(EknCommand):
         sys.stdout.write(to_yaml(value))
 
 
-class Ekn(EknCommand):
+class Ekn(AttrCommand):
     """easykubenix CLI — evaluate Nix and manage GitOps release branches."""
 
-    subcommand: (
-        Deploy
-        | Eval
-        | Render
-        | Diff
-        | Commit
-        | Rollback
-        | Validate
-        | KubeApply
-        | ClusterDiff
-        | PushCache
-        | SplitManifest
-        | ApplyManifest
-        | YamlToJson
-        | JsonToYaml
-        | None
-    ) = None
-    file: _Path | None = arg(None, short="f", help="Nix file to evaluate.")
-    flake: str | None = arg(
-        None, help="Flake reference (e.g. '.#myconfig'). Evaluates outputs.eknConfig.<system>.<attr>."
+    # **One tuple, and the order is the order `ekn --help` prints.** It used
+    # to be a union annotation, because clypi read the type of a `subcommand`
+    # field to find what it could mount.
+    subcommands = (
+        Deploy,
+        Eval,
+        Render,
+        Diff,
+        Commit,
+        Rollback,
+        Validate,
+        KubeApply,
+        ClusterDiff,
+        PushCache,
+        SplitManifest,
+        ApplyManifest,
+        YamlToJson,
+        JsonToYaml,
     )
-    attr: str | None = arg(None, short="A", help="Dot-separated attribute path within the evaluation result.")
 
     async def run(self) -> None:
+        """Evaluate the named entry point, the way `ekn eval` does.
+
+        The root takes `--file`/`--flake` itself, so `ekn -f app.nix -A web` is
+        a whole command. A caller who names neither has asked for the help.
+        """
         if self.file is None and self.flake is None:
             self.print_help()
         result = await _evaluate(self.file, self.flake, self.attr)
@@ -1001,7 +956,24 @@ class Ekn(EknCommand):
         sys.stdout.write("\n")
 
 
+def parse(argv: Sequence[str]) -> Command:
+    """The command that *argv* names, built and ready to run.
+
+    What `main` does, without running anything. A test drives the real parser
+    through this rather than a double, so a change to a declaration is a change
+    the test sees.
+    """
+    parser = build_parser(Ekn)
+    return dispatch(parser, parser.parse_args(list(argv)))
+
+
 def main() -> None:
+    # **The parse comes first, and the set-up after it.** A shell completion
+    # and `--help` both end inside this function, and neither needs a logger or
+    # a traceback handler.
+    parser = build_parser(Ekn)
+    complete(parser)
+    command = dispatch(parser, parser.parse_args())
     rich.traceback.install(show_locals=True)
     structlog.configure(
         processors=[
@@ -1010,5 +982,4 @@ def main() -> None:
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
         cache_logger_on_first_use=True,
     )
-    cli = Ekn.parse()
-    cli.start()
+    asyncio.run(command.run())
