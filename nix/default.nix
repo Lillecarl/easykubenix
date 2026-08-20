@@ -52,6 +52,57 @@ let
         touch "$out"
       '';
 
+  # **The completion scripts the package installs, and the answer they get.**
+  #
+  # Two questions, and one derivation answers both. The first is whether the
+  # three files are there at all: `mkApp` renders them only when it is asked to
+  # (`completions = true` in ../default.nix), and a package that quietly stops
+  # installing them reports nothing -- the shell simply offers file names
+  # again. The second is whether the program still speaks the protocol behind
+  # them, which is what the scripts assume and cannot check.
+  #
+  # The protocol is the whole of the second command below. `_ARGCOMPLETE` says
+  # this run is a completion, `COMP_LINE` and `COMP_POINT` carry the line and
+  # the cursor, and the answer comes back on file descriptor 8 -- so stdout can
+  # hold anything and a completion still works. `_ARGCOMPLETE_IFS` separates
+  # the candidates, and one space is enough for a line with one answer.
+  #
+  # `tests/test_cli_completion.py` covers what `ekn` offers for many more
+  # lines, in-process. It cannot cover this: the `ekn` on the dev shell's PATH
+  # is the venv's own console script, not the installed application, and the
+  # `share/` tree only exists here.
+  ekn-completions =
+    pkgs.runCommand "easykubenix-check-ekn-completions"
+      {
+        ekn = root.passthru.ekn;
+      }
+      ''
+        for file in \
+          share/bash-completion/completions/ekn.bash \
+          share/zsh/site-functions/_ekn \
+          share/fish/vendor_completions.d/ekn.fish
+        do
+          if [ ! -s "$ekn/$file" ]; then
+            echo "the package installs no $file"
+            exit 1
+          fi
+          grep -q _ARGCOMPLETE "$ekn/$file" || { echo "$file names no _ARGCOMPLETE"; exit 1; }
+          grep -q '8>&1' "$ekn/$file" || { echo "$file reads no file descriptor 8"; exit 1; }
+        done
+
+        got=$(
+          _ARGCOMPLETE=1 _ARGCOMPLETE_IFS=' ' _ARGCOMPLETE_SHELL=bash \
+          COMP_LINE='ekn depl' COMP_POINT=8 COMP_TYPE=9 \
+          "$ekn/bin/ekn" 8>&1 9>/dev/null 1>/dev/null 2>/dev/null
+        )
+        if [ "$got" != 'deploy ' ]; then
+          echo "a completion of 'ekn depl' answered '$got', not 'deploy '"
+          exit 1
+        fi
+
+        touch "$out"
+      '';
+
   # Every `.nix` file in the repository, and nothing else. The filter names
   # what to *drop* rather than what to keep, so a directory added later is
   # covered without anyone remembering to list it -- a formatting gate that
@@ -86,7 +137,12 @@ let
   '';
 in
 {
-  inherit root ekn-sandbox nixfmt;
+  inherit
+    root
+    ekn-sandbox
+    ekn-completions
+    nixfmt
+    ;
   inherit (examples) packages;
 
   shell = pkgs.python3Packages.callPackage ./shell.nix {
@@ -94,7 +150,7 @@ in
   };
 
   checks = examples.checks // {
-    inherit ekn-sandbox nixfmt;
+    inherit ekn-sandbox ekn-completions nixfmt;
     # `all` is what CI builds, so a gate that is not in it is a gate that does
     # not run. ../docs/examples/default.nix builds its own `all` over the
     # examples; this one is that plus everything added here.
@@ -102,6 +158,7 @@ in
       checks = [
         examples.checks.all
         ekn-sandbox
+        ekn-completions
         nixfmt
       ];
     } "printf '%s\\n' $checks > $out";
