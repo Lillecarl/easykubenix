@@ -181,7 +181,7 @@ def _with_discriminator_label(spec: Manifest, label: str, value: str) -> Manifes
     return labeled
 
 
-async def _wait_established(crd: APIObject, timeout: float) -> None:
+async def _wait_established(crd: APIObject, seconds: float) -> None:
     """Wait for one CRD to report Established, tolerating a status that is not there yet.
 
     `kr8s`' own `wait` reads `.status.conditions` and hands it to
@@ -198,25 +198,37 @@ async def _wait_established(crd: APIObject, timeout: float) -> None:
     barriers before it already in the cluster.
 
     Retrying is the whole fix: the next read finds a status. Only
-    `TypeError` is swallowed, and only until the deadline the caller
-    already asked for, so a CRD that genuinely never establishes still
-    fails rather than spinning.
+    `TypeError` is swallowed, and only until the deadline, so a CRD that
+    genuinely never establishes still fails rather than spinning.
+
+    **`asyncio.timeout`, and not a `timeout=` argument.** This used to do the
+    arithmetic itself -- a deadline, and what is left of it on each turn --
+    and hand the remainder to `kr8s`' `wait`. One context manager bounds the
+    whole loop instead, the sleeps between the retries as well as the watch
+    inside them. It also keeps a float away from that `wait`, which annotates
+    its own `timeout` as `int | None` although the `async_wait` under it takes
+    `int | float | None`.
+
+    *seconds*, and not *timeout*: the value is the argument of the context
+    manager below, not a deadline this function passes on to something else.
+    `ASYNC109` reads the name, and the name it warns about means the second
+    thing.
     """
-    deadline = asyncio.get_running_loop().time() + timeout
-    while True:
-        remaining = deadline - asyncio.get_running_loop().time()
-        if remaining <= 0:
-            msg = f"CRD {crd.name} did not become Established within {timeout}s"
-            raise TimeoutError(msg)
-        try:
-            await crd.wait("condition=Established", timeout=remaining)
-        except TypeError:
-            # No status yet. Let the controller get there rather than
-            # hammering the API server, then look again.
-            _log.debug("CRD has no status yet, retrying", name=crd.name)
-            await asyncio.sleep(0.5)
-            continue
-        return
+    try:
+        async with asyncio.timeout(seconds):
+            while True:
+                try:
+                    await crd.wait("condition=Established")
+                except TypeError:
+                    # No status yet. Let the controller get there rather than
+                    # hammering the API server, then look again.
+                    _log.debug("CRD has no status yet, retrying", name=crd.name)
+                    await asyncio.sleep(0.5)
+                    continue
+                return
+    except TimeoutError as exc:
+        msg = f"CRD {crd.name} did not become Established within {seconds}s"
+        raise TimeoutError(msg) from exc
 
 
 async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt, see TODO.md

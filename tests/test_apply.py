@@ -3,10 +3,11 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Any
 
+import anyio
 import pytest
 from kr8s.asyncio.objects import new_class
 
-from ekn.apply import apply_and_prune
+from ekn.apply import _wait_established, apply_and_prune
 
 
 @pytest.fixture(scope="module")
@@ -130,3 +131,56 @@ class TestApplyAndPrune:
         await apply_and_prune([spec], api=api, discriminator="full")  # type: ignore[arg-type]
 
         assert api.deleted == [("argocd", "verticalpodautoscaler", "long-gone")]
+
+
+class FakeCrd:
+    """A CRD that raises kr8s' race for the first *failures* reads.
+
+    `kr8s.APIObject.wait` reads `.status.conditions` and iterates it. A CRD
+    the API server has accepted but has not given a status yet has none, so
+    the call raises `TypeError: 'NoneType' object is not iterable`. That is
+    the race `_wait_established` retries around.
+    """
+
+    def __init__(self, failures: int, *, ever_establishes: bool = True) -> None:
+        self.name = "applicationsets.argoproj.io"
+        self.failures = failures
+        self.ever_establishes = ever_establishes
+        self.calls = 0
+
+    async def wait(self, conditions: str) -> None:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise TypeError("'NoneType' object is not iterable")
+        if not self.ever_establishes:
+            await anyio.sleep(3600)
+
+
+class TestWaitEstablished:
+    async def test_a_status_that_arrives_late_is_waited_out(self) -> None:
+        crd = FakeCrd(failures=2)
+
+        await _wait_established(crd, 5)  # type: ignore[arg-type] -- a stand-in for kr8s' APIObject
+
+        assert crd.calls == 3
+
+    async def test_a_crd_that_never_establishes_fails_with_its_name(self) -> None:
+        """The deadline bounds the retries and the watch inside them together.
+
+        `asyncio.timeout` raises a bare `TimeoutError`, so `_wait_established`
+        replaces it with one that names the CRD and the deadline.
+        """
+        crd = FakeCrd(failures=0, ever_establishes=False)
+
+        with pytest.raises(TimeoutError, match=r"applicationsets\.argoproj\.io did not become Established within"):
+            await _wait_established(crd, 0.05)  # type: ignore[arg-type] -- see above
+
+    async def test_a_retry_storm_cannot_outlive_the_deadline(self) -> None:
+        """A status that never arrives is bounded too, not only a watch that
+        never returns. The retries and the sleeps between them run inside the
+        one `asyncio.timeout`, so both count against the same deadline.
+        """
+        crd = FakeCrd(failures=1_000_000)
+
+        with pytest.raises(TimeoutError):
+            await _wait_established(crd, 0.05)  # type: ignore[arg-type] -- see above
