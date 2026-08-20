@@ -6,7 +6,10 @@ build-backend = "hatchling.build"
 name = "ekn"
 version = "0.1.0"
 description = "easykubenix CLI"
-requires-python = ">=3.10"
+# `3.13`, which is what this program really needs. `nanopynix` below asks for
+# the same, and `ruff.toml` targets it. The floor said `3.10` while the source
+# already used `typing.override` and `type X = ...`, both of which are 3.12.
+requires-python = ">=3.13"
 authors = [{ name = "easykubenix contributors" }]
 dependencies = [
   "nanopynix",
