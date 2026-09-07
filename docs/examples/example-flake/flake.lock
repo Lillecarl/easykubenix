@@ -1,25 +1,8 @@
 {
   "nodes": {
-    "adios": {
-      "locked": {
-        "lastModified": 1772186395,
-        "narHash": "sha256-NshyMZYZwjKMLKEX0eDf9Fcekq8MFNFk02wW5knzlZU=",
-        "owner": "adisbladis",
-        "repo": "adios",
-        "rev": "6a54071689ec9ec784a16e4eec8ddb864eca2982",
-        "type": "github"
-      },
-      "original": {
-        "owner": "adisbladis",
-        "repo": "adios",
-        "type": "github"
-      }
-    },
     "easykubenix": {
       "inputs": {
-        "adios": "adios",
-        "flake-compatish": "flake-compatish",
-        "nanopynix": "nanopynix",
+        "nixidae": "nixidae",
         "nixpkgs": "nixpkgs"
       },
       "locked": {
@@ -32,106 +15,29 @@
       },
       "parent": []
     },
-    "flake-compatish": {
+    "nixidae": {
+      "flake": false,
       "locked": {
-        "lastModified": 1783984082,
-        "narHash": "sha256-A7Xl565OqEU7VCqq1hEBw5AzOTicFttZggJnA17tpSU=",
-        "owner": "lillecarl",
-        "repo": "flake-compatish",
-        "rev": "30cb7674c79484293588da00f39e6cd5eb36865c",
+        "lastModified": 1788772676,
+        "narHash": "sha256-F+RevXacBl5/sGLyAASGZytVScAxC6qmbtdWT9w4vIU=",
+        "owner": "nixidae",
+        "repo": "nixidae",
+        "rev": "8f7bf6c1a42eeaa730c49084a8651195c264a553",
         "type": "github"
       },
       "original": {
-        "owner": "lillecarl",
-        "repo": "flake-compatish",
-        "type": "github"
-      }
-    },
-    "flake-compatish_2": {
-      "locked": {
-        "lastModified": 1783984082,
-        "narHash": "sha256-A7Xl565OqEU7VCqq1hEBw5AzOTicFttZggJnA17tpSU=",
-        "owner": "lillecarl",
-        "repo": "flake-compatish",
-        "rev": "30cb7674c79484293588da00f39e6cd5eb36865c",
-        "type": "github"
-      },
-      "original": {
-        "owner": "lillecarl",
-        "repo": "flake-compatish",
-        "type": "github"
-      }
-    },
-    "flake-compatish_3": {
-      "locked": {
-        "lastModified": 1783975188,
-        "narHash": "sha256-GH6Z1/0LXbQ6tKEWwpeVfrWvWvCJhte8B6yTQMMtIfQ=",
-        "owner": "lillecarl",
-        "repo": "flake-compatish",
-        "rev": "1a139e919618779b02154f8b9f05d5346a0aabf1",
-        "type": "github"
-      },
-      "original": {
-        "owner": "lillecarl",
-        "repo": "flake-compatish",
-        "type": "github"
-      }
-    },
-    "grpclib-transports": {
-      "inputs": {
-        "flake-compatish": "flake-compatish_3",
-        "nixpkgs": [
-          "easykubenix",
-          "nanopynix",
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1783975976,
-        "narHash": "sha256-LlzY7q2yOR9NJ/VGnIE1R3ZF0VrB6P5EncJNqBz9AgM=",
-        "owner": "lillecarl",
-        "repo": "grpclib-transports",
-        "rev": "d7544b9dec34ab5098368c70bf2522db62bed159",
-        "type": "github"
-      },
-      "original": {
-        "owner": "lillecarl",
-        "repo": "grpclib-transports",
-        "type": "github"
-      }
-    },
-    "nanopynix": {
-      "inputs": {
-        "flake-compatish": "flake-compatish_2",
-        "grpclib-transports": "grpclib-transports",
-        "nixpkgs": [
-          "easykubenix",
-          "nixpkgs"
-        ],
-        "pyproject-nix": "pyproject-nix"
-      },
-      "locked": {
-        "lastModified": 1784144293,
-        "narHash": "sha256-twrMfc9grf4u+WvZj8mNHsRAzmGw1eqyvfq6b+rXJgM=",
-        "owner": "lillecarl",
-        "repo": "nanopynix",
-        "rev": "e0aed895c92b72e31d7c43cee782053058c9066f",
-        "type": "github"
-      },
-      "original": {
-        "owner": "lillecarl",
-        "ref": "develop",
-        "repo": "nanopynix",
+        "owner": "nixidae",
+        "repo": "nixidae",
         "type": "github"
       }
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1784115452,
-        "narHash": "sha256-BoYPdqk6jlKXy+DyUzyGV/CtRGfAhk2MmIgBhsemTGI=",
+        "lastModified": 1788746152,
+        "narHash": "sha256-RaKngusl5I8pNi8RfrVvsHq3NZe7eFWzDlb01+hEVqY=",
         "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "35d3407a3816f3b341d8cf1d60abaf2b7b8166ac",
+        "rev": "42f17a57f4f6e33b3de3dca0a2a5ea5233169d02",
         "type": "github"
       },
       "original": {
@@ -154,28 +60,6 @@
         "owner": "nixos",
         "ref": "nixpkgs-unstable",
         "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
-    "pyproject-nix": {
-      "inputs": {
-        "nixpkgs": [
-          "easykubenix",
-          "nanopynix",
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1782905613,
-        "narHash": "sha256-SvXJcAemihifkTn4BGvyE5K1FJX9bl4U8DQ5pqKvD0s=",
-        "owner": "pyproject-nix",
-        "repo": "pyproject.nix",
-        "rev": "7af23cfe91064865ecf2e835da28b45b3c6f49fd",
-        "type": "github"
-      },
-      "original": {
-        "owner": "pyproject-nix",
-        "repo": "pyproject.nix",
         "type": "github"
       }
     },
