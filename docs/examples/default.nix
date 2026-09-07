@@ -22,10 +22,18 @@
 let
   inherit (pkgs) lib;
 
+  # The entry point, with the sources already bound.
+  #
+  # Each of the seven examples calls this with `pkgs` and `modules` and
+  # nothing else. Without this it would fall back to nix/sources.nix, which
+  # finds the umbrella by an impure fetch, and a flake evaluation of these
+  # gates would fail on it.
+  ekn = args: easykubenix (args // { inherit sources; });
+
   # The extended `pkgs`, whose `lib` also holds easykubenix' own helpers such
   # as `mkNamedList`. It is under `passthru`, not at the top level.
   eknPkgs =
-    (easykubenix {
+    (ekn {
       inherit pkgs;
       modules = [ ];
     }).passthru.pkgs;
@@ -44,7 +52,8 @@ let
     name:
     import ./${name} {
       pkgs = eknPkgs;
-      inherit lib easykubenix;
+      inherit lib;
+      easykubenix = ekn;
     }
   );
 

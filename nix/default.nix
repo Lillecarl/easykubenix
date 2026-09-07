@@ -13,7 +13,7 @@ let
   # nanopynix' exported development environment. See shell.nix.
   nanopynix = import sources.nanopynix { inherit pkgs sources; };
 
-  root = import ../default.nix { inherit pkgs; };
+  root = import ../default.nix { inherit pkgs sources; };
 
   # The gates over the doc examples. Plain derivations, so they build from a
   # bare `import` -- see ../checks.nix for the entry point CI uses, and
