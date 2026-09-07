@@ -56,8 +56,8 @@ async def test_helm_fod_hash_mismatch_is_discovered_and_inserted(tmp_path: Path,
     nix_file = tmp_path / "helm-fod.nix"
     nix_file.write_text(f"""
     let
-      compat = import {PROJECT_ROOT}/nix/compat.nix;
-      pkgs = import compat.inputs.nixpkgs {{ }};
+      sources = import {PROJECT_ROOT}/nix/sources.nix;
+      pkgs = import sources.nixpkgs {{ }};
       fetchHelm = pkgs.callPackage {PROJECT_ROOT}/easykubenix/pkgs/fetchHelm.nix {{ }};
     in
     fetchHelm {{

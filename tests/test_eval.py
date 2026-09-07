@@ -56,12 +56,12 @@ class TestSimpleEval:
 
 class TestRealiseAttr:
     async def test_builds_and_returns_store_path(self, tmp_path: Path) -> None:
-        compat_path = PROJECT_ROOT / "nix/compat.nix"
+        sources_path = PROJECT_ROOT / "nix/sources.nix"
         f = tmp_path / "drv.nix"
         f.write_text(f"""
             let
-              compat = import {compat_path};
-              pkgs = import compat.inputs.nixpkgs {{ }};
+              sources = import {sources_path};
+              pkgs = import sources.nixpkgs {{ }};
             in
             {{ thing = pkgs.writeText "ekn-realise-test" "hello from ekn"; }}
         """)
@@ -237,10 +237,7 @@ class TestEknModule:
     async def test_generated_by_path(self, ekn_root: str) -> None:
         nix = f"""
         let
-          compat = import {ekn_root}/nix/compat.nix;
-          pkgs = import compat.inputs.nixpkgs {{}};
           easy = import {ekn_root} {{
-            inherit pkgs;
             modules = [{{
               kubernetes.objects.default.ConfigMap.test = {{ data.key = "hello"; }};
             }}];
@@ -263,10 +260,7 @@ class TestEknModule:
     async def test_manifest_yaml_list(self, ekn_root: str) -> None:
         nix = f"""
         let
-          compat = import {ekn_root}/nix/compat.nix;
-          pkgs = import compat.inputs.nixpkgs {{}};
           easy = import {ekn_root} {{
-            inherit pkgs;
             modules = [{{
               kubernetes.objects.default.ConfigMap.test = {{ data.key = "hello"; }};
             }}];
