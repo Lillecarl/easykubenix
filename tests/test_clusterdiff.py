@@ -52,11 +52,15 @@ class FakeApi:
             raise result
         yield _FakeResponse(result)
 
-    async def async_lookup_kind(self, lookup: str) -> tuple[str, str, bool]:
-        # Mirrors kr8s's own async_lookup_kind: raises ValueError for a
-        # kind it can't resolve to a plural/namespaced REST endpoint (e.g.
-        # a CRD that hasn't been applied to the cluster yet).
-        raise ValueError(f"Kind {lookup.split('.', 1)[0].lower()} not found.")
+    # An API server that serves nothing but the built-in core kinds. That is
+    # what `ekn.apply.discover` reads, and a kind absent from it is exactly the
+    # case this file is about: a CRD nobody has applied to the cluster yet.
+    # `discover` then raises ValueError, which `cluster_diff` reports.
+    async def async_api_resources(self) -> list[dict[str, Any]]:
+        return []
+
+    async def async_api_resources_uncached(self) -> list[dict[str, Any]]:
+        return []
 
 
 def _not_found() -> kr8s.ServerError:

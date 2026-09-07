@@ -7,7 +7,7 @@ import anyio
 import pytest
 from kr8s.asyncio.objects import new_class
 
-from ekn.apply import _wait_established, apply_and_prune
+from ekn.apply import _wait_established, apply_and_prune, discover
 
 
 @pytest.fixture(scope="module")
@@ -26,15 +26,22 @@ class _FakeResponse:
 class FakeApi:
     """Stands in for kr8s's real Api for `apply_and_prune` tests.
 
-    `async_get` is implemented directly (rather than going through kr8s's
-    real discovery/list machinery) so tests can control exactly what kind
-    string comes back on listed objects -- this is what reproduces kr8s's
-    real quirk (see apply.py's comment on the prune loop): for CRD kinds,
-    kr8s's own `async_get_kind` reassigns its `kind` argument via
-    `async_lookup_kind`'s `"singular.group/version"` return value, which
-    `new_class` then mis-splits on the first ".", so listed objects end up
-    with a lowercase `.kind` that differs from the PascalCase Kind used
-    when applying.
+    Two pieces of surface, and both are there to reproduce something real.
+
+    `async_api_resources` is what `ekn.apply.discover` reads, so a test can
+    describe a kind exactly as an API server would -- including one whose
+    singular is not the lowercased Kind, which is the case kr8s' own lookup
+    cannot resolve at all.
+
+    `async_get` is implemented directly rather than going through kr8s's list
+    machinery, so a test controls exactly what kind string comes back on a
+    listed object. That reproduces kr8s' other quirk (see apply.py's comment
+    on the prune loop): asked for a kind *by name*, `async_get_kind` reassigns
+    its argument to `async_lookup_kind`'s `"singular.group/version"` string,
+    which `new_class` mis-splits on the first ".", so listed objects report a
+    lowercase `.kind` that differs from the PascalCase Kind used when
+    applying. `apply_and_prune` passes the class instead, which is why the
+    double accepts either.
     """
 
     namespace = "default"
@@ -44,11 +51,30 @@ class FakeApi:
         *,
         namespaced: bool = True,
         listed: list[tuple[str, str, str]] | None = None,
+        resources: list[dict[str, Any]] | None = None,
     ) -> None:
         self.namespaced = namespaced
         # (namespace, kind-as-reported-by-list, name) triples "already on
         # the cluster" under the discriminator label before this apply.
         self._listed = listed or []
+        # What the API server serves, in the shape `ekn.apply.discover` reads:
+        # one entry per (Kind, groupVersion), carrying the plural and whether
+        # the kind is namespaced. The default answers for the kind these tests
+        # apply; a test about a hyphenated singular passes its own.
+        self._resources = (
+            resources
+            if resources is not None
+            else [
+                {
+                    "version": "autoscaling.k8s.io/v1",
+                    "kind": "VerticalPodAutoscaler",
+                    "name": "verticalpodautoscalers",
+                    "singularName": "verticalpodautoscaler",
+                    "namespaced": namespaced,
+                }
+            ]
+        )
+        self.uncached_reads = 0
         self.deleted: list[tuple[str, str, str]] = []
         self.patched: list[tuple[str, str, str]] = []
 
@@ -71,13 +97,21 @@ class FakeApi:
         self.patched.append((namespace or "none", body["kind"], body["metadata"]["name"]))
         yield _FakeResponse(body)
 
-    async def async_lookup_kind(self, lookup: str) -> tuple[str, str, bool]:
-        kind = lookup.split(".", 1)[0]
-        return (kind.lower(), kind.lower() + "s", self.namespaced)
+    async def async_api_resources(self) -> list[dict[str, Any]]:
+        return self._resources
 
-    def async_get(self, kind: str, *, namespace: Any, label_selector: Any):
+    async def async_api_resources_uncached(self) -> list[dict[str, Any]]:
+        self.uncached_reads += 1
+        return self._resources
+
+    def async_get(self, kind: str | type, *, namespace: Any, label_selector: Any):
+        # `apply_and_prune` passes the class it applied through, so that kr8s
+        # never has to look a kind up by name. A `prune_kinds` entry has no
+        # class and arrives as a string.
+        wanted = kind.kind if isinstance(kind, type) else kind
+
         async def _gen():
-            reported_kind = kind.lower() if kind[0].isupper() else kind
+            reported_kind = wanted.lower() if wanted[0].isupper() else wanted
             for ns, listed_kind, name in self._listed:
                 if listed_kind.lower() != reported_kind.lower():
                     continue
@@ -97,6 +131,89 @@ class FakeApi:
                 yield obj
 
         return _gen()
+
+
+class TestDiscover:
+    """Resolving a custom kind against the API server's discovery document.
+
+    The whole reason `ekn.apply.discover` exists rather than calling kr8s'
+    `Api.async_lookup_kind`: that lowercases the Kind and then compares it to a
+    resource's plural, Kind, singular and short names, so a CRD whose singular
+    is not the lowercased Kind matches nothing at all.
+    """
+
+    # The multus CRD, which is where this was found. Its singular carries
+    # hyphens, so the lowercased Kind -- "networkattachmentdefinition" --
+    # equals neither the plural, nor the Kind, nor the singular.
+    MULTUS = {
+        "version": "k8s.cni.cncf.io/v1",
+        "kind": "NetworkAttachmentDefinition",
+        "name": "network-attachment-definitions",
+        "singularName": "network-attachment-definition",
+        "namespaced": True,
+    }
+
+    # KubeVirt's, for contrast. Its singular *is* the lowercased Kind, so it
+    # resolved under the old lookup and still has to resolve under this one.
+    # The pair is the point: the fix identifies a kind exactly, rather than
+    # widening a match until the broken case slips through.
+    KUBEVIRT = {
+        "version": "kubevirt.io/v1",
+        "kind": "VirtualMachineInstance",
+        "name": "virtualmachineinstances",
+        "singularName": "virtualmachineinstance",
+        "namespaced": True,
+    }
+
+    async def test_resolves_a_kind_whose_singular_is_not_the_lowercased_kind(self) -> None:
+        api = FakeApi(resources=[self.MULTUS, self.KUBEVIRT])
+
+        plural, namespaced = await discover(api, "NetworkAttachmentDefinition", "k8s.cni.cncf.io/v1")  # type: ignore[arg-type]
+
+        assert plural == "network-attachment-definitions"
+        assert namespaced is True
+
+    async def test_resolves_a_kind_whose_singular_is_the_lowercased_kind(self) -> None:
+        api = FakeApi(resources=[self.MULTUS, self.KUBEVIRT])
+
+        plural, namespaced = await discover(api, "VirtualMachineInstance", "kubevirt.io/v1")  # type: ignore[arg-type]
+
+        assert plural == "virtualmachineinstances"
+        assert namespaced is True
+
+    async def test_matches_on_the_group_version_too(self) -> None:
+        """Two groups can serve the same Kind. The manifest names both fields,
+        so both have to agree."""
+        api = FakeApi(resources=[self.MULTUS])
+
+        with pytest.raises(ValueError, match="k8s.cni.cncf.io/v1alpha1"):
+            await discover(api, "NetworkAttachmentDefinition", "k8s.cni.cncf.io/v1alpha1")  # type: ignore[arg-type]
+
+    async def test_reads_discovery_again_when_the_cache_does_not_have_the_kind(self) -> None:
+        """A CRD an earlier barrier created is not in a cache filled before it
+        existed, so a miss has to reach the API server before giving up."""
+        api = FakeApi(resources=[self.MULTUS])
+
+        await discover(api, "NetworkAttachmentDefinition", "k8s.cni.cncf.io/v1")  # type: ignore[arg-type]
+        assert api.uncached_reads == 0
+
+        with pytest.raises(ValueError, match="Missing"):
+            await discover(api, "Missing", "example.com/v1")  # type: ignore[arg-type]
+        assert api.uncached_reads == 1
+
+    async def test_applies_a_custom_resource_of_a_hyphenated_kind(self) -> None:
+        """End to end through `apply_and_prune`, which is where it failed:
+        the apply died on the CR seconds after waiting for its own CRD."""
+        spec = {
+            "apiVersion": "k8s.cni.cncf.io/v1",
+            "kind": "NetworkAttachmentDefinition",
+            "metadata": {"name": "dynhetz", "namespace": "kube-system"},
+        }
+        api = FakeApi(resources=[self.MULTUS])
+
+        await apply_and_prune([spec], api=api, discriminator="full", prune=False)  # type: ignore[arg-type]
+
+        assert api.patched == [("kube-system", "NetworkAttachmentDefinition", "dynhetz")]
 
 
 class TestApplyAndPrune:

@@ -77,12 +77,51 @@ def barriers(
     return [grouped[priority] for priority in sorted(grouped)]
 
 
+async def discover(api: Api, kind: str, api_version: str) -> tuple[str, bool]:
+    """The plural name and the namespaced-ness of one kind, from the API
+    server's own discovery document.
+
+    **Not `api.async_lookup_kind`.** That takes a `"Kind.group"` string, puts
+    it through kr8s' `parse_kind` -- which lowercases it -- and then matches
+    the result against each resource's plural, its Kind, its singular and its
+    short names. A CustomResourceDefinition whose singular is not simply the
+    Kind in lower case matches none of the four:
+    `NetworkAttachmentDefinition` becomes `networkattachmentdefinition`, while
+    the resource offers `network-attachment-definitions`,
+    `NetworkAttachmentDefinition` and `network-attachment-definition`. The
+    apply then dies with `ValueError: Kind networkattachmentdefinition not
+    found`, seconds after waiting for that very CRD to become Established.
+
+    Most CRDs name their singular as the lowercased Kind -- `prometheusrule`,
+    `verticalpodautoscaler` -- which is why this went unseen for so long. A
+    hyphenated singular is legal and common in the CNI ecosystem.
+
+    A manifest carries the two fields that identify a resource exactly, so
+    those are what this matches on, and nothing here changes their case.
+
+    The second read is the other half. kr8s caches discovery for six hours,
+    because kubectl does, and a CRD an earlier barrier of this same apply
+    created is not in a cache filled before it existed. The uncached read only
+    happens when the cached answer misses, so an apply that introduces no new
+    kind still costs one discovery.
+    """
+    for fetch in (api.async_api_resources, api.async_api_resources_uncached):
+        # kr8s.Api's discovery methods have no upstream return annotation.
+        for resource in await fetch():  # pyright: ignore[reportUnknownVariableType] -- kr8s Api discovery methods are unannotated upstream
+            if resource.get("kind") == kind and resource.get("version") == api_version:
+                return resource["name"], resource["namespaced"]
+    msg = (
+        f"the API server serves no {kind} in {api_version}. "
+        "A CustomResourceDefinition that establishes it has to be applied first."
+    )
+    raise ValueError(msg)
+
+
 async def build_object(spec: Manifest, api: Api) -> APIObject:
     """Turn a raw manifest dict into a kr8s APIObject, resolving plural/
     namespaced-ness for kinds kr8s doesn't have a builtin class for (i.e.
-    almost every CRD) against the live API server's own discovery info --
-    the same mechanism kr8s's own `Api.async_get` uses, rather than
-    guessing a plural by string mangling.
+    almost every CRD) against the live API server's own discovery info,
+    rather than guessing a plural by string mangling.
     """
     kind = spec["kind"]
     if not isinstance(kind, str):
@@ -93,11 +132,7 @@ async def build_object(spec: Manifest, api: Api) -> APIObject:
     try:
         cls = get_class(kind, api_version)
     except KeyError:
-        group = api_version.split("/", 1)[0] if "/" in api_version else None
-        lookup = f"{kind}.{group}" if group else kind
-        # kr8s.Api.async_lookup_kind's `kind` parameter has no upstream type
-        # annotation, so pyright can't resolve the member's own type fully.
-        _, plural, namespaced = await api.async_lookup_kind(lookup)  # pyright: ignore[reportUnknownMemberType] -- kr8s async_lookup_kind's kind param has no upstream type annotation
+        plural, namespaced = await discover(api, kind, api_version)
         cls = new_class(kind, api_version, namespaced=namespaced, plural=plural)
     return cls(spec, api=api)
 
@@ -270,6 +305,9 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     resource_priority = resource_priority or {}
     desired_keys: set[tuple[str, str, str]] = set()
     kinds: set[str] = set()
+    # The class each kind was applied through, kept for the prune scan. See
+    # the loop at the end for what passing it rather than a name buys.
+    classes: dict[str, type[APIObject]] = {}
 
     # Progress is logged at INFO per barrier, not per object. An apply of a few
     # hundred objects otherwise runs completely silently for minutes -- every
@@ -286,6 +324,7 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
             applied.append(obj)
             desired_keys.add(_object_key(obj))
             kinds.add(obj.kind)
+            classes.setdefault(obj.kind, type(obj))
             _log.debug("applied", kind=obj.kind, namespace=obj.namespace, name=obj.name)
 
         crds = [obj for obj in applied if obj.kind == "CustomResourceDefinition"]
@@ -300,23 +339,34 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     scan_kinds = kinds | (prune_kinds or set())
     _log.info("pruning", kinds=len(scan_kinds), discriminator=discriminator)
     for kind in scan_kinds:
+        # The class, when this apply built one. `async_get` takes either, and
+        # a name sends it through `async_lookup_kind` -- the lowercasing lookup
+        # `discover` above exists to avoid, which fails outright on a CRD whose
+        # singular is not the lowercased Kind, and which otherwise hands back a
+        # `"singular.group/version"` string that `new_class` mis-splits so that
+        # every listed object reports a lowercase `.kind`.
+        #
+        # `prune_kinds` names kinds this apply did not touch, so those have no
+        # class and stay strings.
+        target: str | type[APIObject] = classes.get(kind, kind)
         # kr8s.Api.async_get's `label_selector`/`field_selector` params and its
         # `APIObject | dict` yield type are both bare-`dict`/unannotated
         # upstream, so pyright can't resolve the member or the loop variable.
         async for obj in api.async_get(  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType] -- kr8s Api.async_get's selector params and yield type are unannotated upstream
-            kind,
+            target,
             namespace=kr8s.ALL,
             label_selector={discriminator_label: discriminator},
         ):
             if not isinstance(obj, APIObject):
                 continue
-            # Not `_object_key(obj)`: for CRD kinds (no static kr8s class),
-            # `api.async_get`'s own internal `async_lookup_kind` call
-            # reassigns its `kind` param to a `"singular.group/version"`
-            # string, which `new_class` then mis-splits on the first "." --
-            # the listed object's `.kind` ends up as the lowercase singular
-            # name (e.g. "verticalpodautoscaler"), not the PascalCase Kind
-            # (e.g. "VerticalPodAutoscaler") `desired_keys` was built from
+            # Not `_object_key(obj)`. Passing the class above keeps `.kind`
+            # right for every kind this apply touched, but a `prune_kinds`
+            # name still goes through `async_lookup_kind`, which reassigns its
+            # `kind` param to a `"singular.group/version"` string that
+            # `new_class` mis-splits on the first "." -- the listed object's
+            # `.kind` ends up as the lowercase singular name (e.g.
+            # "verticalpodautoscaler"), not the PascalCase Kind (e.g.
+            # "VerticalPodAutoscaler") `desired_keys` was built from
             # while applying. Use the loop's own `kind` (identical to what
             # `_object_key` used at apply time) instead of trusting the
             # listed object's mangled one -- otherwise every CRD-based
@@ -336,5 +386,6 @@ __all__ = [
     "apply_one",
     "barriers",
     "build_object",
+    "discover",
     "ssa_apply",
 ]
