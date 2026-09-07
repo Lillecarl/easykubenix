@@ -18,6 +18,12 @@
   `Application` that needs them). A separate script because
   `kubernetes.generated` excludes a GitOps target's submodule objects by
   design, so the gate above can never cover them.
+- `nix build --file ./checks.nix kubeapply` — the apply gate. It boots a
+  single-node kubeadm cluster under User-Mode Linux and runs
+  `ekn _applyManifest` inside it, so it answers what the two gates above
+  cannot: whether a CRD becomes Established, whether a workload runs, and
+  what a prune deletes. Also outside `checks.all`, because a control plane is
+  minutes of CPU. Run it when you touch `ekn.apply`. See `nix/kubeapply`.
 
 Every `.nix` file is nixfmt'd, and `checks.nixfmt` enforces it over the whole
 tree — it filters the repository down to `*.nix` by dropping dot-directories,

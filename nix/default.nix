@@ -105,6 +105,15 @@ let
         touch "$out"
       '';
 
+  # `ekn _applyManifest` against a real single-node kubeadm cluster, under
+  # User-Mode Linux. See ./kubeapply for what it asks and why the validation
+  # gate cannot ask it.
+  #
+  # Not in `all`. A control plane is minutes of CPU even without KVM, and CI
+  # builds `all` on every change; this is the gate you run when you touch
+  # `ekn.apply`.
+  kubeapply = import ./kubeapply { inherit pkgs lib sources; };
+
   # Every `.nix` file in the repository, and nothing else. The filter names
   # what to *drop* rather than what to keep, so a directory added later is
   # covered without anyone remembering to list it -- a formatting gate that
@@ -143,6 +152,7 @@ in
     root
     ekn-sandbox
     ekn-completions
+    kubeapply
     nixfmt
     ;
   inherit (examples) packages;
@@ -152,7 +162,12 @@ in
   };
 
   checks = examples.checks // {
-    inherit ekn-sandbox ekn-completions nixfmt;
+    inherit
+      ekn-sandbox
+      ekn-completions
+      kubeapply
+      nixfmt
+      ;
     # `all` is what CI builds, so a gate that is not in it is a gate that does
     # not run. ../docs/examples/default.nix builds its own `all` over the
     # examples; this one is that plus everything added here.
