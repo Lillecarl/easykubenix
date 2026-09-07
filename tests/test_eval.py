@@ -228,6 +228,21 @@ class TestEknModule:
         assert isinstance(result, list)
         assert result[0]["spec"]["containers"] == [{"name": "main", "image": "api:1"}]
 
+    async def test_a_kluctl_script_may_name_the_manifest(self) -> None:
+        # `kluctl.preDeployScript = "... ${config.internal.manifestJSONFile}"`
+        # is what you write to push a manifest before deploying it, and it
+        # used to make the whole configuration unevaluatable: the kluctl
+        # deprecation notice read the option's *priority*, which forces its
+        # value, closing a loop back through `kubernetes.generated`. nixkube
+        # writes exactly this and could not be evaluated at all.
+        #
+        # The notice is `lib.warn` on `kluctl.projectDir` now, so it fires
+        # when somebody builds a kluctl project rather than when the module
+        # system looks at a definition.
+        result = await evaluate_file(NIX_TEST_FILE, "kluctlScriptReadsManifest")
+        assert isinstance(result, list)
+        assert result[0]["kind"] == "ConfigMap"
+
     async def test_marker_in_crds_is_rejected(self) -> None:
         # kubernetes.crds goes around the type for speed, so nothing there
         # resolves a marker. Fail instead of writing `_type` into a manifest.

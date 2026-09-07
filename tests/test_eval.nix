@@ -299,8 +299,34 @@ let
       )
     ];
   };
+  # A deprecated `kluctl.*` option whose value names a rendered output.
+  # Pushing the manifest to a cache before deploying it is the obvious thing
+  # to write there, and nixkube does exactly this.
+  #
+  # It used to be impossible. The kluctl deprecation notice asked the module
+  # system which `kluctl.*` options a configuration had written, and reading a
+  # definition's priority forces its value -- so `manifestJSONFile` went
+  # through `kubernetes.generated`, `checked`, `warnings`, this priority and
+  # back to itself. `error: infinite recursion`, pointing at internal.nix and
+  # naming neither kluctl nor the option at fault.
+  easyKluctlScriptReadsManifest = import ../. {
+    inherit pkgs;
+    modules = [
+      (
+        { config, ... }:
+        {
+          kubernetes.objects.default.ConfigMap.test.data.key = "hello";
+          kluctl.preDeployScript = "echo ${config.internal.manifestJSONFile}";
+        }
+      )
+    ];
+  };
 in
 {
+  # Only that it evaluates. The notice itself is `lib.warn` on
+  # `kluctl.projectDir`, which nothing here forces.
+  kluctlScriptReadsManifest = easyKluctlScriptReadsManifest.config.kubernetes.generated;
+
   eknRouting = {
     inherit (easy.config.kubernetes) generatedByPath gitOpsTargets;
   };

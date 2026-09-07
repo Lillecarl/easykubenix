@@ -1,6 +1,5 @@
 {
   config,
-  options,
   pkgs,
   lib,
   ekn,
@@ -9,26 +8,39 @@
 let
   cfg = config.kluctl;
 
-  # The options a user writes by hand. `deployment`/`projectDir`/`script` are
-  # left out on purpose: kluctl.nix's own `config` block defines all three, so
-  # `isDefined` is true for them no matter what the user did, and warning on
-  # them would fire for everybody.
-  deprecatedUserOptions = [
-    "excludeGitopsTargets"
-    "files"
-    "package"
-    "postDeployScript"
-    "preDeployScript"
-    "project"
-  ];
-  # Not `isDefined`: the module system feeds an option's own `default` in as a
-  # definition at `mkOptionDefault` priority (1500), so `isDefined` is true for
-  # every option that has a default and the warning would fire for everyone.
-  # A definition written by a user comes in at 100, or 1000 via `mkDefault`.
-  optionDefaultPriority = (lib.mkOptionDefault null).priority;
-  definedDeprecated = lib.filter (
-    name: options.kluctl.${name}.highestPrio < optionDefaultPriority
-  ) deprecatedUserOptions;
+  # The notice, printed when something forces one of the two outputs below.
+  #
+  # **On use, and not on definition.** This used to read
+  # `options.kluctl.<name>.highestPrio` to find out which deprecated options a
+  # configuration had written. That closes a loop, because reading a priority
+  # forces the definition's *value*: `filterOverrides` asks every definition
+  # for `value._type` to see whether it is an `mkOverride`, and a string
+  # answers that question only by evaluating itself.
+  #
+  # So a `kluctl.preDeployScript` that names a rendered output -- pushing the
+  # manifest to a cache before deploying it, which is the obvious thing to
+  # write there -- went: `internal.manifestJSONFile` -> `kubernetes.generated`
+  # -> `checked` -> `warnings` -> this priority -> the script -> back to
+  # `manifestJSONFile`. The configuration died with `error: infinite
+  # recursion`, pointing at internal.nix, naming neither kluctl nor the option
+  # at fault. nixkube hit it and could not be evaluated at all.
+  #
+  # kubernetes.nix's `checked` documents the rule this broke: nothing that
+  # defines a warning may read a rendered output to build it. A priority looks
+  # like metadata and is not.
+  #
+  # `lib.warn` on the two outputs answers the same question later and cannot
+  # loop: it prints when a caller forces the value it wraps. A configuration
+  # that sets these options and never builds a kluctl project is not using
+  # kluctl, and now says nothing.
+  deprecation = ''
+    The kluctl integration is deprecated (easykubenix issue #2); it still
+    works but will be removed.
+
+    `ekn kubeapply` applies and prunes natively, using `ekn.resourcePriority`
+    for ordering and `ekn.discriminator` (or a GitOps target's own) for prune
+    scope.
+  '';
 
   # Objects routed (via kubernetes.gitOpsTargets / ekn.gitOpsTarget) to one of
   # cfg.excludeGitopsTargets already have their own deployment path -- an
@@ -139,19 +151,7 @@ in
     # kluctl either, so nothing in this repository consumes the generated
     # project. It keeps working; it just is not where new work goes.
     #
-    # Warn on definition rather than on use: there is no way to detect that
-    # something read `kluctl.projectDir`, but a config that sets any of these
-    # has made a deliberate choice worth flagging once.
-    warnings = lib.optional (definedDeprecated != [ ]) ''
-      The kluctl integration is deprecated (easykubenix issue #2); these options
-      still work but will be removed: ${
-        lib.concatMapStringsSep ", " (name: "kluctl.${name}") definedDeprecated
-      }.
-
-      `ekn kubeapply` applies and prunes natively, using `ekn.resourcePriority`
-      for ordering and `ekn.discriminator` (or a GitOps target's own) for prune
-      scope.
-    '';
+    # `projectDir` and `script` below carry the notice. See `deprecation`.
 
     kluctl.deployment = {
       deployments =
@@ -174,44 +174,48 @@ in
           }
         ];
     };
-    kluctl.projectDir = pkgs.writeMultipleFiles {
-      name = "kluctlProject";
-      files = {
-        ".templateignore" = {
-          content = ''
-            *.yaml
-            *.json
-          '';
-        };
-        ".kluctl.yaml" = {
-          content = builtins.toJSON config.kluctl.project;
-        };
-        "deployment.yaml" = {
-          content = builtins.toJSON config.kluctl.deployment;
-        };
-        # Don't apply prioritized resources again.
-        "default/easykubenix.yaml" = {
-          content = builtins.toJSON {
+    kluctl.projectDir = lib.warn deprecation (
+      pkgs.writeMultipleFiles {
+        name = "kluctlProject";
+        files = {
+          ".templateignore" = {
+            content = ''
+              *.yaml
+              *.json
+            '';
+          };
+          ".kluctl.yaml" = {
+            content = builtins.toJSON config.kluctl.project;
+          };
+          "deployment.yaml" = {
+            content = builtins.toJSON config.kluctl.deployment;
+          };
+          # Don't apply prioritized resources again.
+          "default/easykubenix.yaml" = {
+            content = builtins.toJSON {
+              apiVersion = "v1";
+              kind = "List";
+              items = lib.filter (
+                v: !lib.elem v.kind (lib.attrNames config.ekn.resourcePriority)
+              ) kluctlGenerated;
+            };
+          };
+        }
+        # Prioritized resources
+        // (lib.mapAttrs' (n: v: {
+          name = "prio-${toString v}/${n}.yaml";
+          value = builtins.toJSON {
             apiVersion = "v1";
             kind = "List";
-            items = lib.filter (
-              v: !lib.elem v.kind (lib.attrNames config.ekn.resourcePriority)
-            ) kluctlGenerated;
+            items = lib.filter (v: v.kind == n) kluctlGenerated;
           };
-        };
+        }) config.ekn.resourcePriority)
+        # Other user-supplied files
+        // cfg.files;
       }
-      # Prioritized resources
-      // (lib.mapAttrs' (n: v: {
-        name = "prio-${toString v}/${n}.yaml";
-        value = builtins.toJSON {
-          apiVersion = "v1";
-          kind = "List";
-          items = lib.filter (v: v.kind == n) kluctlGenerated;
-        };
-      }) config.ekn.resourcePriority)
-      # Other user-supplied files
-      // cfg.files;
-    };
+    );
+    # No `lib.warn` here. The script names `cfg.projectDir` below, so forcing
+    # it forces that, and one notice comes out rather than two.
     kluctl.script =
       pkgs.writeScriptBin "kubenixDeploy" # bash
         ''
