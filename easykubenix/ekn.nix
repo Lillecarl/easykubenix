@@ -79,7 +79,6 @@ in
   options.ekn = {
     discriminator = lib.mkOption {
       type = lib.types.str;
-      default = "easykubenix";
       description = ''
         Value of the `ekn.dev/discriminator` label stamped on every object
         `ekn` applies, and the selector it lists objects back by when
@@ -87,8 +86,21 @@ in
         deletes every object carrying this label that the current apply did
         not produce.
 
-        Change it between projects sharing a cluster, or two easykubenix
-        instances will prune each other's objects out from under one another.
+        Required, with no default, and that is deliberate.
+
+        A default is a value every project shares until somebody thinks to
+        change it. Two easykubenix projects that both took it and both
+        deploy to one cluster do not conflict quietly: each apply prunes
+        the other's objects, because from where it stands they are objects
+        carrying its own label that its own apply did not produce. The
+        scope is per kind, not the whole cluster, but a kind both projects
+        use is the normal case.
+
+        Nothing can detect that from inside one project, so the name has to
+        be a decision somebody made. Only a deploy needs it: rendering a
+        manifest never reads this, so a configuration that only builds
+        `manifestJSONFile` does not have to answer.
+
         Per-GitOps-target applies get their own derived value -- see
         `gitOps.targets.<name>.discriminator`.
       '';

@@ -5,6 +5,11 @@ let
     inherit pkgs;
     modules = [
       ({ config, ... }: {
+        # `ekn.discriminator` has no default, and a GitOps target derives
+        # its own prune scope from it -- so a fixture with targets has to
+        # say one. These keep the old default's value, which is what the
+        # derived names below are asserted against.
+        ekn.discriminator = "easykubenix";
         gitOps.deployBranch = "deploy";
         gitOps.targets.apps.path = "clusters/home/apps";
         kubernetes.objects.default.Deployment.api = {
@@ -212,6 +217,7 @@ let
     inherit pkgs;
     modules = [
       {
+        ekn.discriminator = "easykubenix";
         gitOps.deployBranch = "deploy";
         gitOps.targets.apps.path = "clusters/home/apps";
         kubernetes.objects.default.ConfigMap.routed = {
@@ -247,6 +253,7 @@ let
       (
         { ekn, ... }:
         {
+          ekn.discriminator = "easykubenix";
           gitOps.deployBranch = "deploy";
           gitOps.targets.apps.path = "clusters/home/apps";
           # Routed here from the parent, and stamped exactly like a submodule
@@ -321,11 +328,26 @@ let
       )
     ];
   };
+  # A configuration that names no discriminator at all.
+  #
+  # `ekn.discriminator` has no default on purpose, so this is what a project
+  # that never thought about the prune scope looks like. It has to render --
+  # a manifest is not a deploy -- and it has to fail the moment somebody
+  # builds something that applies.
+  easyNoDiscriminator = import ../. {
+    inherit pkgs;
+    modules = [
+      { kubernetes.objects.default.ConfigMap.test.data.key = "hello"; }
+    ];
+  };
 in
 {
   # Only that it evaluates. The notice itself is `lib.warn` on
   # `kluctl.projectDir`, which nothing here forces.
   kluctlScriptReadsManifest = easyKluctlScriptReadsManifest.config.kubernetes.generated;
+
+  noDiscriminatorRenders = easyNoDiscriminator.config.kubernetes.generated;
+  noDiscriminatorDeployThrows = easyNoDiscriminator.config.kluctl.script;
 
   eknRouting = {
     inherit (easy.config.kubernetes) generatedByPath gitOpsTargets;

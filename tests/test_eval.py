@@ -243,6 +243,23 @@ class TestEknModule:
         assert isinstance(result, list)
         assert result[0]["kind"] == "ConfigMap"
 
+    async def test_a_manifest_renders_without_a_discriminator(self) -> None:
+        # `ekn.discriminator` has no default. Rendering must not read it:
+        # a manifest is a file, and a file prunes nothing.
+        result = await evaluate_file(NIX_TEST_FILE, "noDiscriminatorRenders")
+        assert isinstance(result, list)
+        assert result[0]["kind"] == "ConfigMap"
+
+    async def test_a_deploy_without_a_discriminator_is_refused(self) -> None:
+        # The other half, and the reason there is no default. A default is a
+        # value every project shares until somebody changes it, and two
+        # projects sharing one on a cluster prune each other's objects --
+        # each sees objects under its own label that its own apply did not
+        # produce. Nothing inside one project can detect that, so the name
+        # has to be a decision, and this is where it gets asked for.
+        with pytest.raises(nanopynix.NixError, match=r"ekn\.discriminator"):
+            await evaluate_file(NIX_TEST_FILE, "noDiscriminatorDeployThrows")
+
     async def test_marker_in_crds_is_rejected(self) -> None:
         # kubernetes.crds goes around the type for speed, so nothing there
         # resolves a marker. Fail instead of writing `_type` into a manifest.
@@ -411,6 +428,9 @@ class TestGitOpsTargetSubmoduleEndToEnd:
         probe.write_text(f"""
             import {PROJECT_ROOT} {{
               modules = [{{
+                # No default for this, and every target derives its own
+                # prune scope from it -- see easykubenix/ekn.nix.
+                ekn.discriminator = "easykubenix";
                 gitOps.deployBranch = "deploy";
                 gitOps.targets.bootstrap = {{
                   path = "bootstrap";
@@ -462,6 +482,9 @@ class TestGitOpsTargetSubmoduleEndToEnd:
         probe.write_text(f"""
             import {PROJECT_ROOT} {{
               modules = [{{
+                # A kubeapply config carries the prune scope, so it has to
+                # name one -- this test is about the field manager.
+                ekn.discriminator = "easykubenix";
                 kubernetes.objects.default.ConfigMap.plain.data.key = "value";
               }}];
             }}
