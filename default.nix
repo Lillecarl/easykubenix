@@ -1,5 +1,44 @@
+let
+  # nixidae is the umbrella that holds this repository, and it owns the
+  # inputs. Inside it, that is the checkout one directory up. Outside it, it
+  # is fetched, and this working copy is put in place of the submodule that
+  # came down with it. Either way the answer is the same one, so a build here
+  # and a build from the umbrella agree.
+  #
+  # The input that matters is nanopynix. From the umbrella it is the working
+  # copy in the next directory, so a change there is built here with nothing
+  # published in between.
+  #
+  # git+https and not github:, because a GitHub tarball carries no submodule
+  # and the siblings are exactly what this is for.
+  umbrella =
+    if builtins.pathExists ../nix/wire.nix then
+      import ../nix/wire.nix
+    else
+      import (
+        (builtins.fetchTree (builtins.parseFlakeRef "git+https://github.com/nixidae/nixidae?submodules=1"))
+        .outPath
+        + "/nix/wire.nix"
+      );
+
+  # Set to make a `--file .` build agree with a flake evaluation. It turns
+  # off the overrides the umbrella works through, so going out to fetch one
+  # would cost a clone and change nothing.
+  overridesDisabled =
+    let
+      value = builtins.getEnv "FLAKE_COMPATISH_DISABLE_OVERRIDES";
+    in
+    value != "" && value != "0";
+in
 {
-  inputs ? (import ./nix/compat.nix).inputs,
+  inputs ?
+    if overridesDisabled then
+      (import ./nix/compat.nix).inputs
+    else
+      umbrella {
+        project = "easykubenix";
+        source = ./.;
+      },
   system ? builtins.currentSystem,
   pkgs ? inputs.nixpkgs.legacyPackages.${system},
   modules ? [ ./demo ],
