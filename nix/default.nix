@@ -1,22 +1,24 @@
 {
-  inputs ? (import ./compat.nix).inputs,
+  sources ? import ./sources.nix,
   system ? builtins.currentSystem,
-  pkgs ? inputs.nixpkgs.legacyPackages.${system},
+  pkgs ? import sources.nixpkgs {
+    inherit system;
+    config.allowUnfree = true;
+  },
 }:
 let
   inherit (pkgs) lib;
 
   # `ekn`'s source lives in ../ekn, but its dependency closure comes from
   # nanopynix' exported development environment. See shell.nix.
-  nanopynix = import inputs.nanopynix { inherit pkgs; };
+  nanopynix = import sources.nanopynix { inherit pkgs sources; };
 
   root = import ../default.nix { inherit pkgs; };
 
   # The gates over the doc examples. Plain derivations, so they build from a
-  # bare `import` and do not need `nix flake check` -- see ../checks.nix for
-  # the entry point CI uses, and ../docs/examples/default.nix for what they
-  # are. `flake.nix` re-exports these; it is not where they live.
-  examples = import ../docs/examples { inherit inputs system pkgs; };
+  # bare `import` -- see ../checks.nix for the entry point CI uses, and
+  # ../docs/examples/default.nix for what they are.
+  examples = import ../docs/examples { inherit sources system pkgs; };
 
   # `ekn` runs inside a Nix build sandbox from three derivations in this
   # repository -- `_yamlToJson` (lib/parseYamlStream.nix, pkgs/renderChart.nix),

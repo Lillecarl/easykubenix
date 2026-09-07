@@ -1,16 +1,18 @@
-# The doc examples, and the checks over them, without flakes.
+# The doc examples, and the checks over them.
 #
-# This is where the examples are actually wired up. `flake.nix` next to it is a
-# thin wrapper that calls this file, so there is one definition and the flake
-# and non-flake paths cannot drift. Everything in this repository has to work
-# from a plain `import`; a `flake.lock` is fine (nix/compat.nix reads it), a
-# flake command being *required* is not.
+# This is where the examples are wired up, and it is now the only place. A
+# `flake.nix` beside it used to call this file and re-expose the result; this
+# repository is not a flake any more, and nix/sources.nix says where its
+# dependencies come from instead.
 #
 # Build them with `nix build --file ./checks.nix all` from the repository root.
 {
-  inputs ? (import ../../nix/compat.nix).inputs,
+  sources ? import ../../nix/sources.nix,
   system ? builtins.currentSystem,
-  pkgs ? inputs.nixpkgs.legacyPackages.${system},
+  pkgs ? import sources.nixpkgs {
+    inherit system;
+    config.allowUnfree = true;
+  },
   # The easykubenix entry point itself, as the function `default.nix` returns.
   # A default rather than a required argument, so this file stands on its own;
   # `flake.nix` passes its own `lib.easykubenix` instead, so that the examples

@@ -1,8 +1,8 @@
 let
-  compat = import ../nix/compat.nix;
-  pkgs = import compat.inputs.nixpkgs { };
+  sources = import ../nix/sources.nix;
+  pkgs = import sources.nixpkgs { };
   lib = pkgs.lib;
-  adios = (import compat.inputs.adios).adios;
+  adios = (import sources.adios).adios;
   template = definition: adios definition { };
 
   arguments = index: {

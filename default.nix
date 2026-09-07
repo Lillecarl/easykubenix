@@ -1,54 +1,12 @@
-let
-  # nixidae is the umbrella that holds this repository, and it owns the
-  # inputs. Inside it, that is the checkout one directory up. Outside it, it
-  # is fetched, and this working copy is put in place of the submodule that
-  # came down with it. Either way the answer is the same one, so a build here
-  # and a build from the umbrella agree.
-  #
-  # The input that matters is nanopynix. From the umbrella it is the working
-  # copy in the next directory, so a change there is built here with nothing
-  # published in between.
-  #
-  # git+https and not github:, because a GitHub tarball carries no submodule
-  # and the siblings are exactly what this is for.
-  #
-  # `..` from a store path leaves the store root, and Nix refuses that rather
-  # than answering false: "'nix' is too short to be a valid store path". So
-  # ask only when this checkout is not itself in the store.
-  inUmbrella =
-    builtins.substring 0 11 (toString ./.) != "/nix/store/"
-    && builtins.pathExists ../nix/wire.nix;
-
-  umbrella =
-    if inUmbrella then
-      import ../nix/wire.nix
-    else
-      import (
-        (builtins.fetchTree (builtins.parseFlakeRef "git+https://github.com/nixidae/nixidae?submodules=1"))
-        .outPath
-        + "/nix/wire.nix"
-      );
-
-  # Set to make a `--file .` build agree with a flake evaluation. It turns
-  # off the overrides the umbrella works through, so going out to fetch one
-  # would cost a clone and change nothing.
-  overridesDisabled =
-    let
-      value = builtins.getEnv "FLAKE_COMPATISH_DISABLE_OVERRIDES";
-    in
-    value != "" && value != "0";
-in
 {
-  inputs ?
-    if overridesDisabled then
-      (import ./nix/compat.nix).inputs
-    else
-      umbrella {
-        project = "easykubenix";
-        source = ./.;
-      },
+  # Where every dependency lives, as directories. nix/sources.nix says how
+  # this repository finds the umbrella that owns them.
+  sources ? import ./nix/sources.nix,
   system ? builtins.currentSystem,
-  pkgs ? inputs.nixpkgs.legacyPackages.${system},
+  pkgs ? import sources.nixpkgs {
+    inherit system;
+    config.allowUnfree = true;
+  },
   modules ? [ ./demo ],
   specialArgs ? { },
   debug ? null, # unused but kept for API compatibility
@@ -60,8 +18,13 @@ let
   pkgs = pkgs';
   lib = pkgs.lib;
 
-  nanopynix = import inputs.nanopynix { inherit pkgs; };
-  adios = (import inputs.adios).adios;
+  # Hand nanopynix the same sources, rather than letting it ask for an
+  # umbrella of its own. From a working copy in the umbrella it would find
+  # the right one; from a store path it would find none and fetch the
+  # published one, and the nanopynix built here would not be the one the
+  # umbrella wired.
+  nanopynix = import sources.nanopynix { inherit pkgs sources; };
+  adios = (import sources.adios).adios;
   template = definition: adios definition { };
   easykubenix-docs = pkgs.python3Packages.callPackage ./nix/docs.nix { };
 
@@ -298,7 +261,7 @@ in
       nanopynix-helpers
       ;
     inherit
-      inputs
+      sources
       pkgs
       lib
       adios

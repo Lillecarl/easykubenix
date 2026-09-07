@@ -1,6 +1,6 @@
 let
-  compat = import ../nix/compat.nix;
-  pkgs = import compat.inputs.nixpkgs { };
+  sources = import ../nix/sources.nix;
+  pkgs = import sources.nixpkgs { };
   # `mkNamedList`/`mkNumberedList` live in easykubenix's own `lib.extend`
   # overlay, not plain nixpkgs `lib` -- extend the same way
   # `easykubenix/pkgs/default.nix` does for the real module evaluation.
