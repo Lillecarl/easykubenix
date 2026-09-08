@@ -101,6 +101,18 @@ in
         manifest never reads this, so a configuration that only builds
         `manifestJSONFile` does not have to answer.
 
+        **Choosing a value for a project that already deployed is not
+        free.** Live objects carry the label they were applied with, and
+        `--prune` finds objects by that label alone. Pick a different word
+        and the next prune no longer recognises anything the previous one
+        would have: those objects are not deleted, they are orphaned, and
+        nothing reports it. A project answering this option for the first
+        time after upgrading past the removed default must therefore repeat
+        the value it was deploying under, which was `easykubenix`. Check the
+        derived per-target names too -- `gitOps.targets.<name>.discriminator`
+        is this value, a hyphen, and the target name, so it has to keep
+        matching what is on the cluster.
+
         Per-GitOps-target applies get their own derived value -- see
         `gitOps.targets.<name>.discriminator`.
       '';
