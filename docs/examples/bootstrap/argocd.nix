@@ -1,5 +1,5 @@
 # The bootstrap instance: a whole separate easykubenix configuration, attached
-# to `gitOps.targets.bootstrap` by cluster.nix. Its objects render into that
+# to `deployment.units.bootstrap` by cluster.nix. Its objects render into that
 # target's path and never reach the parent's `kubernetes.generated`.
 #
 # This is the chicken-and-egg half of GitOps. Everything here is what makes
@@ -71,15 +71,15 @@
   # this reaches the user's own options too, not just easykubenix' built-ins.
   #
   # Read the parent's *inputs* like these. Reading its rendered outputs
-  # (`kubernetes.generated`, `kubernetes.gitOpsTargets`) closes a loop back
+  # (`kubernetes.generated`, `kubernetes.deploymentUnits`) closes a loop back
   # through this instance and recurses.
   kubernetes.objects.argocd.Application.root = {
     spec = {
       project = "default";
       source = {
         repoURL = parent.clusterRepoURL;
-        targetRevision = parent.gitOps.deployBranch;
-        path = parent.gitOps.targets.apps.path;
+        targetRevision = parent.deployment.deployBranch;
+        path = parent.deployment.units.apps.path;
       };
       destination = {
         server = "https://kubernetes.default.svc";
@@ -109,8 +109,8 @@
       project = "default";
       source = {
         repoURL = parent.clusterRepoURL;
-        targetRevision = parent.gitOps.deployBranch;
-        path = parent.gitOps.targets.bootstrap.path;
+        targetRevision = parent.deployment.deployBranch;
+        path = parent.deployment.units.bootstrap.path;
       };
       destination = {
         server = "https://kubernetes.default.svc";

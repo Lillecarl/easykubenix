@@ -132,7 +132,7 @@ async def _evaluate_gitops(
     flake: str | None,
     attr: str | None,
 ) -> GitOpsManifestsResult:
-    """Like `_evaluate`, but only forces kubernetes.gitOpsTargets -- the
+    """Like `_evaluate`, but only forces kubernetes.deploymentUnits -- the
     only field Diff/Commit/Deploy read via `gitops.file_groups`."""
     try:
         uri, customer = _parse_flake(flake) if flake is not None else (None, None)
@@ -659,7 +659,7 @@ class KubeApply(AttrCommand):
 
     target: str | None = opt(
         None,
-        help="Apply only this GitOps target's objects (kubernetes.gitOpsTargets). Omit for the full kubernetes.generated set.",
+        help="Apply only this GitOps target's objects (kubernetes.deploymentUnits). Omit for the full kubernetes.generated set.",
     )
     prune: bool = opt(
         False,
@@ -779,7 +779,7 @@ class ClusterDiff(AttrCommand):
 
     target: str | None = opt(
         None,
-        help="Diff only this GitOps target's objects (kubernetes.gitOpsTargets). Omit for the full kubernetes.generated set.",
+        help="Diff only this GitOps target's objects (kubernetes.deploymentUnits). Omit for the full kubernetes.generated set.",
     )
 
     async def run(self) -> None:

@@ -42,29 +42,27 @@ let
     scope.
   '';
 
-  # Objects routed (via kubernetes.gitOpsTargets / ekn.gitOpsTarget) to one of
-  # cfg.excludeGitopsTargets already have their own deployment path -- an
+  # Objects routed (via kubernetes.deploymentUnits / ekn.deploymentUnit) to one of
+  # cfg.excludeDeploymentUnits already have their own deployment path -- an
   # ArgoCD Application/Flux Kustomization applying them from a git branch,
   # plus a one-time bootstrap apply for whatever's needed to get that
   # controller running in the first place. kluctl must not also manage them,
   # or the two reconcilers fight over the same objects (prune wars, drift
-  # resets). Everything NOT in excludeGitopsTargets -- including objects
+  # resets). Everything NOT in excludeDeploymentUnits -- including objects
   # routed to GitOps targets that aren't live yet -- keeps deploying via
   # kluctl as before, so a GitOps migration can move one target at a time.
-  excludedGitopsKeys =
+  excludedUnitKeys =
     lib.genAttrs
       (lib.concatMap (
         name:
         map (
           object: "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}"
-        ) config.kubernetes.gitOpsTargets.${name}.objects
-      ) (lib.filter (name: config.kubernetes.gitOpsTargets ? ${name}) cfg.excludeGitopsTargets))
+        ) config.kubernetes.deploymentUnits.${name}.objects
+      ) (lib.filter (name: config.kubernetes.deploymentUnits ? ${name}) cfg.excludeDeploymentUnits))
       (_: true);
   isExcludedFromKluctl =
     object:
-    (
-      excludedGitopsKeys ? "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}"
-    )
+    (excludedUnitKeys ? "${object.metadata.namespace or "none"}/${object.kind}/${object.metadata.name}")
     # kluctl has no SOPS awareness at all -- it would apply the raw,
     # still-encrypted `sops:` blob as the object's literal content. Any
     # object carrying one is meant for a ksops/`ekn kubeapply`-style
@@ -95,16 +93,21 @@ in
   imports = [
     (lib.mkRenamedOptionModule [ "kluctl" "discriminator" ] [ "ekn" "discriminator" ])
     (lib.mkRenamedOptionModule [ "kluctl" "resourcePriority" ] [ "ekn" "resourcePriority" ])
+    # Renamed with the option it names. See gitops.nix.
+    (lib.mkRenamedOptionModule
+      [ "kluctl" "excludeGitopsTargets" ]
+      [ "kluctl" "excludeDeploymentUnits" ]
+    )
   ];
 
   options = {
     kluctl = {
       package = lib.mkPackageOption pkgs "kluctl" { };
-      excludeGitopsTargets = lib.mkOption {
+      excludeDeploymentUnits = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [ ];
         description = ''
-          Names of `gitOps.targets` whose objects kluctl should not deploy.
+          Names of `deployment.units` whose objects kluctl should not deploy.
           Use this once a target has its own deployment path (e.g. a
           one-time bootstrap apply plus the GitOps controller syncing itself
           from there) to avoid kluctl and that controller fighting over the

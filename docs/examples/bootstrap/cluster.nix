@@ -16,7 +16,7 @@
     clusterRepoURL = "https://github.com/example/cluster.git";
 
     # Required, and no default. It is the prune scope, and it also names each
-    # GitOps target: `gitOps.targets.<name>.discriminator` is
+    # GitOps target: `deployment.units.<name>.discriminator` is
     # "${ekn.discriminator}-${name}".
     ekn.discriminator = "bootstrap-example";
 
@@ -67,7 +67,7 @@
     # An ordinary application, routed to the `apps` target the root Application
     # in argocd.nix points at. This is the half that never needs a human.
     kubernetes.objects.default.ConfigMap.hello = {
-      ekn.gitOpsTarget = "apps";
+      ekn.deploymentUnit = "apps";
       data.greeting = "synced by argocd";
     };
   };

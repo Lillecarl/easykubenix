@@ -9,13 +9,13 @@ let
     modules = [ ./cluster.nix ];
   };
 
-  # The nested instance behind `gitOps.targets.bootstrap`. It is a complete
+  # The nested instance behind `deployment.units.bootstrap`. It is a complete
   # easykubenix instance, which is what lets the gate below exist at all: it
   # has its own `validation.script`, so the bootstrap objects can be applied
   # to a real API server without anything here reaching inside them.
-  bootstrap = ekn.config.gitOps.targets.bootstrap.instance;
+  bootstrap = ekn.config.deployment.units.bootstrap.instance;
 
-  targets = ekn.config.kubernetes.gitOpsTargets;
+  targets = ekn.config.kubernetes.deploymentUnits;
 
   bootstrapObject =
     kind: name:

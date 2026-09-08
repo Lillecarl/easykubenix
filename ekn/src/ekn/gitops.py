@@ -43,10 +43,10 @@ def load_raw_manifest(path: str) -> Manifest:
 
 
 def resolved_targets(gitops_targets: dict[str, GitOpsTargetEntry]) -> dict[GitOpsTarget, list[Manifest]]:
-    """Turn `kubernetes.gitOpsTargets` (already joined by the Nix module) into
+    """Turn `kubernetes.deploymentUnits` (already joined by the Nix module) into
     `{GitOpsTarget: [manifest, ...]}`.
 
-    The Nix side (`kubernetes.gitOpsTargets`) has already resolved each
+    The Nix side (`kubernetes.deploymentUnits`) has already resolved each
     object's `ekn.gitOpsTarget` name against `gitOps.targets` and grouped
     objects by target name -- there is no index/lookup left to build here,
     just a merge for the (unusual but valid) case of two named targets

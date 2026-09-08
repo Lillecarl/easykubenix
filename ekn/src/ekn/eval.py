@@ -61,7 +61,7 @@ class _OutPathInfo(BaseModel):
 
 
 class GitOpsBranches(BaseModel):
-    """Validated `gitOps.deployBranch`/`gitOps.sourceBranch` -- `source_branch`
+    """Validated `deployment.deployBranch`/`deployment.sourceBranch` -- `source_branch`
     null disables the dual-commit source-snapshot feature for this instance,
     see `cli.py`'s `_gitops_branches`."""
 
@@ -70,7 +70,7 @@ class GitOpsBranches(BaseModel):
 
 
 class _GitOpsTargetRef(BaseModel):
-    """`gitOps.targets.<name>` as it reaches Python -- see easykubenix's
+    """`deployment.units.<name>` as it reaches Python -- see easykubenix's
     gitops.nix, which narrows the submodule to the fields that survive
     serialization. Only `path` is read on the render path; `discriminator` and
     `fieldManager` are read on the apply path (see `_unpack_gitops_target`)."""
@@ -79,8 +79,8 @@ class _GitOpsTargetRef(BaseModel):
 
 
 class GitOpsTargetEntry(BaseModel):
-    """Validated `kubernetes.gitOpsTargets` entry -- one named GitOps target's
-    routed objects/raw files plus its resolved `gitOps.targets.<name>` entry,
+    """Validated `kubernetes.deploymentUnits` entry -- one named GitOps target's
+    routed objects/raw files plus its resolved `deployment.units.<name>` entry,
     see `ekn.gitops.resolved_targets`."""
 
     target: _GitOpsTargetRef
@@ -89,19 +89,19 @@ class GitOpsTargetEntry(BaseModel):
 
 
 class _GitOpsKubernetesConfig(BaseModel):
-    gitops_targets: dict[str, GitOpsTargetEntry] = Field(alias="gitOpsTargets")
+    gitops_targets: dict[str, GitOpsTargetEntry] = Field(alias="deploymentUnits")
 
 
 class _GitOpsManifestsConfig(BaseModel):
     kubernetes: _GitOpsKubernetesConfig
-    git_ops: GitOpsBranches = Field(alias="gitOps")
+    git_ops: GitOpsBranches = Field(alias="deployment")
 
 
 class GitOpsManifestsResult(BaseModel):
     """Return shape of `evaluate_gitops_manifests`, consumed by cli.py's
     `_gitops_branches`/`_gitops_file_groups`. Validating this at the Nix
     boundary (rather than `_dig()`-ing raw JSON apart by hand downstream)
-    means a misconfigured `gitOps.deployBranch` fails here, once, with a
+    means a misconfigured `deployment.deployBranch` fails here, once, with a
     precise field-path error message."""
 
     config: _GitOpsManifestsConfig
@@ -527,8 +527,8 @@ async def evaluate_gitops_manifests(
     customer: str | None,
     attr_path: str | None,
 ) -> GitOpsManifestsResult:
-    """Resolve to `{"config": {"kubernetes": {"gitOpsTargets": ...},
-    "gitOps": {"deployBranch": ..., "sourceBranch": ...}}}`.
+    """Resolve to `{"config": {"kubernetes": {"deploymentUnits": ...},
+    "deployment": {"deployBranch": ..., "sourceBranch": ...}}}`.
 
     Used by Diff/Commit/Deploy, which only ever read these fields via
     `_gitops_file_groups`/`_gitops_branches`. Diff/Commit previously went
@@ -546,18 +546,18 @@ async def evaluate_gitops_manifests(
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
 
-        gitops_proxy = proxy.attr("gitOps")
-        with timed_stage("gitops: to_python(kubernetes.gitOpsTargets, gitOps.deployBranch/sourceBranch)"):
-            gitops_targets = await proxy.attr("kubernetes").attr("gitOpsTargets").to_python()
+        gitops_proxy = proxy.attr("deployment")
+        with timed_stage("gitops: to_python(kubernetes.deploymentUnits, deployment.deployBranch/sourceBranch)"):
+            gitops_targets = await proxy.attr("kubernetes").attr("deploymentUnits").to_python()
             deploy_branch = await gitops_proxy.attr("deployBranch").to_python()
             source_branch = await gitops_proxy.attr("sourceBranch").to_python()
         return GitOpsManifestsResult.model_validate(
             {
                 "config": {
                     "kubernetes": {
-                        "gitOpsTargets": gitops_targets,
+                        "deploymentUnits": gitops_targets,
                     },
-                    "gitOps": {
+                    "deployment": {
                         "deployBranch": deploy_branch,
                         "sourceBranch": source_branch,
                     },
@@ -570,7 +570,7 @@ def _unpack_gitops_target(
     gitops_targets: JsonValue,
     target: str,
 ) -> tuple[list[dict[str, Any]], list[JsonValue], str, str]:
-    """Pull one `kubernetes.gitOpsTargets` entry apart into the four things
+    """Pull one `kubernetes.deploymentUnits` entry apart into the four things
     a `--target` apply needs: its objects (with `.ekn` routing metadata
     stripped), its raw-file paths, its own discriminator, and the field
     manager to apply as.
@@ -587,7 +587,7 @@ def _unpack_gitops_target(
     one failure here a user is actually likely to hit.
     """
     if not isinstance(gitops_targets, dict):
-        raise TypeError("kubernetes.gitOpsTargets did not evaluate to an object")
+        raise TypeError("kubernetes.deploymentUnits did not evaluate to an object")
     if target not in gitops_targets:
         declared = ", ".join(sorted(gitops_targets)) or "(none)"
         raise ValueError(f"unknown gitops target {target!r}; declared targets: {declared}")
@@ -630,7 +630,7 @@ async def evaluate_kubeapply_config(
     and `kubernetes.sopsAgeIdentities` (SOPS age decrypt identities some
     consumer needs bootstrapped as a Secret -- see `ekn.sops.ensure_age_identities`).
 
-    `target` narrows to one `kubernetes.gitOpsTargets` entry's objects,
+    `target` narrows to one `kubernetes.deploymentUnits` entry's objects,
     `.ekn` routing metadata stripped; omitted, to_python's the full
     `kubernetes.generated` instead -- never both, so this only ever forces
     the one field it actually needs.
@@ -652,7 +652,7 @@ async def evaluate_kubeapply_config(
 
         if target:
             objects, raw_file_paths, discriminator, field_manager = _unpack_gitops_target(
-                await proxy.attr("kubernetes").attr("gitOpsTargets").to_python(),
+                await proxy.attr("kubernetes").attr("deploymentUnits").to_python(),
                 target,
             )
         else:
@@ -794,7 +794,7 @@ async def _validation_config(proxy: Any) -> ValidationResult:
         proxy = proxy.attr("config")
 
     # Deliberately does not force kubernetes.generated/generatedByPath/
-    # gitOpsTargets: Validate.run() applies manifests via
+    # deploymentUnits: Validate.run() applies manifests via
     # internal.manifestJSONFile (a derivation built straight from
     # kubernetes.generated, see internal.nix) and never reads the fields
     # this function returns beyond what's assembled below -- forcing them

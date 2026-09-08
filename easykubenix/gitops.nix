@@ -5,8 +5,31 @@
   ...
 }:
 {
-  options.gitOps = {
-    enable = lib.mkEnableOption "GitOps workflow support";
+  # `gitOps.*` was the old name for all of this, and every definition of it
+  # keeps working and warns with the new path.
+  #
+  # The rename is not cosmetic. "GitOps" names one delivery mechanism, and
+  # this option is not about that mechanism. `ekn kubeapply --target
+  # bootstrap` applies a unit by hand, with no git and no ArgoCD anywhere in
+  # the path -- and a bootstrap unit exists *because* ArgoCD cannot sync it
+  # yet. A unit is a set of objects with a destination; whether that
+  # destination is reached by a commit, by `ekn kubeapply` or by kluctl is a
+  # property of the run.
+  #
+  # The old name had already misled in this repository. The assertion for a
+  # seeded credential routed to a unit explained itself as "committed to a
+  # branch and applied by ArgoCD", and the first consumer to hit it was
+  # inside a nested bootstrap instance where nobody commits anything.
+  imports = [
+    (lib.mkRenamedOptionModule [ "gitOps" "enable" ] [ "deployment" "enable" ])
+    (lib.mkRenamedOptionModule [ "gitOps" "deployBranch" ] [ "deployment" "deployBranch" ])
+    (lib.mkRenamedOptionModule [ "gitOps" "sourceBranch" ] [ "deployment" "sourceBranch" ])
+    (lib.mkRenamedOptionModule [ "gitOps" "path" ] [ "deployment" "path" ])
+    (lib.mkRenamedOptionModule [ "gitOps" "targets" ] [ "deployment" "units" ])
+  ];
+
+  options.deployment = {
+    enable = lib.mkEnableOption "rendering objects into named deployment units";
 
     deployBranch = lib.mkOption {
       type = lib.types.str;
@@ -43,12 +66,12 @@
       example = "./clusters/my-cluster";
     };
 
-    targets = lib.mkOption {
+    units = lib.mkOption {
       type = lib.types.attrsOf (
         lib.types.submodule (
           # `config` is deliberately not in the pattern: the options below
           # read the *outer* one (this instance's `ekn.discriminator`,
-          # `gitOps`, ...) by closure, and naming it here would shadow that
+          # `deployment`, ...) by closure, and naming it here would shadow that
           # with the target submodule's own. `@target` reaches the
           # submodule's as `target.config` without the shadowing -- and
           # `name` still has to be named, since the module system passes
@@ -114,7 +137,7 @@
                 default = { };
                 description = ''
                   Labels stamped onto every object in this target -- both the
-                  ones routed here with `ekn.gitOpsTarget` and the ones
+                  ones routed here with `ekn.deploymentUnit` and the ones
                   `modules` renders. Baked into the rendered manifests, so the
                   committed YAML and what `ekn kubeapply --target ${name}`
                   applies agree.
@@ -202,9 +225,9 @@
                 description = ''
                   The evaluated nested instance -- `lib.evalModules`' result,
                   so `instance.config.kubernetes.generated` is what
-                  `kubernetes.gitOpsTargets` joins into this target's
+                  `kubernetes.deploymentUnits` joins into this target's
                   objects. Internal because it holds functions and a whole
-                  option tree: it must never reach `kubernetes.gitOpsTargets`
+                  option tree: it must never reach `kubernetes.deploymentUnits`
                   itself, which is serialized to JSON for `ekn`.
                 '';
               };
@@ -227,10 +250,10 @@
                 #
                 # Reading a rendered output through this closes a loop and
                 # evaluation hits infinite recursion rather than a readable
-                # error: `parent.kubernetes.gitOpsTargets` is built *from*
+                # error: `parent.kubernetes.deploymentUnits` is built *from*
                 # this instance, and `generated`/`generatedWithEkn` run the
-                # assertion checker that `gitOpsTargets` also runs. Read
-                # inputs -- `parent.gitOps.deployBranch`,
+                # assertion checker that `deploymentUnits` also runs. Read
+                # inputs -- `parent.deployment.deployBranch`,
                 # `parent.ekn.discriminator`, a module's own options -- not
                 # results.
                 parent = config;
@@ -251,7 +274,7 @@
         both at once:
 
         - This instance's own objects, routed by name with
-          `ekn.gitOpsTarget` -- rather than embedding a reference to the
+          `ekn.deploymentUnit` -- rather than embedding a reference to the
           Application/Kustomization that happens to sync them.
         - `modules`, a whole separate easykubenix configuration evaluated
           just for this target. Its objects render into the target's `path`

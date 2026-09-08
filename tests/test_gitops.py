@@ -70,9 +70,9 @@ def _result(**gitops: object) -> GitOpsManifestsResult:
     return GitOpsManifestsResult.model_validate(
         {
             "config": {
-                "gitOps": {"deployBranch": "deploy", **gitops},
+                "deployment": {"deployBranch": "deploy", **gitops},
                 "kubernetes": {
-                    "gitOpsTargets": {
+                    "deploymentUnits": {
                         "apps": {
                             "target": {"path": "clusters/home/apps"},
                             "objects": [_deployment()],

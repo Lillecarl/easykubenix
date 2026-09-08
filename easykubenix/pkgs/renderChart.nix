@@ -16,8 +16,8 @@
   apiVersions ? null,
   syncWave ? "0",
   # Name of the `gitOps.targets.<name>` to route these resources through
-  # (see kubernetes.nix's ekn.gitOpsTarget); null leaves them unrouted.
-  gitOpsTarget ? null,
+  # (see kubernetes.nix's ekn.deploymentUnit); null leaves them unrouted.
+  deploymentUnit ? null,
   # The `ekn` CLI package, used only by the no-primop fallback below to
   # convert this chart's rendered YAML. Not needed when evaluating through
   # `ekn` itself, hence the null default.
@@ -119,7 +119,7 @@ let
     object:
     lib.recursiveUpdate object {
       metadata.annotations."argocd.argoproj.io/sync-wave" = syncWave;
-      ekn.gitOpsTarget = gitOpsTarget;
+      ekn.deploymentUnit = deploymentUnit;
     }
   ) rendered;
   # CustomResourceDefinitions carry enormous OpenAPI schemas. Forcing them

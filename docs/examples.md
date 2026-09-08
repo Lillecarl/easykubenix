@@ -153,7 +153,7 @@ A GitOps engine cannot sync itself into existence. The controller, its CRDs and
 the root Application that points it at a branch all have to be applied before
 anything can be synced — and then never again by hand.
 
-`gitOps.targets.<name>.modules` is how that is expressed: a whole separate
+`deployment.units.<name>.modules` is how that is expressed: a whole separate
 easykubenix configuration attached to one target, rendered into that target's
 path and kept out of `kubernetes.generated`. A plain `ekn kubeapply` and
 `ekn validate` never see it; only `ekn kubeapply --target bootstrap` applies it.
@@ -187,7 +187,7 @@ target the parent actually commits to, instead of the two being written out
 twice and drifting. It reaches user-declared options too — `clusterRepoURL`
 above is declared by `cluster.nix`, not by easykubenix. Read the parent's
 *inputs* through it; reading its rendered outputs (`kubernetes.generated`,
-`kubernetes.gitOpsTargets`) closes a loop back through the nested instance and
+`kubernetes.deploymentUnits`) closes a loop back through the nested instance and
 recurses.
 
 Because the nested instance is a complete easykubenix instance, it has its own

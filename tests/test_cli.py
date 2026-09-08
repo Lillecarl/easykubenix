@@ -72,7 +72,7 @@ class TestEval:
 
 class TestDiff:
     # There is no instance-wide GitOps path any more -- a path belongs to a
-    # target (`gitOps.targets.<name>.path`, see tests/test_gitops.py) and the
+    # target (`deployment.units.<name>.path`, see tests/test_gitops.py) and the
     # root default now lives in `flatten_manifests`' `subdir` argument.
 
     async def test_diff_no_changes(self, tmp_path: Path, git_repo: Path) -> None:

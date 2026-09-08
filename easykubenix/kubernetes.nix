@@ -155,7 +155,7 @@ let
   #
   # So every fully-rendered output goes through here: `generated`,
   # `generatedWithEkn` (the same objects with their `ekn` routing still
-  # attached) and `gitOpsTargets`. `generatedByPath` and everything in
+  # attached) and `deploymentUnits`. `generatedByPath` and everything in
   # internal.nix are built from `generated`, so they inherit it.
   #
   # `resources` deliberately does not. It is the pre-render option tree rather
@@ -187,8 +187,8 @@ let
             lib.mapAttrsToList (
               name: object:
               lib.optional (
-                (object.ekn.gitOpsTarget or null) != null && lib.isSeededObject object
-              ) "${namespace}/${kind}/${name} -> ${object.ekn.gitOpsTarget}"
+                (object.ekn.deploymentUnit or null) != null && lib.isSeededObject object
+              ) "${namespace}/${kind}/${name} -> ${object.ekn.deploymentUnit}"
             ) objects
           )
         ) kinds
@@ -199,6 +199,12 @@ in
 {
   imports = [
     (lib.mkAliasOptionModule [ "kubernetes" "resources" ] [ "kubernetes" "objects" ])
+    # `kubernetes.gitOpsTargets` is renamed further down rather than here.
+    # `mkRenamedOptionModule` writes a *definition* onto the new option, and
+    # this one is a read-only computed output, so aliasing it that way fails
+    # with "is read-only, but it's set multiple times". A deprecated output
+    # carrying a `lib.warn` is the shape that works for something nobody
+    # sets and everybody reads.
     (lib.mkRemovedOptionModule [
       "kubernetes"
       "namespacedMappings"
@@ -242,12 +248,19 @@ in
                         options = {
                           ekn = lib.mkOption {
                             type = lib.types.submodule {
+                              # `gitOpsTarget` was the old name. The alias
+                              # lives inside the submodule because a
+                              # top-level `mkRenamedOptionModule` cannot
+                              # reach an option declared in one.
+                              imports = [
+                                (lib.mkRenamedOptionModule [ "gitOpsTarget" ] [ "deploymentUnit" ])
+                              ];
                               options = {
-                                gitOpsTarget = lib.mkOption {
+                                deploymentUnit = lib.mkOption {
                                   type = lib.types.nullOr lib.types.str;
                                   default = null;
                                   description = ''
-                                    Name of the `gitOps.targets.<name>` this object routes
+                                    Name of the `deployment.units.<name>` this object routes
                                     to. Deliberately single-valued, not a list: an object
                                     synced by two GitOps targets at once means two
                                     controllers independently reconciling (and potentially
@@ -362,7 +375,7 @@ in
         CustomResourceDefinitions from Nix-rendered Helm charts) that bypass
         `kubernetes.objects`' per-object submodule and its expensive
         ekn.lib.kubeValueType value-checking entirely. Still passes through
-        `ekn.gitOpsTarget` GitOps routing and the final YAML render, just
+        `ekn.deploymentUnit` GitOps routing and the final YAML render, just
         skips generators/transformers/filters and the auto-defaulting
         `kubernetes.objects` provides.
       '';
@@ -496,7 +509,7 @@ in
       '';
     };
 
-    # generated/generatedByPath/generatedWithEkn/gitOpsTargets are readOnly, fully-computed
+    # generated/generatedByPath/generatedWithEkn/deploymentUnits are readOnly, fully-computed
     # outputs -- there is nothing left to override/merge on them, so
     # ekn.lib.kubeValueType's recursive per-leaf JSON-schema-style validation
     # buys nothing here and would re-force the exact same expensive
@@ -545,7 +558,21 @@ in
       description = ''
         Like `generated`, but with each object's `ekn` routing metadata still
         attached (`generated` strips it). Consumed by anything that needs to
-        see EKN metadata alongside the rendered object, e.g. `gitOpsTargets`.
+        see EKN metadata alongside the rendered object, e.g. `deploymentUnits`.
+      '';
+      readOnly = true;
+    };
+
+    deploymentUnits = lib.mkOption {
+      type = lib.types.anything;
+      description = ''
+        Objects grouped by the `deployment.units.<name>` they route to (via
+        `ekn.deploymentUnit`), each group paired with that target's resolved
+        `{path}`. Objects with no `ekn.deploymentUnit` set are omitted. The
+        branch(es) these all land on come from the instance-wide
+        `deployment.deployBranch`/`deployment.sourceBranch`, not from the target.
+        This is derived before the `ekn` field is stripped from rendered
+        Kubernetes objects.
       '';
       readOnly = true;
     };
@@ -553,15 +580,15 @@ in
     gitOpsTargets = lib.mkOption {
       type = lib.types.anything;
       description = ''
-        Objects grouped by the `gitOps.targets.<name>` they route to (via
-        `ekn.gitOpsTarget`), each group paired with that target's resolved
-        `{path}`. Objects with no `ekn.gitOpsTarget` set are omitted. The
-        branch(es) these all land on come from the instance-wide
-        `gitOps.deployBranch`/`gitOps.sourceBranch`, not from the target.
-        This is derived before the `ekn` field is stripped from rendered
-        Kubernetes objects.
+        Deprecated name for `kubernetes.deploymentUnits`. Reading this still
+        works and prints a notice; it will be removed.
+
+        Declared as its own output rather than aliased, because
+        `mkRenamedOptionModule` writes a definition onto the option it
+        forwards to, and that one is read-only.
       '';
       readOnly = true;
+      internal = true;
     };
 
     novalidateKeys = lib.mkOption {
@@ -642,6 +669,11 @@ in
     rawFiles = lib.mkOption {
       type = lib.types.listOf (
         lib.types.submodule {
+          # `gitOpsTarget` was the old name here too, and the alias has to be
+          # inside the submodule for the same reason.
+          imports = [
+            (lib.mkRenamedOptionModule [ "gitOpsTarget" ] [ "deploymentUnit" ])
+          ];
           options = {
             path = lib.mkOption {
               type = lib.types.path;
@@ -653,10 +685,10 @@ in
                 `ekn kubeapply`/`ekn commit` read it directly instead.
               '';
             };
-            gitOpsTarget = lib.mkOption {
+            deploymentUnit = lib.mkOption {
               type = lib.types.nullOr lib.types.str;
               default = null;
-              description = "Same routing as ekn.gitOpsTarget on a normal object -- which gitOps.targets entry this file belongs to. Null omits it from every gitOpsTargets entry (still kubeapply-able via the full kubernetes.rawFiles list, just never committed to a GitOps branch).";
+              description = "Same routing as ekn.deploymentUnit on a normal object -- which deployment.units entry this file belongs to. Null omits it from every deploymentUnits entry (still kubeapply-able via the full kubernetes.rawFiles list, just never committed to a GitOps branch).";
             };
           };
         }
@@ -699,7 +731,7 @@ in
         literal value, overwriting the credential this mechanism exists to
         deliver.
 
-        Set `ekn.gitOpsTarget = null' on the object. `ekn kubeapply' applies
+        Set `ekn.deploymentUnit = null' on the object. `ekn kubeapply' applies
         it either way, including `--target <name>'; the routing only decides
         what `ekn commit' writes to a branch.
 
@@ -735,11 +767,24 @@ in
 
     generatedWithEkn = checked allGenerated;
 
-    gitOpsTargets =
+    # The deprecated name, carrying its notice on the value. `lib.warn`
+    # prints when a caller forces it, so a configuration that never reads
+    # the old name says nothing -- the same shape kluctl.nix uses for its
+    # own deprecation, and for the same reason: asking the option system
+    # who *defined* something closes a loop through `checked`.
+    gitOpsTargets = lib.warn ''
+      `kubernetes.gitOpsTargets' is now `kubernetes.deploymentUnits'.
+
+      "GitOps" named one way of delivering these objects, and it is not the
+      only one: `ekn kubeapply --target <name>' applies a unit by hand, with
+      no git and no controller in the path.
+    '' config.kubernetes.deploymentUnits;
+
+    deploymentUnits =
       let
         objectsByTarget = lib.pipe allGenerated [
-          (lib.filter (object: (object.ekn.gitOpsTarget or null) != null))
-          (lib.groupBy (object: object.ekn.gitOpsTarget))
+          (lib.filter (object: (object.ekn.deploymentUnit or null) != null))
+          (lib.groupBy (object: object.ekn.deploymentUnit))
           (lib.mapAttrs (
             _name: objects:
             # `ekn` belongs to the EKN compiler, not to the Kubernetes
@@ -752,8 +797,8 @@ in
           ))
         ];
         rawFilesByTarget = lib.pipe config.kubernetes.rawFiles [
-          (lib.filter (f: f.gitOpsTarget != null))
-          (lib.groupBy (f: f.gitOpsTarget))
+          (lib.filter (f: f.deploymentUnit != null))
+          (lib.groupBy (f: f.deploymentUnit))
           (lib.mapAttrs (_name: files: map (f: f.path) files))
         ];
 
@@ -763,16 +808,16 @@ in
         # from this instance's `generated`, so `ekn kubeapply --target
         # <name>` is the only thing that applies them.
         #
-        # Its routing is ignored on purpose. `ekn.gitOpsTarget` selects
+        # Its routing is ignored on purpose. `ekn.deploymentUnit` selects
         # between *this* instance's targets, and a nested instance's targets
         # are a different set entirely, so every object it renders is taken.
         submodulesByTarget = lib.mapAttrs (_name: t: t.instance.config.kubernetes) (
-          lib.filterAttrs (_name: t: t.modules != [ ]) config.gitOps.targets
+          lib.filterAttrs (_name: t: t.modules != [ ]) config.deployment.units
         );
 
         # `submodulesByTarget` too: a bootstrap target commonly has no
         # routed objects at all, and would otherwise be missing from
-        # `gitOpsTargets` entirely.
+        # `deploymentUnits` entirely.
         allTargetNames = lib.unique (
           lib.attrNames objectsByTarget ++ lib.attrNames rawFilesByTarget ++ lib.attrNames submodulesByTarget
         );
@@ -824,9 +869,9 @@ in
             name:
             let
               declared =
-                config.gitOps.targets.${name} or (throw ''
-                  ekn.gitOpsTarget references unknown GitOps target "${name}".
-                  Declared targets: ${lib.concatStringsSep ", " (lib.attrNames config.gitOps.targets)}
+                config.deployment.units.${name} or (throw ''
+                  ekn.deploymentUnit references unknown GitOps target "${name}".
+                  Declared targets: ${lib.concatStringsSep ", " (lib.attrNames config.deployment.units)}
                 '');
               submodule = submodulesByTarget.${name} or null;
             in

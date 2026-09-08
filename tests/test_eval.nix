@@ -10,10 +10,10 @@ let
         # say one. These keep the old default's value, which is what the
         # derived names below are asserted against.
         ekn.discriminator = "easykubenix";
-        gitOps.deployBranch = "deploy";
-        gitOps.targets.apps.path = "clusters/home/apps";
+        deployment.deployBranch = "deploy";
+        deployment.units.apps.path = "clusters/home/apps";
         kubernetes.objects.default.Deployment.api = {
-          ekn.gitOpsTarget = "apps";
+          ekn.deploymentUnit = "apps";
           apiVersion = "apps/v1";
         };
       })
@@ -240,13 +240,13 @@ let
     modules = [
       {
         ekn.discriminator = "easykubenix";
-        gitOps.deployBranch = "deploy";
-        gitOps.targets.apps.path = "clusters/home/apps";
+        deployment.deployBranch = "deploy";
+        deployment.units.apps.path = "clusters/home/apps";
         kubernetes.objects.default.ConfigMap.routed = {
-          ekn.gitOpsTarget = "apps";
+          ekn.deploymentUnit = "apps";
           data.key = "from-parent";
         };
-        gitOps.targets.bootstrap = {
+        deployment.units.bootstrap = {
           path = "bootstrap";
           modules = [
             (
@@ -256,7 +256,7 @@ let
                 # a real bootstrap config needs the branch to point a root
                 # Application at. Reading its rendered outputs would recurse.
                 kubernetes.objects.argocd.ConfigMap.root.data = {
-                  branch = parent.gitOps.deployBranch;
+                  branch = parent.deployment.deployBranch;
                 };
               }
             )
@@ -276,22 +276,22 @@ let
         { ekn, ... }:
         {
           ekn.discriminator = "easykubenix";
-          gitOps.deployBranch = "deploy";
-          gitOps.targets.apps.path = "clusters/home/apps";
+          deployment.deployBranch = "deploy";
+          deployment.units.apps.path = "clusters/home/apps";
           # Routed here from the parent, and stamped exactly like a submodule
           # object -- a target's metadata covers both sources.
           kubernetes.objects.default.ConfigMap.routed = {
-            ekn.gitOpsTarget = "bootstrap";
+            ekn.deploymentUnit = "bootstrap";
             data.key = "from-parent";
           };
           # The control: a target declaring no metadata stamps none, so the
           # assertions above are about the declaration rather than about
           # being in a target at all.
           kubernetes.objects.default.ConfigMap.unstamped = {
-            ekn.gitOpsTarget = "apps";
+            ekn.deploymentUnit = "apps";
             data.key = "ordinary";
           };
-          gitOps.targets.bootstrap = {
+          deployment.units.bootstrap = {
             path = "bootstrap";
             fieldManager = "argocd-controller";
             labels = {
@@ -439,10 +439,10 @@ let
           { ekn, ... }:
           {
             ekn.discriminator = "easykubenix";
-            gitOps.deployBranch = "deploy";
-            gitOps.targets.apps.path = "clusters/home/apps";
+            deployment.deployBranch = "deploy";
+            deployment.units.apps.path = "clusters/home/apps";
             kubernetes.objects.argocd.Secret.repo-creds = ekn.envSeeded {
-              ekn.gitOpsTarget = "apps";
+              ekn.deploymentUnit = "apps";
               stringData.password = ekn.envSeed "ARGOCD_REPO_PASSWORD";
             };
           }
@@ -481,8 +481,8 @@ let
     modules = [
       {
         ekn.discriminator = "easykubenix";
-        gitOps.deployBranch = "deploy";
-        gitOps.targets.bootstrap = {
+        deployment.deployBranch = "deploy";
+        deployment.units.bootstrap = {
           path = "bootstrap";
           modules = [ ({ mkThing, ... }: mkThing "from-a-special-arg") ];
         };
@@ -498,8 +498,8 @@ let
     modules = [
       {
         ekn.discriminator = "easykubenix";
-        gitOps.deployBranch = "deploy";
-        gitOps.targets.bootstrap = {
+        deployment.deployBranch = "deploy";
+        deployment.units.bootstrap = {
           path = "bootstrap";
           modules = [
             (
@@ -509,6 +509,23 @@ let
               }
             )
           ];
+        };
+      }
+    ];
+  };
+
+  # Every old name still works, so a consumer converts at its own pace rather
+  # than in one commit. `mkRenamedOptionModule` warns with the new path.
+  easyOldGitOpsNames = import ../. {
+    inherit pkgs;
+    modules = [
+      {
+        ekn.discriminator = "easykubenix";
+        gitOps.deployBranch = "deploy";
+        gitOps.targets.apps.path = "clusters/home/apps";
+        kubernetes.objects.default.ConfigMap.routed = {
+          ekn.gitOpsTarget = "apps";
+          data.key = "value";
         };
       }
     ];
@@ -535,9 +552,11 @@ in
   # applier, so they drop the seeded object. `internal.*` keeps it, because
   # everything reading that goes through the CLI, which substitutes first.
   forwardedSpecialArgs =
-    easyForwardedSpecialArgs.config.gitOps.targets.bootstrap.instance.config.kubernetes.generated;
+    easyForwardedSpecialArgs.config.deployment.units.bootstrap.instance.config.kubernetes.generated;
   parentStillWins =
-    easyParentStillWins.config.gitOps.targets.bootstrap.instance.config.kubernetes.generated;
+    easyParentStillWins.config.deployment.units.bootstrap.instance.config.kubernetes.generated;
+
+  oldGitOpsNamesStillWork = easyOldGitOpsNames.config.kubernetes.deploymentUnits;
 
   seededPublicManifest = easySeeded.config.internal.exportable.manifestAttrs;
   seededInternalManifest = easySeeded.config.internal.manifestAttrs;
@@ -549,13 +568,13 @@ in
   noDiscriminatorDeployThrows = easyNoDiscriminator.config.kluctl.script;
 
   eknRouting = {
-    inherit (easy.config.kubernetes) generatedByPath gitOpsTargets;
+    inherit (easy.config.kubernetes) generatedByPath deploymentUnits;
   };
-  gitOpsTargetMetadata = easyGitOpsTargetMetadata.config.kubernetes.gitOpsTargets;
+  deploymentUnitMetadata = easyGitOpsTargetMetadata.config.kubernetes.deploymentUnits;
   gitOpsSubmodule = {
-    inherit (easyGitOpsSubmodule.config.kubernetes) generated gitOpsTargets;
+    inherit (easyGitOpsSubmodule.config.kubernetes) generated deploymentUnits;
     nestedDiscriminator =
-      easyGitOpsSubmodule.config.gitOps.targets.bootstrap.instance.config.ekn.discriminator;
+      easyGitOpsSubmodule.config.deployment.units.bootstrap.instance.config.ekn.discriminator;
   };
   labelsAnnotationsCoercion = easyCoercion.config.kubernetes.generated;
   labelsAnnotationsCoercionDisabled = easyCoercionDisabled.config.kubernetes.generated;

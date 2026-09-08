@@ -33,8 +33,8 @@
                   # produce, so two projects sharing a name on one cluster
                   # delete each other's work.
                   ekn.discriminator = "example-flake";
-                  gitOps.enable = true;
-                  gitOps.deployBranch = "flake-branch";
+                  deployment.enable = true;
+                  deployment.deployBranch = "flake-branch";
                 }
               ];
             }).config;

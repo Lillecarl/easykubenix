@@ -109,7 +109,7 @@ class TestEknModule:
 
         deployment = result["generatedByPath"]["default"]["Deployment"]["api"]
         assert "ekn" not in deployment
-        target = result["gitOpsTargets"]["apps"]
+        target = result["deploymentUnits"]["apps"]
         assert target["target"]["path"] == "clusters/home/apps"
         # Derived from `ekn.discriminator`, per target, so pruning one target
         # cannot reach another's objects -- see gitops.nix.
@@ -128,7 +128,7 @@ class TestEknModule:
         """
         result = await evaluate_file(NIX_TEST_FILE, "gitOpsSubmodule")
         assert isinstance(result, dict)
-        targets = result["gitOpsTargets"]
+        targets = result["deploymentUnits"]
 
         # A target with only submodule objects and no routed ones still has
         # to appear -- that is the normal shape for a bootstrap target.
@@ -159,10 +159,10 @@ class TestEknModule:
         result = await evaluate_file(NIX_TEST_FILE, "gitOpsSubmodule")
         assert isinstance(result, dict)
 
-        for name, entry in result["gitOpsTargets"].items():
+        for name, entry in result["deploymentUnits"].items():
             assert sorted(entry["target"]) == ["discriminator", "fieldManager", "path"], name
 
-        assert result["gitOpsTargets"]["bootstrap"]["target"] == {
+        assert result["deploymentUnits"]["bootstrap"]["target"] == {
             "path": "bootstrap",
             "discriminator": "easykubenix-bootstrap",
             "fieldManager": "ekn",
@@ -437,7 +437,7 @@ class TestGitOpsTargetMetadata:
         return {obj["metadata"]["name"]: obj for obj in entry["objects"]}
 
     async def test_field_manager_is_apply_time_only(self) -> None:
-        result = await evaluate_file(NIX_TEST_FILE, "gitOpsTargetMetadata")
+        result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadata")
         assert isinstance(result, dict)
 
         assert result["bootstrap"]["target"]["fieldManager"] == "argocd-controller"
@@ -452,11 +452,11 @@ class TestGitOpsTargetMetadata:
             assert "fieldManager" not in obj["metadata"]
 
     async def test_metadata_covers_routed_and_submodule_objects_alike(self) -> None:
-        result = await evaluate_file(NIX_TEST_FILE, "gitOpsTargetMetadata")
+        result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadata")
         assert isinstance(result, dict)
         objects = self._by_name(result["bootstrap"])
 
-        # `routed` comes from the parent via `ekn.gitOpsTarget`, `root` from
+        # `routed` comes from the parent via `ekn.deploymentUnit`, `root` from
         # the target's own `modules`. A target's metadata is about the target,
         # so both sources get it.
         assert sorted(objects) == ["argocd", "root", "routed", "widgets.example.com"]
@@ -464,7 +464,7 @@ class TestGitOpsTargetMetadata:
             assert objects[name]["metadata"]["labels"]["ekn.dev/kind"] == "ConfigMap", name
 
     async def test_target_labels_win_over_the_object_s_own(self) -> None:
-        result = await evaluate_file(NIX_TEST_FILE, "gitOpsTargetMetadata")
+        result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadata")
         assert isinstance(result, dict)
         root = self._by_name(result["bootstrap"])["root"]
 
@@ -475,7 +475,7 @@ class TestGitOpsTargetMetadata:
         assert root["metadata"]["labels"]["app.kubernetes.io/instance"] == "argocd"
 
     async def test_tracking_id_encodes_each_object_s_own_identity(self) -> None:
-        result = await evaluate_file(NIX_TEST_FILE, "gitOpsTargetMetadata")
+        result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadata")
         assert isinstance(result, dict)
         objects = self._by_name(result["bootstrap"])
 
@@ -502,7 +502,7 @@ class TestGitOpsTargetMetadata:
         the live object does is a diff on every sync, forever -- on exactly
         the objects a bootstrap target is most likely applying.
         """
-        result = await evaluate_file(NIX_TEST_FILE, "gitOpsTargetMetadata")
+        result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadata")
         assert isinstance(result, dict)
         crd = self._by_name(result["bootstrap"])["widgets.example.com"]
 
@@ -513,7 +513,7 @@ class TestGitOpsTargetMetadata:
         assert crd["metadata"]["labels"]["ekn.dev/kind"] == "CustomResourceDefinition"
 
     async def test_a_target_declaring_no_metadata_stamps_none(self) -> None:
-        result = await evaluate_file(NIX_TEST_FILE, "gitOpsTargetMetadata")
+        result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadata")
         assert isinstance(result, dict)
         unstamped = self._by_name(result["apps"])["unstamped"]
 
@@ -528,7 +528,7 @@ class TestGitOpsTargetSubmoduleEndToEnd:
     """The two CLI paths a bootstrap target is actually used through, against
     a real evaluation rather than a hand-built shape.
 
-    Both are unchanged Python: the join happens in `kubernetes.gitOpsTargets`,
+    Both are unchanged Python: the join happens in `kubernetes.deploymentUnits`,
     so `ekn commit` and `ekn kubeapply --target` see submodule objects through
     the same fields they already read. These tests are what says so.
     """
@@ -542,8 +542,8 @@ class TestGitOpsTargetSubmoduleEndToEnd:
                 # No default for this, and every target derives its own
                 # prune scope from it -- see easykubenix/ekn.nix.
                 ekn.discriminator = "easykubenix";
-                gitOps.deployBranch = "deploy";
-                gitOps.targets.bootstrap = {{
+                deployment.deployBranch = "deploy";
+                deployment.units.bootstrap = {{
                   path = "bootstrap";
                   fieldManager = "argocd-controller";
                   labels."app.kubernetes.io/instance" = "argocd";
@@ -664,14 +664,14 @@ class TestAssertionsAndWarnings:
         """A GitOps target's `modules` are their own instance with their own
         `assertions`. Nothing plumbs them up to the parent -- the nested
         `kubernetes.nix` runs its own checker when its `generated` is forced,
-        and forcing the parent's `gitOpsTargets` is what forces that.
+        and forcing the parent's `deploymentUnits` is what forces that.
         """
         probe = tmp_path / "nested.nix"
         probe.write_text(f"""
             (import {PROJECT_ROOT} {{
               modules = [{{
-                gitOps.deployBranch = "deploy";
-                gitOps.targets.bootstrap.modules = [{{
+                deployment.deployBranch = "deploy";
+                deployment.units.bootstrap.modules = [{{
                   assertions = [{{ assertion = false; message = "deliberate nested failure"; }}];
                   kubernetes.objects.argocd.ConfigMap.root.data.key = "value";
                 }}];
@@ -680,7 +680,7 @@ class TestAssertionsAndWarnings:
         """)
 
         with pytest.raises(nanopynix.NixError, match="deliberate nested failure"):
-            await evaluate_file(probe, "kubernetes.gitOpsTargets")
+            await evaluate_file(probe, "kubernetes.deploymentUnits")
 
 
 class TestValidationConfig:

@@ -109,12 +109,12 @@ in
         nothing reports it. A project answering this option for the first
         time after upgrading past the removed default must therefore repeat
         the value it was deploying under, which was `easykubenix`. Check the
-        derived per-target names too -- `gitOps.targets.<name>.discriminator`
+        derived per-target names too -- `deployment.units.<name>.discriminator`
         is this value, a hyphen, and the target name, so it has to keep
         matching what is on the cluster.
 
         Per-GitOps-target applies get their own derived value -- see
-        `gitOps.targets.<name>.discriminator`.
+        `deployment.units.<name>.discriminator`.
       '';
       example = "acme-production";
     };
