@@ -17,7 +17,9 @@ let
   #
   # Put a priority inside the content, not around the marker. Write
   # `mkIfExists { replicas = lib.mkForce 3; }`, never
-  # `lib.mkForce (mkIfExists { ... })`.
+  # `lib.mkForce (mkIfExists { ... })`. The type refuses the second form; see
+  # `hasOverriddenMarker` and the throw in `mergeEntry` for what it would
+  # otherwise do.
   mkIfExists = content: {
     _type = markerType;
     inherit content;
@@ -122,6 +124,52 @@ let
         }) definition.value
       );
 
+      # Follow the module system's three wrapper shapes looking for a marker.
+      # Only those three: a marker inside ordinary content is none of this
+      # function's business, and searching there would mean a full traversal of
+      # every definition of every key.
+      containsMarker =
+        value:
+        lib.isAttrs value
+        && (
+          if isIfExists value then
+            true
+          else
+            let
+              type = value._type or null;
+            in
+            if type == "override" || type == "if" then
+              containsMarker value.content
+            else if type == "merge" then
+              lib.any containsMarker value.contents
+            else
+              false
+        );
+
+      # True when a definition puts a priority around a marker rather than
+      # inside its content. See the throw in `mergeEntry` for why that can
+      # never be what the author meant.
+      #
+      # `mkIf` is followed but not itself an offence. It changes no priority,
+      # so `mkIf cond (mkIfExists { ... })` is a legitimate way to write a
+      # conditional patch.
+      hasOverriddenMarker =
+        value:
+        lib.isAttrs value
+        && (
+          let
+            type = value._type or null;
+          in
+          if type == "override" then
+            containsMarker value.content
+          else if type == "if" then
+            hasOverriddenMarker value.content
+          else if type == "merge" then
+            lib.any hasOverriddenMarker value.contents
+          else
+            false
+        );
+
       mergeEntry =
         loc: definitions:
         let
@@ -131,6 +179,13 @@ let
           plainOrdinary = lib.all (
             definition: !(lib.isAttrs definition.value && definition.value ? _type)
           ) definitions;
+
+          # Guarded on the fast path, so an ordinary key pays nothing for it.
+          overriddenMarkers =
+            if plainOrdinary then
+              [ ]
+            else
+              lib.filter (definition: hasOverriddenMarker definition.value) definitions;
           collected =
             (lib.modules.mergeDefinitions loc definitionCollector definitions).optionalValue.value or [ ];
           ordinary = lib.filter (definition: !isIfExists definition.value) collected;
@@ -142,7 +197,31 @@ let
           );
         in
         {
-          exists = plainOrdinary || ordinary != [ ];
+          # The check hangs on `exists` and not on `value`, because the case it
+          # catches makes the key stop existing -- and nothing forces the value
+          # of a key that does not exist.
+          exists =
+            if overriddenMarkers != [ ] then
+              throw ''
+                The option `${lib.showOption loc}' puts a priority around an
+                `mkIfExists' marker, as in `lib.mkForce (lib.mkIfExists { ... })'.
+
+                That cannot work in either direction, so it is refused rather
+                than obeyed. A priority above the ordinary definitions of this
+                key outranks them: `filterOverrides' drops them, the marker then
+                finds no ordinary definition left, and the key it meant to patch
+                is deleted. A priority below them is itself dropped, and the
+                marker does nothing at all.
+
+                Put the priority inside the content:
+
+                  lib.mkIfExists { replicas = lib.mkForce 3; }
+
+                `mkIf' around a marker is fine and stays allowed. It changes no
+                priority.
+              ''
+            else
+              plainOrdinary || ordinary != [ ];
           value = evaluation.mergedValue;
           valueMeta = evaluation.checkedAndMerged.valueMeta;
         };

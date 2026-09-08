@@ -123,23 +123,53 @@ class TestPrioritiesAndMarkers:
         result = await evaluate_file(NIX_TEST_FILE, "forcedOrdinaryDefinitionTakesTheSlowPath")
         assert result == {"present": {"replicas": 3}}
 
-    async def test_forcing_a_marker_deletes_the_key_it_meant_to_patch(self) -> None:
-        """Recorded, not endorsed -- and worse than it looks.
+    async def test_a_conditional_marker_is_allowed(self) -> None:
+        # `mkIf` changes no priority, so it is the ordinary way to write a
+        # patch that is itself conditional. It stays legal.
+        result = await evaluate_file(NIX_TEST_FILE, "conditionalMarkerIsAllowed")
+        assert result == {"present": {"base": True, "patch": True}}
 
-        conditionalAttrsOf.nix says to put a priority inside the content and
-        never around the marker. This is the mistake it warns about, and the
-        warning understates it. `mergeEntry` runs `filterOverrides` inside its
-        collector, so a forced marker at priority 50 outranks the ordinary
-        definition at 100 and removes it from `collected`. `ordinary` is then
-        empty, the key stops existing, and the value the patch aimed at is
-        gone.
+    async def test_a_switched_off_conditional_marker_patches_nothing(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "conditionalMarkerSwitchedOff")
+        assert result == {"present": {"base": True}}
 
-        `kubernetes.objects` is a `conditionalAttrsOf` at the namespace, Kind
-        and name levels, so the same mistake one level up deletes every object
-        of a Kind rather than patching one.
 
-        This test states what happens today. Making the type refuse it is a
-        decision about the type, not about this test.
-        """
-        result = await evaluate_file(NIX_TEST_FILE, "forcedMarkerAroundAnExistingKey")
-        assert result == {}
+class TestAPriorityAroundAMarkerIsRejected:
+    """A priority belongs inside the marker's content, never around the marker.
+
+    Around it, the definition cannot work in either direction. A priority above
+    the key's ordinary definitions outranks them: `filterOverrides` drops them,
+    the marker finds no ordinary definition left, and the key it meant to patch
+    is *deleted*. A priority below them is itself dropped and the marker does
+    nothing at all.
+
+    That deletion is the reason this throws rather than being documented.
+    `kubernetes.objects` is a `conditionalAttrsOf` at the namespace, Kind and
+    name levels, so the same slip one level up empties a whole Kind in silence.
+    """
+
+    async def test_a_forced_marker_is_rejected(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="puts a priority around an"):
+            await evaluate_file(NIX_TEST_FILE, "forcedMarkerThrows")
+
+    async def test_the_error_names_the_option_and_the_fix(self) -> None:
+        with pytest.raises(nanopynix.NixError, match=r"value\.present"):
+            await evaluate_file(NIX_TEST_FILE, "forcedMarkerThrows")
+        with pytest.raises(nanopynix.NixError, match=r"lib\.mkForce 3"):
+            await evaluate_file(NIX_TEST_FILE, "forcedMarkerThrows")
+
+    async def test_a_defaulted_marker_is_rejected_too(self) -> None:
+        # The direction that merely does nothing. Refused by the same rule,
+        # rather than left as a definition that silently never applies.
+        with pytest.raises(nanopynix.NixError, match="puts a priority around an"):
+            await evaluate_file(NIX_TEST_FILE, "defaultedMarkerThrows")
+
+    async def test_an_override_nested_under_an_mk_if_is_rejected(self) -> None:
+        # The wrappers nest, so the check follows them. `mkIf` is not itself an
+        # offence, and an override under one still is.
+        with pytest.raises(nanopynix.NixError, match="puts a priority around an"):
+            await evaluate_file(NIX_TEST_FILE, "markerForcedUnderAnMkIfThrows")
+
+    async def test_an_override_inside_an_mk_merge_is_rejected(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="puts a priority around an"):
+            await evaluate_file(NIX_TEST_FILE, "markerForcedInsideAnMkMergeThrows")

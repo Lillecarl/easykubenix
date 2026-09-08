@@ -193,19 +193,34 @@ let
     { value.present.replicas = lib.mkForce 3; }
   ];
 
-  # A probe, not an assertion of what is right.
-  #
-  # The file comment says to put a priority inside the content and never
-  # around the marker. `lib.mkForce (mkIfExists { ... })` is the mistake it
-  # warns about. `mergeEntry` runs `filterOverrides` inside its collector, so
-  # the forced marker at priority 50 outranks the ordinary definition at 100
-  # and removes it from `collected`. `ordinary` is then empty and the key
-  # stops existing -- the ordinary definition is deleted by a patch that meant
-  # to add to it.
-  #
-  # The test records what this does today. Whether the type should refuse it
-  # is a decision about the type.
-  forcedMarkerAroundAnExistingKey = evalValue [
+  # `mkIf` around a marker changes no priority, so it stays legal. It is the
+  # ordinary way to write a patch that is itself conditional.
+  conditionalMarkerIsAllowed = evalValue [
+    { value.present.base = true; }
+    {
+      value.present = lib.mkIf true (mkIfExists {
+        patch = true;
+      });
+    }
+  ];
+
+  conditionalMarkerSwitchedOff = evalValue [
+    { value.present.base = true; }
+    {
+      value.present = lib.mkIf false (mkIfExists {
+        patch = true;
+      });
+    }
+  ];
+
+  # The following bindings must throw. Each one is exposed as a thunk, so the
+  # test can assert on the error without an eager evaluation above.
+
+  # A priority around the marker rather than inside its content. Refused,
+  # because it cannot work in either direction: a higher priority outranks the
+  # ordinary definitions and the marker then deletes the key it meant to
+  # patch, and a lower one is itself dropped.
+  forcedMarkerThrows = evalValue [
     { value.present.base = true; }
     {
       value.present = lib.mkForce (mkIfExists {
@@ -214,8 +229,43 @@ let
     }
   ];
 
-  # The following bindings must throw. Each one is exposed as a thunk, so the
-  # test can assert on the error without an eager evaluation above.
+  # The other direction, which merely does nothing. Refused by the same rule,
+  # rather than left as a definition that silently never applies.
+  defaultedMarkerThrows = evalValue [
+    { value.present.base = true; }
+    {
+      value.present = lib.mkDefault (mkIfExists {
+        patch = true;
+      });
+    }
+  ];
+
+  # The wrappers nest, so the check follows them. `mkIf` is not itself an
+  # offence, and an override under one still is.
+  markerForcedUnderAnMkIfThrows = evalValue [
+    { value.present.base = true; }
+    {
+      value.present = lib.mkIf true (
+        lib.mkForce (mkIfExists {
+          patch = true;
+        })
+      );
+    }
+  ];
+
+  # `mkMerge` too, on either side.
+  markerForcedInsideAnMkMergeThrows = evalValue [
+    { value.present.base = true; }
+    {
+      value.present = lib.mkMerge [
+        { other = true; }
+        (lib.mkForce (mkIfExists {
+          patch = true;
+        }))
+      ];
+    }
+  ];
+
   emptyPathThrows = mkIfExistsAtPath [ ] { };
   emptyStringComponentThrows = mkIfExistsAtPath "existing..application" { };
   quotedStringPathThrows = mkIfExistsAtPath ''existing."Deployment".application'' { };
@@ -249,11 +299,16 @@ in
     trueBaseExists
     markerOnAScalarKey
     forcedOrdinaryDefinitionTakesTheSlowPath
-    forcedMarkerAroundAnExistingKey
+    conditionalMarkerIsAllowed
+    conditionalMarkerSwitchedOff
     ;
   markerOnlyScalarKeyStaysAbsent = !(markerOnlyScalarKeyStaysAbsent ? missing);
 
   inherit
+    forcedMarkerThrows
+    defaultedMarkerThrows
+    markerForcedUnderAnMkIfThrows
+    markerForcedInsideAnMkMergeThrows
     emptyPathThrows
     emptyStringComponentThrows
     quotedStringPathThrows
