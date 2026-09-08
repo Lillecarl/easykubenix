@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, ClassVar
 
 import anyio
 import pytest
@@ -145,7 +145,7 @@ class TestDiscover:
     # The multus CRD, which is where this was found. Its singular carries
     # hyphens, so the lowercased Kind -- "networkattachmentdefinition" --
     # equals neither the plural, nor the Kind, nor the singular.
-    MULTUS = {
+    MULTUS: ClassVar[dict[str, Any]] = {
         "version": "k8s.cni.cncf.io/v1",
         "kind": "NetworkAttachmentDefinition",
         "name": "network-attachment-definitions",
@@ -157,7 +157,7 @@ class TestDiscover:
     # resolved under the old lookup and still has to resolve under this one.
     # The pair is the point: the fix identifies a kind exactly, rather than
     # widening a match until the broken case slips through.
-    KUBEVIRT = {
+    KUBEVIRT: ClassVar[dict[str, Any]] = {
         "version": "kubevirt.io/v1",
         "kind": "VirtualMachineInstance",
         "name": "virtualmachineinstances",
@@ -186,7 +186,7 @@ class TestDiscover:
         so both have to agree."""
         api = FakeApi(resources=[self.MULTUS])
 
-        with pytest.raises(ValueError, match="k8s.cni.cncf.io/v1alpha1"):
+        with pytest.raises(ValueError, match=r"k8s\.cni\.cncf\.io/v1alpha1"):
             await discover(api, "NetworkAttachmentDefinition", "k8s.cni.cncf.io/v1alpha1")  # type: ignore[arg-type]
 
     async def test_reads_discovery_again_when_the_cache_does_not_have_the_kind(self) -> None:
