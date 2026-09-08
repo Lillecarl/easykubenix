@@ -243,6 +243,22 @@ class TestEknModule:
         assert isinstance(result, list)
         assert result[0]["kind"] == "ConfigMap"
 
+    async def test_conditional_definitions_patch_without_creating(self) -> None:
+        # `kubernetes.objects` is a `conditionalAttrsOf` at the namespace, the
+        # Kind and the object name. A `lib.mkIfExists` definition at any of
+        # the three joins what is there and creates nothing that is not.
+        result = await evaluate_file(NIX_TEST_FILE, "conditionalObjects")
+        assert isinstance(result, list)
+        assert [(o["kind"], o["metadata"]["name"]) for o in result] == [
+            ("ConfigMap", "added"),
+            ("Deployment", "api"),
+            ("Deployment", "extra"),
+        ]
+        api = result[1]
+        # Both marker forms reached the object that exists.
+        assert api["spec"]["replicas"] == 3
+        assert api["metadata"]["annotations"]["patched"] == "true"
+
     async def test_a_manifest_renders_without_a_discriminator(self) -> None:
         # `ekn.discriminator` has no default. Rendering must not read it:
         # a manifest is a file, and a file prunes nothing.

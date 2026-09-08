@@ -179,21 +179,27 @@ in
     };
 
     objects = lib.mkOption {
-      type = lib.types.attrsOf (
+      # `lib.conditionalAttrsOf` at all three levels, so `lib.mkIfExists` and
+      # `lib.mkIfExistsAtPath` reach a namespace, a Kind and an object.
+      # Otherwise a module cannot patch a resource another module owns without
+      # creating it when that module stops shipping it. See
+      # lib/conditionalAttrsOf.nix. A definition with no marker takes a fast
+      # path and behaves exactly as `attrsOf` did.
+      type = lib.conditionalAttrsOf (
         lib.types.submodule (
           { name, ... }:
           let
             namespace = name;
           in
           {
-            freeformType = lib.types.attrsOf (
+            freeformType = lib.conditionalAttrsOf (
               lib.types.submodule (
                 { name, ... }:
                 let
                   kind = name;
                 in
                 {
-                  freeformType = lib.types.attrsOf (
+                  freeformType = lib.conditionalAttrsOf (
                     lib.types.submodule (
                       { name, ... }:
                       {

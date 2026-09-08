@@ -334,6 +334,55 @@ let
   # that never thought about the prune scope looks like. It has to render --
   # a manifest is not a deploy -- and it has to fail the moment somebody
   # builds something that applies.
+  # `lib.mkIfExists` and `lib.mkIfExistsAtPath` against the real
+  # `kubernetes.objects` tree. One Deployment exists. The second module names
+  # a namespace, a Kind and an object that do not, and must create none of
+  # them, while still patching the one that does.
+  easyConditionalObjects = import ../. {
+    inherit pkgs;
+    modules = [
+      { kubernetes.objects.default.Deployment.api.spec.replicas = 1; }
+      (
+        { lib, ... }:
+        {
+          kubernetes.objects = lib.mkMerge [
+            {
+              # No `missing` namespace exists, so this creates nothing.
+              missing = lib.mkIfExists {
+                ConfigMap.never.data.key = "value";
+              };
+              default = lib.mkIfExists {
+                # A conditional namespace that exists still adds children.
+                ConfigMap.added.data.key = "value";
+                # A conditional Kind that does not exist creates nothing,
+                # including the object named under it.
+                MissingKind = lib.mkIfExists {
+                  absent.spec.replicas = 10;
+                };
+                Deployment = lib.mkIfExists {
+                  # A conditional Kind that exists still adds children.
+                  extra.spec.replicas = 2;
+                  # A conditional object that does not exist creates nothing.
+                  gone = lib.mkIfExists { spec.replicas = 10; };
+                  # A conditional object that exists is patched.
+                  api = lib.mkIfExists { spec.replicas = lib.mkForce 3; };
+                };
+              };
+            }
+            (lib.mkIfExistsAtPath "default.Deployment.api" {
+              metadata.annotations.patched = "true";
+            })
+            (lib.mkIfExistsAtPath [
+              "default"
+              "Deployment"
+              "vanished"
+            ] { spec.replicas = 10; })
+          ];
+        }
+      )
+    ];
+  };
+
   easyNoDiscriminator = import ../. {
     inherit pkgs;
     modules = [
@@ -345,6 +394,8 @@ in
   # Only that it evaluates. The notice itself is `lib.warn` on
   # `kluctl.projectDir`, which nothing here forces.
   kluctlScriptReadsManifest = easyKluctlScriptReadsManifest.config.kubernetes.generated;
+
+  conditionalObjects = easyConditionalObjects.config.kubernetes.generated;
 
   noDiscriminatorRenders = easyNoDiscriminator.config.kubernetes.generated;
   noDiscriminatorDeployThrows = easyNoDiscriminator.config.kluctl.script;
