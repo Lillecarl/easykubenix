@@ -693,14 +693,21 @@ in
 
         ${lib.concatMapStringsSep "\n" (entry: "  ${entry}") seededGitOpsObjects}
 
-        A GitOps target is committed to a branch and applied by something
-        else -- ArgoCD, not `ekn'. Nothing there resolves the reference, so
+        `ekn' is the only thing that resolves an `ekn.envSeed' reference.
+        Routing an object to a GitOps target hands it to something else, so
         the object would reach the cluster with `$ekn:env:VARNAME' as its
         literal value, overwriting the credential this mechanism exists to
         deliver.
 
-        A seeded Secret is applied by `ekn kubeapply' and nothing else.
-        Remove its `ekn.gitOpsTarget'.
+        Set `ekn.gitOpsTarget = null' on the object. `ekn kubeapply' applies
+        it either way, including `--target <name>'; the routing only decides
+        what `ekn commit' writes to a branch.
+
+        This fires inside a nested bootstrap instance too, where nobody
+        commits the target and `ekn kubeapply --target' applies it directly.
+        The assertion is deliberately blunt there rather than carved out: it
+        cannot tell from here whether a given target is ever committed, and
+        a wrong guess writes a credential to git.
       '';
     }
   ];
