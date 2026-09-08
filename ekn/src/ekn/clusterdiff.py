@@ -138,13 +138,13 @@ async def cluster_diff(
         variables = seeds.annotated_variables(spec)
         seeded_fields: set[str] = set()
         if variables:
-            if not any(variable in os.environ for variable in variables):
+            if not any(seeds.is_supplied(variable) for variable in variables):
                 chunks.append(f"# {label}: seeded, not compared ({', '.join(variables)} not set)\n")
                 continue
             seeded_fields = {reference.path[-1] for reference in seeds.references(spec) if reference.path}
             # Rebinding `spec`: the substituted object is exactly what an
             # apply would send, so that is what the diff must compare.
-            spec = seeds.substitute(spec, {v: os.environ[v] for v in variables if v in os.environ})
+            spec = seeds.substitute(spec, {v: os.environ[v] for v in variables if seeds.is_supplied(v)})
 
         # A kind whose CRD hasn't landed on this cluster yet (e.g. a fresh
         # bootstrap target that hasn't been applied yet) can't be resolved
