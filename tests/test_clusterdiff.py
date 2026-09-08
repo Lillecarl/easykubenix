@@ -7,6 +7,7 @@ import httpx
 import kr8s
 import pytest
 
+from ekn import clusterdiff
 from ekn.clusterdiff import _normalize, cluster_diff
 
 
@@ -203,3 +204,29 @@ class TestClusterDiff:
         # The one resolvable object still gets a real (empty, matching) diff --
         # one bad kind doesn't abort the whole run.
         assert result.count("#") == 1
+
+
+class TestSeededObjects:
+    """`ekn clusterdiff` follows the same rule the apply does, keyed on the
+    variable: a seed whose variable is unset is not compared, because an
+    apply would neither update nor remove it."""
+
+    def test_a_seeded_field_is_redacted(self) -> None:
+        # It is the predicted side that leaks: a live Secret comes back
+        # base64 in `data`, but the predicted object holds the substituted
+        # plaintext and would be rendered straight into the diff.
+        redacted = clusterdiff._redact(
+            {
+                "kind": "Secret",
+                "stringData": {"password": "s3cret", "username": "ci"},
+                "data": {"password": "czNjcmV0"},
+            },
+            {"password"},
+        )
+        assert redacted["stringData"]["password"] == clusterdiff._REDACTED
+        assert redacted["stringData"]["username"] == "ci"
+        assert redacted["data"]["password"] == clusterdiff._REDACTED
+
+    def test_nothing_is_redacted_without_seeded_fields(self) -> None:
+        obj = {"kind": "Secret", "stringData": {"password": "s3cret"}}
+        assert clusterdiff._redact(obj, set()) == obj

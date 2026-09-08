@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import copy
 import difflib
+import os
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
 import kr8s
 import yaml
 
+from ekn import seeds
 from ekn.apply import build_object, ssa_apply
 
 if TYPE_CHECKING:
@@ -28,6 +30,30 @@ _NOISY_METADATA_KEYS = (
     "creationTimestamp",
     "selfLink",
 )
+
+
+#: What a seeded field's value is replaced by in diff output.
+_REDACTED = "<redacted: seeded credential>"
+
+
+def _redact(obj: Manifest, fields: set[str]) -> Manifest:
+    """Blank every seeded field, in both `stringData` and `data`.
+
+    It is the *predicted* side that leaks: a live Secret comes back
+    base64-encoded in `data`, but the predicted object holds the substituted
+    plaintext, and it would be rendered straight into the diff. Both sides
+    are redacted anyway -- base64 is not concealment, and a diff that shows
+    one side is still a diff that shows the secret changed to something
+    printable.
+    """
+    if not fields:
+        return obj
+    result = dict(obj)
+    for section in ("stringData", "data"):
+        values = result.get(section)
+        if isinstance(values, dict):
+            result[section] = {key: (_REDACTED if key in fields else value) for key, value in values.items()}
+    return result
 
 
 def _normalize(raw: Any) -> Manifest:
@@ -99,6 +125,27 @@ async def cluster_diff(
     for spec in sorted(objects, key=_object_label):
         label = _object_label(spec)
 
+        # A seeded credential follows the same rule the apply does, keyed on
+        # the variable rather than on the object.
+        #
+        # Unset is the steady state, and an apply would neither update nor
+        # remove it, so there is nothing to report. Without this the rendered
+        # side holds `$ekn:env:VARNAME` while the live side holds the real
+        # credential, and the two can never converge: a permanent false
+        # positive, on exactly the objects where that is worst.
+        #
+        # Set means an apply *would* act, so the diff should say so.
+        variables = seeds.annotated_variables(spec)
+        seeded_fields: set[str] = set()
+        if variables:
+            if not any(variable in os.environ for variable in variables):
+                chunks.append(f"# {label}: seeded, not compared ({', '.join(variables)} not set)\n")
+                continue
+            seeded_fields = {reference.path[-1] for reference in seeds.references(spec) if reference.path}
+            # Rebinding `spec`: the substituted object is exactly what an
+            # apply would send, so that is what the diff must compare.
+            spec = seeds.substitute(spec, {v: os.environ[v] for v in variables if v in os.environ})
+
         # A kind whose CRD hasn't landed on this cluster yet (e.g. a fresh
         # bootstrap target that hasn't been applied yet) can't be resolved
         # to a plural/namespaced REST endpoint at all -- kr8s's own
@@ -116,7 +163,7 @@ async def cluster_diff(
 
         try:
             await live_obj.async_refresh()
-            live_yaml = _dump(live_obj.raw)
+            live_yaml = _dump(_redact(_normalize(live_obj.raw), seeded_fields))
         except kr8s.NotFoundError:
             live_yaml = ""
 
@@ -131,7 +178,7 @@ async def cluster_diff(
             # spec itself so this still reads as "would be newly created"
             # (matching the plain new-object case) instead of aborting.
             predicted = spec
-        predicted_yaml = _dump(predicted)
+        predicted_yaml = _dump(_redact(_normalize(predicted), seeded_fields))
 
         if live_yaml == predicted_yaml:
             continue
