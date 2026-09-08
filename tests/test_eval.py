@@ -423,6 +423,31 @@ class TestEknModule:
         assert "hello" in result
 
 
+class TestValidationServiceSubnet:
+    async def test_the_option_reaches_the_apiserver_flag(self) -> None:
+        """The option decided the certificate SANs and nothing else.
+
+        `--service-cluster-ip-range` was the literal `10.96.0.0/12`, so
+        `validation.serviceSubnet` could not make the harness accept an IPv6
+        Service whatever it was set to -- the option's own comment described a
+        behaviour the code did not have. An IPv6-only environment failed with
+
+            Invalid value: "IPv6": not configured on this cluster
+
+        and, since `ekn deploy` validates first, could not be deployed either.
+
+        The literal was wrong on its own terms too: `10.96.0.0/12` reaches
+        10.111.255.255 and so swallows `podSubnet`'s default of 10.97.0.0/16.
+        """
+        result = await evaluate_file(NIX_TEST_FILE, "serviceSubnetReachesTheApiserverFlag")
+        assert isinstance(result, dict)
+        # The whole value, so a fix that passed only the IPv4 half would fail.
+        assert result["inFlag"] is True
+        assert result["noHardcodedRange"] is True
+        # Both consumers read one option, so the flag and the SANs agree.
+        assert result["inKubeadmConfig"] == "10.99.0.0/16,fd00:99::/112"
+
+
 class TestRenamedOptionAliases:
     """The old `gitOps.*` names, and what keeping them costs.
 

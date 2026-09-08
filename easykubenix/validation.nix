@@ -40,6 +40,18 @@ in
       # any manifest containing a dual-stack Service (e.g. via a Kyverno
       # mutate policy that sets ipFamilyPolicy=RequireDualStack cluster-wide)
       # even though the real target cluster supports it fine.
+      #
+      # This reaches the API server two ways, and for a while it only reached
+      # one. `kubeadmConfig.networking.serviceSubnet` below decides the
+      # certificate SANs; `--service-cluster-ip-range` in the script decides
+      # what the API server will actually allocate and accept. That flag was a
+      # literal `10.96.0.0/12`, so this option and the comment above it
+      # described a behaviour the harness did not have: an IPv6 Service failed
+      # with "IPv6 is not configured on this cluster" whatever this said.
+      #
+      # The literal was also wrong on its own terms. `10.96.0.0/12` reaches
+      # 10.111.255.255 and so swallows `podSubnet`'s own default of
+      # 10.97.0.0/16. The `/16` here does not.
       default = "10.96.0.0/16,fd00:96::/112";
     };
     script = lib.mkOption {
@@ -142,7 +154,7 @@ in
               --etcd-certfile=$CERT_DIR/apiserver-etcd-client.crt \
               --etcd-keyfile=$CERT_DIR/apiserver-etcd-client.key \
               --etcd-servers=https://127.0.0.1:$ETCD_CLIENT_PORT \
-              --service-cluster-ip-range=10.96.0.0/12 \
+              --service-cluster-ip-range=${cfg.serviceSubnet} \
               --bind-address=$BIND_ADDRESS \
               --secure-port=$KUBERNETES_PORT \
               --allow-privileged=true \

@@ -558,6 +558,22 @@ let
     ];
   };
 
+  # `validation.serviceSubnet` reaches the API server two ways, and for a while
+  # it only reached one. It decided the certificate SANs through
+  # `kubeadmConfig.networking`, while `--service-cluster-ip-range` was a
+  # literal -- so the option could not make the harness accept an IPv6 Service,
+  # whatever it was set to.
+  easyCustomServiceSubnet = import ../. {
+    inherit pkgs;
+    modules = [
+      {
+        ekn.discriminator = "servicesubnet";
+        validation.serviceSubnet = "10.99.0.0/16,fd00:99::/112";
+        kubernetes.objects.default.ConfigMap.probe.data.key = "value";
+      }
+    ];
+  };
+
   easyNoDiscriminator = import ../. {
     inherit pkgs;
     modules = [
@@ -597,6 +613,20 @@ in
   # Forcing these must throw -- thunks, so the test can assert on the error.
   seededGitOpsThrows = easySeededGitOpsThrows;
   envSeededWithoutReferenceThrows = easyEnvSeededWithoutReferenceThrows;
+
+  serviceSubnetReachesTheApiserverFlag =
+    let
+      script = builtins.readFile "${easyCustomServiceSubnet.config.validation.script}/bin/kubeval";
+      subnet = easyCustomServiceSubnet.config.validation.serviceSubnet;
+    in
+    {
+      # The option's value, not a literal, and not just the IPv4 half.
+      inFlag = pkgs.lib.hasInfix "--service-cluster-ip-range=${subnet}" script;
+      # The certificate SANs read the same option, so the two agree.
+      inKubeadmConfig = easyCustomServiceSubnet.config.validation.kubeadmConfig.networking.serviceSubnet;
+      # The literal that used to be here, in case someone writes one again.
+      noHardcodedRange = !(pkgs.lib.hasInfix "--service-cluster-ip-range=10.96.0.0/12" script);
+    };
 
   noDiscriminatorRenders = easyNoDiscriminator.config.kubernetes.generated;
   noDiscriminatorDeployThrows = easyNoDiscriminator.config.kluctl.script;
