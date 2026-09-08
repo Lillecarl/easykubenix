@@ -239,3 +239,211 @@ class TestKubeValueType:
     async def test_mk_numbered_list_rejects_non_int_keys(self) -> None:
         with pytest.raises(nanopynix.NixError, match="must be integer strings"):
             await evaluate_file(NIX_TEST_FILE, "mkNumberedListRejectsNonIntKeys")
+
+
+class TestWholeListPriorities:
+    """Priorities on a whole list definition.
+
+    None of this is the type's own behaviour, and that is what these pin. The
+    module system runs `filterOverrides` over the definitions and only then
+    calls `namedListOf.merge`, so a priority decides which definitions the type
+    ever sees. A Kubernetes list has to obey the same rules as any other
+    option.
+    """
+
+    async def test_mk_force_replaces_a_plain_list(self) -> None:
+        # The plain case. Every other force in this file is applied to a
+        # *marked* definition instead.
+        result = await evaluate_file(NIX_TEST_FILE, "mkForcePlainListOverPlain")
+        assert result == {"args": ["--b"]}
+
+    async def test_mk_default_loses_to_an_ordinary_definition(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "mkDefaultPlainListLoses")
+        assert result == {"args": ["--chosen"]}
+
+    async def test_mk_default_applies_when_it_is_the_only_definition(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "mkDefaultPlainListAloneApplies")
+        assert result == {"args": ["--fallback"]}
+
+    async def test_mk_force_of_an_empty_list_empties_the_field(self) -> None:
+        # `mkForce []` is how a module empties a list. It must stay a real
+        # empty list rather than becoming an absent field.
+        result = await evaluate_file(NIX_TEST_FILE, "mkForceEmptiesList")
+        assert result == {"args": []}
+
+    async def test_two_forces_at_one_priority_concatenate(self) -> None:
+        # `mkForce` means "beats every lower priority", not "the last word".
+        # Two survivors then concatenate, the way any two ordinary list
+        # definitions do. The order is the definition-collection order, which
+        # `TestBehavesLikeListOf` shows is plain `listOf`'s and not this
+        # type's.
+        result = await evaluate_file(NIX_TEST_FILE, "twoMkForcesConcatenate")
+        assert result == {"args": ["--b", "--a"]}
+
+    async def test_a_lower_numeric_priority_wins(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "mkOverridePriorityOrder")
+        assert result == {"args": ["--winner"]}
+
+    async def test_forcing_a_list_silently_discards_a_named_patch(self) -> None:
+        """The precedence rule that ties whole-list and per-entry priorities together.
+
+        A priority resolves BEFORE the type looks for a marker.
+        `filterOverrides` drops the ordinary `mkNamedList` definition, so
+        `anyNamed` is false and the plain list branch runs. The patch is
+        discarded without a word.
+
+        That is `mkForce`'s meaning rather than a defect, but it is invisible:
+        a module that forces a list also silences every named patch of it.
+        """
+        result = await evaluate_file(NIX_TEST_FILE, "mkForceDiscardsLaterNamedPatch")
+        assert result == {"containers": [{"name": "replacement", "image": "v9"}]}
+
+
+class TestBehavesLikeListOf:
+    """An unmarked list must behave exactly like `types.listOf`.
+
+    Each case gives the same definitions to `kubeValueType` and to a control
+    option typed `types.listOf types.raw`, then asserts the two agree. `raw`
+    because `raw.merge` is `mergeOneOption` and `listOf` hands each element
+    exactly one definition, so the control is identity on plain data while
+    still running `dischargeProperties` and `filterOverrides` per element.
+
+    Asserting equality rather than a literal is deliberate. It states the
+    property the user actually cares about -- "this is a normal NixOS list"
+    -- and a divergence prints as a diff.
+    """
+
+    @staticmethod
+    async def _case(name: str) -> tuple[object, object]:
+        result = await evaluate_file(NIX_TEST_FILE, "sameAsListOf")
+        assert isinstance(result, dict)
+        case = result[name]
+        assert isinstance(case, dict)
+        return case["kube"], case["control"]
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "concatenates",
+            "forced",
+            "defaulted",
+            "ordered",
+            "oneDefinitionSwitchedOff",
+            "everyDefinitionSwitchedOff",
+            "emptyDefinition",
+            "elementSwitchedOff",
+            "elementForced",
+        ],
+    )
+    async def test_matches_plain_list_of(self, case: str) -> None:
+        kube, control = await self._case(case)
+        assert kube == control
+
+    async def test_definitions_concatenate_in_collection_order(self) -> None:
+        # Pinning the actual value once, so "they agree" cannot pass by both
+        # sides being wrong in the same way. The reversal is nixpkgs' own:
+        # definitions from separate modules arrive in this order.
+        kube, control = await self._case("concatenates")
+        assert kube == ["--b", "--a"]
+        assert control == ["--b", "--a"]
+
+    async def test_order_properties_sort_by_priority(self) -> None:
+        kube, _ = await self._case("ordered")
+        # mkOrder 400, mkBefore (500), plain (1000), mkAfter (1500).
+        assert kube == ["--late", "--first", "--middle", "--last"]
+
+    async def test_a_property_on_one_element_is_discharged(self) -> None:
+        # `listOf` merges each element on its own, so `dischargeProperties`
+        # runs there too: `mkIf false` drops that one element rather than the
+        # whole definition.
+        kube, _ = await self._case("elementSwitchedOff")
+        assert kube == ["--kept"]
+
+
+class TestPrioritiesInsideAnEntry:
+    """A marked list merges its entries through `types.attrsOf elemType`.
+
+    An entry therefore gets the full module merge any other option value gets.
+    "The override mechanism reaches inside a list element" is the whole reason
+    the two markers exist, so it is worth pinning rather than assuming.
+    """
+
+    async def test_mk_default_loses_to_the_plain_list(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "namedEntryMkDefaultLoses")
+        assert result == {"containers": [{"name": "app", "image": "from-chart"}]}
+
+    async def test_mk_default_fills_a_field_the_plain_list_omits(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "namedEntryMkDefaultFillsAGap")
+        assert result == {"containers": [{"name": "app", "image": "from-chart", "imagePullPolicy": "IfNotPresent"}]}
+
+    async def test_mk_merge_inside_an_entry(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "namedEntryMkMerge")
+        assert result == {"containers": [{"name": "app", "image": "v1", "imagePullPolicy": "Always"}]}
+
+    async def test_switching_a_patch_off_leaves_the_plain_entry(self) -> None:
+        # `mkIf false` on an entry the plain list also defines discharges to
+        # nothing, and the plain definition is untouched. So this is a no-op,
+        # not a deletion: a module cannot remove an entry by switching its own
+        # patch off.
+        result = await evaluate_file(NIX_TEST_FILE, "namedEntrySwitchedOffLeavesThePlainEntry")
+        assert result == {"containers": [{"name": "app", "image": "v1"}]}
+
+    async def test_a_switched_off_new_entry_is_not_added(self) -> None:
+        # No definition survives for that key, so `attrsOf` drops it and the
+        # entry never reaches the list.
+        result = await evaluate_file(NIX_TEST_FILE, "namedEntrySwitchedOffIsNotAdded")
+        assert result == {"containers": [{"name": "app", "image": "v1"}]}
+
+    async def test_a_switched_on_new_entry_is_added(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "namedEntrySwitchedOnIsAdded")
+        assert result == {"containers": [{"name": "app", "image": "v1"}, {"name": "sidecar", "image": "s1"}]}
+
+    async def test_metadata_keeps_one_entry_per_element(self) -> None:
+        # The invariant that keeps `valueMeta` usable, after a force, a drop
+        # and an append have all happened to the same list.
+        result = await evaluate_file(NIX_TEST_FILE, "metadataTracksTheValue")
+        assert isinstance(result, dict)
+        value = result["value"]
+        assert isinstance(value, list)
+        assert value == [
+            {"name": "app", "image": "v2"},
+            {"name": "sidecar", "image": "s1"},
+            {"name": "added", "image": "a"},
+        ]
+        assert result["metaLength"] == len(value)
+
+    async def test_numbered_mk_default_loses_to_the_plain_list(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "numberedEntryMkDefaultLoses")
+        assert result == {"initContainers": [{"name": "migrate", "image": "m1"}]}
+
+    async def test_a_switched_off_numbered_entry_is_not_appended(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "numberedEntrySwitchedOffIsNotAdded")
+        assert result == {"initContainers": [{"name": "migrate"}]}
+
+    async def test_an_order_property_on_a_numbered_entry_is_tolerated(self) -> None:
+        """Recorded, not endorsed -- the two branches disagree here.
+
+        The named branch refuses `mkBefore`/`mkAfter`/`mkOrder` on an entry,
+        because a named list takes its order from the keys and the property
+        would be lost in silence. A numbered list takes its order from the keys
+        too, but `orderedNamedKeys` only inspects `isNamedList` definitions, so
+        the numbered branch never runs that check. The property is discharged
+        and the entry merges as if it had not been written.
+
+        This test states what happens today. Whether it should throw instead is
+        a decision about the type, not about this test.
+        """
+        result = await evaluate_file(NIX_TEST_FILE, "numberedEntryWithAnOrderProperty")
+        assert result == {"initContainers": [{"name": "migrate", "image": "m2"}]}
+
+    async def test_two_definitions_of_one_field_inside_an_entry_conflict(self) -> None:
+        # This is why every other test here writes `mkForce`: without one, a
+        # patch of a field the plain list already sets is a conflict rather
+        # than an override. The error names the entry by key.
+        with pytest.raises(nanopynix.NixError, match=r"value\.containers\.app\.image"):
+            await evaluate_file(NIX_TEST_FILE, "namedEntryConflictThrows")
+
+    async def test_two_definitions_of_one_numbered_field_conflict(self) -> None:
+        # `showOption` quotes an index, since `0` is not an identifier.
+        with pytest.raises(nanopynix.NixError, match=r'value\.initContainers\."0"\.image'):
+            await evaluate_file(NIX_TEST_FILE, "numberedEntryConflictThrows")
