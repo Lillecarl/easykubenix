@@ -16,15 +16,15 @@
     clusterRepoURL = "https://github.com/example/cluster.git";
 
     # Required, and no default. It is the prune scope, and it also names each
-    # GitOps target: `deployment.units.<name>.discriminator` is
+    # deployment unit: `deployment.units.<name>.discriminator` is
     # "${ekn.discriminator}-${name}".
     ekn.discriminator = "bootstrap-example";
 
-    gitOps = {
+    deployment = {
       enable = true;
       deployBranch = "deploy";
 
-      targets = {
+      units = {
         # The ordinary target: ArgoCD syncs this one, and nothing here is ever
         # applied by hand.
         apps.path = "clusters/example/apps";

@@ -129,19 +129,19 @@ resource they intercept. During a bootstrap their backing workload was applied
 seconds earlier and is not serving yet, so each intercepted request costs a full
 timeout — or, for an aggregated `APIService`, fails discovery outright.
 
-### Bootstrap targets
+### Bootstrap units
 
-A GitOps target can carry its own module list, evaluated as an entirely separate
-easykubenix configuration:
+A deployment unit can carry its own module list, evaluated as an entirely
+separate easykubenix configuration:
 
 ```nix
-gitOps.targets.bootstrap = {
+deployment.units.bootstrap = {
   path = "bootstrap";
   modules = [ ./bootstrap/argocd.nix ];
 };
 ```
 
-Its objects render into that target's path and stay out of
+Its objects render into that unit's path and stay out of
 `kubernetes.generated`, so a plain `ekn kubeapply` and `ekn validate` never see
 them — only `ekn kubeapply --target bootstrap` applies them.
 
@@ -153,19 +153,19 @@ have a different lifecycle from everything else afterwards.
 The nested instance is a complete configuration, not a cut-down one, so it can
 render a Helm chart like any other. It gets its parent's evaluated config as the
 `parent` module argument — a root Application has to name the branch it syncs —
-and its `ekn.discriminator` defaults to the target's, so the prune scope agrees
+and its `ekn.discriminator` defaults to the unit's, so the prune scope agrees
 with what the apply uses. Read the parent's *inputs* through `parent`
-(`gitOps.deployBranch`, `ekn.discriminator`); reading its rendered outputs closes
+(`deployment.deployBranch`, `ekn.discriminator`); reading its rendered outputs closes
 a loop back through the nested instance and recurses.
 
-### Handing a bootstrap target over
+### Handing a bootstrap unit over
 
 Bootstrapping is only half the job: the same objects usually have to become
-ordinary managed resources afterwards. Two knobs on the target arrange that, and
+ordinary managed resources afterwards. Two knobs on the unit arrange that, and
 they are deliberately separate mechanisms.
 
 ```nix
-gitOps.targets.bootstrap = {
+deployment.units.bootstrap = {
   path = "bootstrap";
   modules = [ ./bootstrap/argocd.nix ];
 
@@ -186,8 +186,8 @@ server-side apply only drops a field when its *owning* manager stops declaring
 it, and a bootstrap apply never runs again — so as a distinct manager, `ekn`
 keeps owning every field the successor does not declare, permanently. It also
 removes the need for `Force=true`. The cost is that a second apply of the same
-target silently overwrites the successor's fields instead of reporting a
-conflict, which is acceptable only because a bootstrap target runs once.
+unit silently overwrites the successor's fields instead of reporting a
+conflict, which is acceptable only because a bootstrap unit runs once.
 
 `labels` and `annotations` go the other way: they are baked into the rendered
 manifests, so the committed YAML and the applied object agree. A value may be a
