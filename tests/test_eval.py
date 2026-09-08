@@ -259,6 +259,51 @@ class TestEknModule:
         assert api["spec"]["replicas"] == 3
         assert api["metadata"]["annotations"]["patched"] == "true"
 
+    async def test_a_seed_reference_renders_as_a_plain_string(self) -> None:
+        # The reference reaches the manifest untouched, and as a string, so
+        # `stringData` stays `map[string]string` and kubeconform passes.
+        # Nothing in Nix reads the variable.
+        result = await evaluate_file(NIX_TEST_FILE, "seededGenerated")
+        assert isinstance(result, list)
+        secret = next(o for o in result if o["kind"] == "Secret")
+        assert secret["stringData"] == {
+            "type": "git",
+            "url": "https://example.com/group/repo.git",
+            "username": "ci-token",
+            "password": "$ekn:env:ARGOCD_REPO_PASSWORD",
+        }
+
+    async def test_the_exportable_list_drops_a_seeded_object(self) -> None:
+        # `generated` is for ekn, which resolves the reference.
+        # `generatedExportable` is for anything handing objects to a
+        # different applier, which would apply the sentinel literally.
+        result = await evaluate_file(NIX_TEST_FILE, "seededExportable")
+        assert isinstance(result, list)
+        assert [(o["kind"], o["metadata"]["name"]) for o in result] == [("ConfigMap", "plain")]
+
+    async def test_routing_a_seeded_secret_to_gitops_is_refused(self) -> None:
+        # Loud rather than silent: a GitOps target is an explicit per-object
+        # opt-in, so a seeded object there is an author mistake. ArgoCD would
+        # apply `$ekn:env:...` over the real credential.
+        with pytest.raises(nanopynix.NixError, match=r"routed to a\s+GitOps target"):
+            await evaluate_file(NIX_TEST_FILE, "seededGitOpsThrows")
+
+    async def test_marking_an_object_with_no_reference_is_rejected(self) -> None:
+        # `envSeeded` is what makes a seeded object findable without walking
+        # it, so wrapping an object that needs nothing is a mistake rather
+        # than a harmless no-op.
+        with pytest.raises(nanopynix.NixError, match=r"holds no ekn\.envSeed reference"):
+            await evaluate_file(NIX_TEST_FILE, "envSeededWithoutReferenceThrows")
+
+    async def test_the_seed_annotations_name_each_variable(self) -> None:
+        # The annotations are what every consumer reads, so they are the
+        # contract: one numbered key per variable, greppable against a live
+        # cluster with no re-render.
+        result = await evaluate_file(NIX_TEST_FILE, "seededGenerated")
+        assert isinstance(result, list)
+        secret = next(o for o in result if o["kind"] == "Secret")
+        assert secret["metadata"]["annotations"]["ekn.dev/env-0"] == "ARGOCD_REPO_PASSWORD"
+
     async def test_a_manifest_renders_without_a_discriminator(self) -> None:
         # `ekn.discriminator` has no default. Rendering must not read it:
         # a manifest is a file, and a file prunes nothing.

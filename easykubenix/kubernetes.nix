@@ -121,9 +121,16 @@ let
   # marker would reach the cluster as a literal `_type` field. Find it here and
   # stop, instead of writing a manifest that is not valid Kubernetes. The
   # search is lazy and stops at the first marker.
+  #
+  # Seeded credentials are deliberately not checked here. A CRD never holds
+  # one -- an OpenAPI schema has nowhere to put a credential -- and searching
+  # for one would mean a recursive walk of every CRD on every evaluation,
+  # which is the cost `kubernetes.crds` exists to avoid. `ekn.envSeeded`
+  # marks a seeded object with an annotation, and every consumer reads that
+  # instead of walking.
   checkedCrds = map (
     crd:
-    lib.throwIf (lib.hasMarker crd) ''
+    (lib.throwIf (lib.hasMarker crd) ''
       The CustomResourceDefinition "${
         crd.metadata.name or "<unnamed>"
       }" in `kubernetes.crds' uses lib.mkNamedList, lib.mkNumberedList or
@@ -135,7 +142,7 @@ let
 
       Put the object in `kubernetes.objects' instead, where the type resolves
       the marker. You can also write the value directly.
-    '' crd
+    '' crd)
   ) cfg.crds;
   allGenerated = generatedWithEkn ++ checkedCrds;
 
@@ -161,6 +168,33 @@ let
   # error. Assert on the inputs an object was built from (`resources`, or the
   # module's own options), not on the rendered result.
   checked = lib.asserts.checkAssertWarn config.assertions config.warnings;
+
+  # Seeded Secrets routed to a GitOps target, by identity.
+  #
+  # Read from `cfg.objects` rather than from `generated`: an assertion that
+  # reads a checked output closes a loop through `checked` above, and
+  # evaluation hits infinite recursion instead of printing the message.
+  #
+  # `isSeededObject` reads the annotations `ekn.envSeeded` wrote, so this
+  # never descends into an object.
+  seededGitOpsObjects = lib.concatLists (
+    lib.mapAttrsToList (
+      namespace: kinds:
+      lib.concatLists (
+        lib.mapAttrsToList (
+          kind: objects:
+          lib.concatLists (
+            lib.mapAttrsToList (
+              name: object:
+              lib.optional (
+                (object.ekn.gitOpsTarget or null) != null && lib.isSeededObject object
+              ) "${namespace}/${kind}/${name} -> ${object.ekn.gitOpsTarget}"
+            ) objects
+          )
+        ) kinds
+      )
+    ) cfg.objects
+  );
 in
 {
   imports = [
@@ -476,6 +510,30 @@ in
       readOnly = true;
     };
 
+    generatedExportable = lib.mkOption {
+      type = lib.types.anything;
+      description = ''
+        `generated`, minus every object holding an `ekn.envSeed` reference.
+
+        The two lists differ by who applies them, not by what they contain:
+
+        - `generated` is for `ekn`, which resolves a seed reference at apply
+          time by substituting the environment variable it names.
+        - `generatedExportable` is for anything that hands objects to a
+          different applier -- a GitOps target that ArgoCD then syncs,
+          `kluctl`, or a manifest a person feeds to `kubectl apply`.
+
+        A seeded object must not reach the second kind. Nothing else can
+        resolve the reference, so it would apply `$ekn:env:VARNAME` as the
+        literal value and overwrite a live credential with it.
+
+        `ekn validate` deliberately stays on `generated`: a reference is a
+        plain string, so the manifest is schema-valid and `kubeconform` has
+        nothing to object to.
+      '';
+      readOnly = true;
+    };
+
     generatedByPath = lib.mkOption {
       type = lib.types.anything;
       description = "The final, generated Kubernetes objects by attrPath";
@@ -626,6 +684,27 @@ in
     };
   };
 
+  config.assertions = [
+    {
+      assertion = seededGitOpsObjects == [ ];
+      message = ''
+        These Secrets hold an `ekn.envSeed' reference and are routed to a
+        GitOps target:
+
+        ${lib.concatMapStringsSep "\n" (entry: "  ${entry}") seededGitOpsObjects}
+
+        A GitOps target is committed to a branch and applied by something
+        else -- ArgoCD, not `ekn'. Nothing there resolves the reference, so
+        the object would reach the cluster with `$ekn:env:VARNAME' as its
+        literal value, overwriting the credential this mechanism exists to
+        deliver.
+
+        A seeded Secret is applied by `ekn kubeapply' and nothing else.
+        Remove its `ekn.gitOpsTarget'.
+      '';
+    }
+  ];
+
   config.kubernetes = {
     # Get apiMappings from apiMappingFile
     apiMappings =
@@ -644,6 +723,8 @@ in
         (map (object: removeAttrs object [ "ekn" ]))
       ]
     );
+
+    generatedExportable = lib.filter (object: !(lib.isSeededObject object)) config.kubernetes.generated;
 
     generatedWithEkn = checked allGenerated;
 

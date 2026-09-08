@@ -71,7 +71,19 @@ let
     # decrypt-at-apply path instead, regardless of which GitOps target
     # it's routed to, so exclude it here unconditionally rather than
     # requiring it to live in an already-excluded target.
-    || (object.sops or null) != null;
+    || (object.sops or null) != null
+    # Same argument, for the other thing kluctl cannot resolve. A Secret
+    # holding an `ekn.envSeed' reference gets its value substituted by `ekn
+    # kubeapply' at apply time; kluctl would apply `$ekn:env:VARNAME' as the
+    # literal value and overwrite a live credential with it. `ekn' is the
+    # only applier that can resolve one, so exclude these unconditionally
+    # rather than per target.
+    #
+    # This is silent, unlike the GitOps case, and deliberately so: routing to
+    # a GitOps target is an explicit per-object opt-in, so a seeded object
+    # there is an author mistake worth an assertion, whereas kluctl takes
+    # every object by default and excluding is the only sensible answer.
+    || lib.isSeededObject object;
   kluctlGenerated = lib.filter (object: !(isExcludedFromKluctl object)) config.kubernetes.generated;
 in
 {

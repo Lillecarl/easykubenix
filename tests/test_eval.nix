@@ -405,6 +405,68 @@ let
     ];
   };
 
+  # A seeded Secret, shaped like a real ArgoCD repository credential: four
+  # `stringData` keys, one of them a reference, plus the label ArgoCD needs
+  # to discover it.
+  easySeeded = import ../. {
+    inherit pkgs;
+    modules = [
+      (
+        { ekn, ... }:
+        {
+          kubernetes.objects.argocd.Secret.repo-creds = ekn.envSeeded {
+            metadata.labels."argocd.argoproj.io/secret-type" = "repository";
+            stringData = {
+              type = "git";
+              url = "https://example.com/group/repo.git";
+              username = "ci-token";
+              password = ekn.envSeed "ARGOCD_REPO_PASSWORD";
+            };
+          };
+          kubernetes.objects.argocd.ConfigMap.plain.data.key = "value";
+        }
+      )
+    ];
+  };
+
+  # Routing a seeded Secret to a GitOps target must be refused: ArgoCD would
+  # apply the reference as a literal value.
+  easySeededGitOpsThrows =
+    (import ../. {
+      inherit pkgs;
+      modules = [
+        (
+          { ekn, ... }:
+          {
+            ekn.discriminator = "easykubenix";
+            gitOps.deployBranch = "deploy";
+            gitOps.targets.apps.path = "clusters/home/apps";
+            kubernetes.objects.argocd.Secret.repo-creds = ekn.envSeeded {
+              ekn.gitOpsTarget = "apps";
+              stringData.password = ekn.envSeed "ARGOCD_REPO_PASSWORD";
+            };
+          }
+        )
+      ];
+    }).config.kubernetes.generated;
+
+  # `ekn.envSeeded` needs something to mark. Wrapping an object with no
+  # reference in it is a mistake, not a no-op.
+  easyEnvSeededWithoutReferenceThrows =
+    (import ../. {
+      inherit pkgs;
+      modules = [
+        (
+          { ekn, ... }:
+          {
+            kubernetes.objects.argocd.Secret.repo-creds = ekn.envSeeded {
+              stringData.password = "hunter2";
+            };
+          }
+        )
+      ];
+    }).config.kubernetes.generated;
+
   easyNoDiscriminator = import ../. {
     inherit pkgs;
     modules = [
@@ -418,6 +480,12 @@ in
   kluctlScriptReadsManifest = easyKluctlScriptReadsManifest.config.kubernetes.generated;
 
   conditionalObjects = easyConditionalObjects.config.kubernetes.generated;
+
+  seededGenerated = easySeeded.config.kubernetes.generated;
+  seededExportable = easySeeded.config.kubernetes.generatedExportable;
+  # Forcing these must throw -- thunks, so the test can assert on the error.
+  seededGitOpsThrows = easySeededGitOpsThrows;
+  envSeededWithoutReferenceThrows = easyEnvSeededWithoutReferenceThrows;
 
   noDiscriminatorRenders = easyNoDiscriminator.config.kubernetes.generated;
   noDiscriminatorDeployThrows = easyNoDiscriminator.config.kluctl.script;
