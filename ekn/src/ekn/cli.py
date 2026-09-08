@@ -19,6 +19,7 @@ from nanopynix.models import JsonValue
 from nanopynix.primops import from_yaml11_stream, from_yaml_stream, to_yaml
 from pydantic import TypeAdapter, ValidationError
 
+from ekn import seeds
 from ekn._cli import Command, build_parser, complete, dispatch, opt, pos
 from ekn.apply import apply_and_prune
 from ekn.clusterdiff import cluster_diff
@@ -690,9 +691,19 @@ class KubeApply(AttrCommand):
         if cfg.sops_age_identities:
             await ensure_age_identities(cfg.sops_age_identities, api=api)
         objects = [await maybe_decrypt(obj) for obj in cfg.objects]
+        # Resolve seeded credentials before anything is applied, so a missing
+        # variable aborts the whole run rather than leaving a cluster half
+        # bootstrapped. A seed already in the cluster with its variable unset
+        # is dropped from `objects` here, not applied unchanged -- see
+        # `seeds.resolve`.
+        try:
+            plan = await seeds.resolve(objects, api=api)
+        except seeds.MissingVariablesError as exc:
+            raise SystemExit(str(exc)) from exc
+        seeds.report(plan.actions)
         try:
             await apply_and_prune(
-                objects,
+                plan.objects,
                 api=api,
                 discriminator=cfg.discriminator,
                 field_manager=cfg.field_manager,
