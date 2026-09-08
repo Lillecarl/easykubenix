@@ -34,6 +34,36 @@ a plain list already defines.
 
 ---
 
+## Conditional Definitions
+
+Demonstrates `mkIfExists` and `mkIfExistsAtPath`, which patch an object only
+when that object is already there.
+
+```{literalinclude} ./examples/conditional/default.nix
+:language: nix
+```
+
+An ordinary definition creates the key it names. So a patch written against a
+chart resurrects the object the chart stopped shipping, as a fragment with no
+containers. A conditional definition contributes only when an ordinary
+definition for that exact key survives; otherwise it contributes nothing.
+
+`kubernetes.objects` is conditional at the namespace, the Kind and the object
+name, and an object's own fields are conditional too. So the rule holds at
+every level: a conditional namespace that exists still adds children to
+itself, and a conditional Kind that does not exist creates neither itself nor
+anything under it.
+
+`mkIfExistsAtPath "namespace.Kind.name" value` is the path form, and all three
+levels must exist. Pass a list, `[ "namespace" "Kind" "name" ]`, for a key that
+contains a dot. Put a priority inside the marker content, as
+`mkIfExists { replicas = lib.mkForce 3; }`, never around it.
+
+An `mkIf false` definition does not count as existing. Neither does a key that
+only other markers define.
+
+---
+
 ## Helm Charts
 
 Integrates an external Helm chart (`ingress-nginx`) into the easykubenix

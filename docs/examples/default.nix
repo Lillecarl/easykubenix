@@ -41,6 +41,7 @@ let
   names = [
     "basic"
     "namedlists"
+    "conditional"
     "helm"
     "generators"
     "edge-cases"
