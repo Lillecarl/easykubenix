@@ -143,25 +143,30 @@ class TestResolve:
         assert "ARGOCD_REPO_PASSWORD is not set" in str(caught.value)
         assert "ESO_TOKEN is not set" in str(caught.value)
 
-    async def test_present_and_unset_skips_and_drops_the_object(
+    async def test_present_and_unset_leaves_the_credential_alone(
         self, present: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The steady state. The object must be REMOVED from the apply set,
-        # not applied unchanged: server-side apply under field manager `ekn`
-        # would overwrite the live credential with the literal reference.
+        # The steady state. The rendered object must never be applied as it
+        # stands: server-side apply under field manager `ekn` would overwrite
+        # the live credential with the literal reference. The value already
+        # in the cluster goes back into the field instead, so the apply is a
+        # no-op for the credential and ordinary for every other field.
         monkeypatch.delenv("ARGOCD_REPO_PASSWORD", raising=False)
         plan = await seeds.resolve([SEEDED], api=object())
         assert [a.verb for a in plan.actions] == ["skip"]
-        assert plan.objects == []
+        assert plan.objects[0]["stringData"]["password"] == "live-value"
+        assert seeds.REFERENCE_PREFIX not in str(plan.objects[0])
 
     async def test_present_and_set_to_the_same_value_is_a_no_op(
         self, present: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A variable left exported must not churn the cluster.
+        # A variable left exported must not churn the credential. The object
+        # is still applied, carrying the value the cluster already holds, so
+        # any other field on it reconciles.
         monkeypatch.setenv("ARGOCD_REPO_PASSWORD", "live-value")
         plan = await seeds.resolve([SEEDED], api=object())
         assert [a.verb for a in plan.actions] == ["unchanged"]
-        assert plan.objects == []
+        assert plan.objects[0]["stringData"]["password"] == "live-value"
 
     async def test_present_and_set_to_a_different_value_updates(
         self, present: dict[str, Any], monkeypatch: pytest.MonkeyPatch
@@ -240,3 +245,71 @@ class TestTable:
         assert seeds.table([row]).splitlines()[1].split()[-1] == "?"
         present = row._replace(in_cluster=False)
         assert seeds.table([present]).splitlines()[1].split()[-1] == "no"
+
+
+class TestEmptyIsUnset:
+    """An exported-but-empty variable is not a value.
+
+    A shell exports one from a substitution that produced nothing. Treating
+    it as set is worse than treating it as missing: the apply succeeds, the
+    Secret exists with a zero-length credential, and only the consumer's
+    authentication failure says otherwise.
+    """
+
+    def test_empty_is_not_supplied(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ARGOCD_REPO_PASSWORD", "")
+        assert seeds.is_supplied("ARGOCD_REPO_PASSWORD") is False
+        monkeypatch.setenv("ARGOCD_REPO_PASSWORD", "x")
+        assert seeds.is_supplied("ARGOCD_REPO_PASSWORD") is True
+
+    async def test_absent_and_empty_aborts_instead_of_creating(
+        self, absent: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ARGOCD_REPO_PASSWORD", "")
+        with pytest.raises(seeds.MissingVariablesError, match="ARGOCD_REPO_PASSWORD is not set"):
+            await seeds.resolve([SEEDED], api=object())
+
+    def test_describe_reports_empty_as_not_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ARGOCD_REPO_PASSWORD", "")
+        assert seeds.describe([SEEDED])[0].is_set is False
+
+
+class TestOtherFieldsStillReconcile:
+    """Leaving the credential alone must not freeze the rest of the object.
+
+    A seeded Secret is ordinary configuration with a credential in one
+    field, so the other fields are exactly the ones somebody edits next. An
+    earlier version dropped the whole object, and an unrelated `username`
+    change silently failed to apply until the password itself changed.
+    """
+
+    async def test_a_skip_still_applies_the_object(
+        self, present: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ARGOCD_REPO_PASSWORD", raising=False)
+        edited = secret(
+            annotations={"ekn.dev/env-0": "ARGOCD_REPO_PASSWORD"},
+            password="$ekn:env:ARGOCD_REPO_PASSWORD",
+        )
+        edited["stringData"]["username"] = "oauth2"
+        plan = await seeds.resolve([edited], api=object())
+
+        assert [a.verb for a in plan.actions] == ["skip"]
+        assert len(plan.objects) == 1
+        # The edit lands...
+        assert plan.objects[0]["stringData"]["username"] == "oauth2"
+        # ...and the credential is written back exactly as the cluster holds
+        # it, so the apply is a no-op for that field rather than a deletion.
+        assert plan.objects[0]["stringData"]["password"] == "live-value"
+
+    async def test_an_unreadable_live_value_falls_back_to_dropping(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Nothing to reconstruct the field from, so applying would delete it.
+        # Leave the object out entirely instead.
+        async def build_object(_spec: dict[str, Any], _api: object) -> FakeObject:
+            return FakeObject({"data": {}})
+
+        monkeypatch.setattr(seeds, "build_object", build_object)
+        monkeypatch.delenv("ARGOCD_REPO_PASSWORD", raising=False)
+        plan = await seeds.resolve([SEEDED], api=object())
+        assert [a.verb for a in plan.actions] == ["skip"]
+        assert plan.objects == []

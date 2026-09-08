@@ -233,3 +233,61 @@ async def test_the_environment_is_the_only_source_of_the_value() -> None:
     assert "second-secret" not in contents
     assert os.environ.get(VARIABLE) is None or os.environ[VARIABLE] not in contents
     assert f"$ekn:env:{VARIABLE}" in contents
+
+
+async def test_an_empty_variable_does_not_count_as_supplied(
+    cluster: tuple[Any, list[dict[str, Any]], str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exported-but-empty variable must abort, not create an empty secret.
+
+    Found in use: a token extraction produced nothing, the shell exported
+    the empty result, and the apply succeeded with a zero-length password.
+    That is worse than the unset case, because it looks like success until
+    the consumer fails to authenticate.
+    """
+    api, objects, discriminator = cluster
+    secret = await build_object(dict(SECRET), api)
+    try:
+        await secret.async_refresh()
+        await secret.delete()
+    except kr8s.NotFoundError:
+        pass
+
+    monkeypatch.setenv(VARIABLE, "")
+    with pytest.raises(seeds.MissingVariablesError, match=VARIABLE):
+        await apply(api, objects, discriminator)
+    assert await live_password(api) is None
+
+
+async def test_other_fields_reconcile_while_the_credential_is_left_alone(
+    cluster: tuple[Any, list[dict[str, Any]], str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A seeded Secret is ordinary configuration with a credential in one
+    field, so editing `username` must land even when the password is being
+    left alone.
+
+    An earlier version dropped the whole object on a skip, which froze every
+    other field until the password itself changed. Found in use, on a
+    `username` edit that silently did not apply.
+    """
+    api, objects, discriminator = cluster
+
+    monkeypatch.setenv(VARIABLE, "lifecycle-secret")
+    await apply(api, objects, discriminator)
+    assert await live_password(api) == "lifecycle-secret"
+
+    # Edit a non-secret field, and drop the variable -- the steady state.
+    edited = [
+        {**o, "stringData": {**o["stringData"], "username": "oauth2"}} if o["kind"] == "Secret" else o for o in objects
+    ]
+    monkeypatch.delenv(VARIABLE, raising=False)
+    actions = await apply(api, edited, discriminator)
+
+    assert [a.verb for a in actions] == ["skip"]
+    secret = await build_object(dict(SECRET), api)
+    await secret.async_refresh()
+    stored = {key: base64.b64decode(value).decode() for key, value in (dict(secret.raw).get("data") or {}).items()}
+    assert stored["username"] == "oauth2", "an unrelated field change did not reconcile"
+    assert stored["password"] == "lifecycle-secret", "the credential was not left alone"

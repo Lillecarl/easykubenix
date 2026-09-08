@@ -99,6 +99,20 @@ class MissingVariablesError(Exception):
         super().__init__("\n".join(lines))
 
 
+def is_supplied(variable: str) -> bool:
+    """Whether the environment actually supplies a value for `variable`.
+
+    An exported-but-empty variable does not count. A shell exports one from
+    a substitution that produced nothing -- a token read that failed, a
+    lookup that returned no rows -- and an empty credential is never what
+    anybody meant. Treating it as set is worse than treating it as missing:
+    the apply succeeds, the Secret exists, and only the consumer's
+    authentication failure hours later says otherwise. Found that way, in
+    use.
+    """
+    return bool(os.environ.get(variable))
+
+
 def annotated_variables(obj: Manifest) -> list[str]:
     """The variables an object declares, read from its annotations.
 
@@ -172,6 +186,28 @@ def substitute(obj: Manifest, values: dict[str, str]) -> Manifest:
     for reference in references(obj):
         if reference.variable in values:
             result = _set_at(result, reference.path, values[reference.variable])
+    return result
+
+
+def _with_live_values(obj: Manifest, live: dict[str, str]) -> Manifest | None:
+    """`obj` with each reference replaced by the value already in the cluster.
+
+    This is what lets an object whose credential is being left alone still
+    reconcile its other fields. The credential is written back exactly as it
+    was, so the apply is a no-op for that field and an ordinary apply for
+    every other one.
+
+    Returns None when any seeded field cannot be read back from the live
+    object -- a binary value, or a key somebody removed. Applying then would
+    mean writing a field we cannot reconstruct, and server-side apply would
+    delete it rather than leave it.
+    """
+    result = obj
+    for reference in references(obj):
+        key = reference.path[-1]
+        if key not in live:
+            return None
+        result = _set_at(result, reference.path, live[key])
     return result
 
 
@@ -271,14 +307,15 @@ async def resolve(objects: Iterable[Manifest], *, api: Api) -> SeedPlan:
             continue
 
         namespace, kind, name = _identity(obj)
-        values = {variable: os.environ[variable] for variable in variables if variable in os.environ}
+        values = {variable: value for variable in variables if (value := os.environ.get(variable))}
         unset = [variable for variable in variables if variable not in values]
         live = await _live_values(obj, api)
 
         if live is None:
             verb = "create"
         elif not values:
-            # The steady state. Leave it alone, and do not apply it.
+            # The steady state, and where a seed spends its whole life after
+            # the bootstrap.
             verb = "skip"
         elif _would_change(obj, live, values):
             verb = "update"
@@ -291,6 +328,27 @@ async def resolve(objects: Iterable[Manifest], *, api: Api) -> SeedPlan:
             continue
         if verb in {"create", "update"}:
             planned.append(substitute(obj, values))
+        else:
+            # "skip" and "unchanged" leave the credential alone, but the rest
+            # of the object is ordinary configuration -- a Secret's `url` or
+            # `username` is exactly what somebody edits next and expects to
+            # reconcile. Dropping the whole object freezes those silently.
+            #
+            # So put the value the cluster already holds back into the field
+            # and apply normally: the credential is written back unchanged,
+            # and every other field reconciles. Omitting the field instead
+            # would delete it, because server-side apply under field manager
+            # `ekn` removes what that manager owned and then left out.
+            # `live` is not None here: "skip" and "unchanged" are only
+            # reached when the object was found in the cluster.
+            reconciled = None if live is None else _with_live_values(obj, live)
+            if reconciled is None:
+                # The live value could not be read back -- a binary value, or
+                # the key is gone. Applying now would write a field we cannot
+                # reconstruct, so leave the object out entirely.
+                actions.append(action)
+                continue
+            planned.append(reconciled)
         actions.append(action)
 
     if missing:
@@ -338,7 +396,7 @@ def describe(objects: Iterable[Manifest]) -> list[SeedRow]:
                 kind=kind,
                 name=name,
                 field=fields.get(variable, ""),
-                is_set=variable in os.environ,
+                is_set=is_supplied(variable),
                 in_cluster=None,
             )
             for variable in variables
@@ -428,6 +486,7 @@ __all__ = [
     "describe",
     "inspect",
     "is_seeded",
+    "is_supplied",
     "references",
     "report",
     "resolve",
