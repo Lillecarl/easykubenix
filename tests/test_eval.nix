@@ -208,6 +208,28 @@ let
       ];
     }).config.kubernetes.generated;
 
+  # The same guard, for the third marker. `mkIfExists` is resolved by
+  # `conditionalAttrsOf`, which a CRD also goes around.
+  easyCrdIfExistsMarkerThrows =
+    (import ../. {
+      inherit pkgs;
+      modules = [
+        (
+          { lib, ... }:
+          {
+            kubernetes.crds = [
+              {
+                apiVersion = "apiextensions.k8s.io/v1";
+                kind = "CustomResourceDefinition";
+                metadata.name = "widgets.example.com";
+                spec.conversion = lib.mkIfExists { strategy = "None"; };
+              }
+            ];
+          }
+        )
+      ];
+    }).config.kubernetes.generated;
+
   # A GitOps target carrying its own module list: a whole separate
   # easykubenix instance, rendered into that target's path and kept out of
   # this instance's `generated`. The `bootstrap` target has no routed objects
@@ -419,4 +441,5 @@ in
   # Forcing this one must throw -- exposed as a thunk so the test can assert on
   # the error without eagerly evaluating it above.
   crdMarkerThrows = easyCrdMarkerThrows;
+  crdIfExistsMarkerThrows = easyCrdIfExistsMarkerThrows;
 }

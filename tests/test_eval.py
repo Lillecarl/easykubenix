@@ -282,6 +282,12 @@ class TestEknModule:
         with pytest.raises(nanopynix.NixError, match=r"kubernetes\.crds"):
             await evaluate_file(NIX_TEST_FILE, "crdMarkerThrows")
 
+    async def test_if_exists_marker_in_crds_is_rejected(self) -> None:
+        # `mkIfExists` leaks the same way. `conditionalAttrsOf` resolves it,
+        # and a CRD goes around that type too.
+        with pytest.raises(nanopynix.NixError, match=r"kubernetes\.crds"):
+            await evaluate_file(NIX_TEST_FILE, "crdIfExistsMarkerThrows")
+
     async def test_generated_by_path(self, ekn_root: str) -> None:
         nix = f"""
         let

@@ -25,20 +25,21 @@ self: lib: rec {
   # Remove the marker. This gives the bare attribute set of entries.
   stripListMarker = value: lib.removeAttrs value [ "_type" ];
 
-  # Search a value for a named-list or numbered-list marker.
-  # `ekn.lib.kubeValueType` resolves a marker when it merges an option. Thus a
-  # marker can only stay in a value that goes around the type, such as an entry
-  # of `kubernetes.crds`. Such a marker would reach the cluster as a literal
-  # `_type` field, which is not valid Kubernetes.
+  # Search a value for any of the three markers: `mkNamedList`,
+  # `mkNumberedList` and `mkIfExists`.
+  # `ekn.lib.kubeValueType` and `conditionalAttrsOf` resolve a marker when they
+  # merge an option. Thus a marker can only stay in a value that goes around
+  # both, such as an entry of `kubernetes.crds`. Such a marker would reach the
+  # cluster as a literal `_type` field, which is not valid Kubernetes.
   # The search stops at the first marker, because `lib.any` is lazy.
-  hasListMarker =
+  hasMarker =
     value:
-    if isMarkedList value then
+    if isMarkedList value || isIfExists value then
       true
     else if lib.isAttrs value then
-      lib.any hasListMarker (lib.attrValues value)
+      lib.any hasMarker (lib.attrValues value)
     else if lib.isList value then
-      lib.any hasListMarker value
+      lib.any hasMarker value
     else
       false;
 

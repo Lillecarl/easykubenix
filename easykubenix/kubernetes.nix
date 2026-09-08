@@ -116,24 +116,25 @@ let
   # afterwards, already complete and untouched.
   #
   # `kubernetes.crds` is `listOf attrs`, so it also goes around
-  # `ekn.lib.kubeValueType`. Nothing resolves an `mkNamedList` or
-  # `mkNumberedList` marker in a CRD. Such a marker would reach the cluster as a
-  # literal `_type` field. Find it here and stop, instead of writing a manifest
-  # that is not valid Kubernetes. The search is lazy and stops at the first
-  # marker.
+  # `ekn.lib.kubeValueType` and `lib.conditionalAttrsOf`. Nothing resolves an
+  # `mkNamedList`, `mkNumberedList` or `mkIfExists` marker in a CRD. Such a
+  # marker would reach the cluster as a literal `_type` field. Find it here and
+  # stop, instead of writing a manifest that is not valid Kubernetes. The
+  # search is lazy and stops at the first marker.
   checkedCrds = map (
     crd:
-    lib.throwIf (lib.hasListMarker crd) ''
+    lib.throwIf (lib.hasMarker crd) ''
       The CustomResourceDefinition "${
         crd.metadata.name or "<unnamed>"
-      }" in `kubernetes.crds' uses ekn.lib.mkNamedList or ekn.lib.mkNumberedList.
+      }" in `kubernetes.crds' uses lib.mkNamedList, lib.mkNumberedList or
+      lib.mkIfExists.
 
       `kubernetes.crds' goes around ekn.lib.kubeValueType on purpose, for speed.
-      Thus nothing changes the marker back into a list, and the marker becomes a
-      literal `_type' field in the manifest.
+      Thus nothing resolves the marker, and it becomes a literal `_type' field
+      in the manifest.
 
       Put the object in `kubernetes.objects' instead, where the type resolves
-      the marker. You can also write the list directly.
+      the marker. You can also write the value directly.
     '' crd
   ) cfg.crds;
   allGenerated = generatedWithEkn ++ checkedCrds;
