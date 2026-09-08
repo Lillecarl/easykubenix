@@ -17,6 +17,38 @@ def anyio_backend() -> str:
 
 
 class TestKubeValueType:
+    async def test_the_type_uses_the_v2_merge_protocol(self) -> None:
+        # `merge.v2` plus a coherent `check`. The flag lets `oneOf` pick a
+        # branch without running the module system's coherence check over
+        # every leaf, which is the dominant cost in this value tree.
+        assert await evaluate_file(NIX_TEST_FILE, "usesV2Merge") is True
+
+    async def test_object_metadata_survives_the_merge(self) -> None:
+        assert await evaluate_file(NIX_TEST_FILE, "exposesObjectMetadata") is True
+
+    async def test_named_list_metadata_is_one_entry_per_element(self) -> None:
+        # The value is a list, so its metadata is a list too, in the same
+        # order. Two plain entries and a marker patching one of them give two.
+        assert await evaluate_file(NIX_TEST_FILE, "exposesNamedListMetadata") is True
+
+    async def test_numbered_list_metadata_is_one_entry_per_element(self) -> None:
+        assert await evaluate_file(NIX_TEST_FILE, "exposesNumberedListMetadata") is True
+
+    async def test_a_whole_value_can_be_null(self) -> None:
+        # This type carries its own null branch, because `types.nullOr` is
+        # still legacy and would drop the metadata of everything below it.
+        assert await evaluate_file(NIX_TEST_FILE, "topLevelNull") is None
+
+    async def test_mk_if_exists_works_inside_an_object(self) -> None:
+        # An object's fields are a `conditionalAttrsOf`, so a patch can
+        # condition on a field the same way it conditions on an object.
+        result = await evaluate_file(NIX_TEST_FILE, "conditionalFieldInsideObject")
+        assert result == {"spec": {"replicas": 3}}
+
+    async def test_null_and_a_value_cannot_both_define_one_field(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="is neither a value of type"):
+            await evaluate_file(NIX_TEST_FILE, "mixedNullAndValueThrows")
+
     async def test_named_list_override_via_mk_named_list(self) -> None:
         result = await evaluate_file(NIX_TEST_FILE, "namedListOverrideViaMkNamedList")
         assert isinstance(result, dict)
@@ -54,7 +86,12 @@ class TestKubeValueType:
         # interchangeable) -- an ordinary, unmarked attrset colliding with
         # a real list definition must be a hard error, not a silent
         # reinterpretation as "the attrs form of a list".
-        with pytest.raises(nanopynix.NixError, match="defined multiple times"):
+        #
+        # Under the v2 merge protocol `oneOf` reports this itself, as "no one
+        # branch accepts every definition". Before v2 it fell through to the
+        # module system's own "defined multiple times". Same rejection, and
+        # the newer message names both candidate types.
+        with pytest.raises(nanopynix.NixError, match="is neither a value of type"):
             await evaluate_file(NIX_TEST_FILE, "unmarkedAttrsRejectedAgainstListThrows")
 
     async def test_plain_list_passes_through_untouched(self) -> None:

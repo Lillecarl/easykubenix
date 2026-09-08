@@ -344,8 +344,70 @@ let
     }
   ];
 
+  # A whole value that is only `null`. `types.nullOr` is still a legacy type,
+  # so this type carries its own null branch instead. See kubeValueType.nix.
+  topLevelNull = evalValue [ { value = null; } ];
+
+  # One evaluation that keeps the option, so the test can read `valueMeta`.
+  # The v2 merge protocol publishes it, and a consumer that walks the option
+  # tree needs it to survive the recursion down to a list entry.
+  metadataEvaluation = lib.evalModules {
+    modules = [
+      {
+        options.value = lib.mkOption {
+          type = kubeValueType;
+          default = null;
+        };
+        config.value = {
+          containers = [
+            {
+              name = "app";
+              image = "v1";
+            }
+            {
+              name = "sidecar";
+              image = "s1";
+            }
+          ];
+          args = [
+            "--first"
+            "--second"
+          ];
+          spec.enabled = true;
+        };
+      }
+      {
+        value = {
+          containers = lib.mkNamedList { app.image = lib.mkForce "v2"; };
+          args = lib.mkNumberedList { "1" = lib.mkForce "--changed"; };
+        };
+      }
+    ];
+  };
+
+  # An object's fields go through `conditionalAttrsOf`, so `lib.mkIfExists`
+  # works below the object as well as above it. `replicas` is there, so the
+  # marker patches it. `paused` is not, so the marker creates nothing.
+  conditionalFieldInsideObject = evalValue [
+    { value.spec.replicas = 1; }
+    {
+      value.spec = lib.mkIfExists {
+        replicas = lib.mkForce 3;
+        paused = lib.mkIfExists true;
+      };
+    }
+  ];
+
   # The following bindings must throw. Each one is exposed as a thunk, so the
   # test can assert on the error without an eager evaluation above.
+
+  # `null` and a value cannot both be definitions of one field. This is
+  # `types.nullOr`'s own rule; `oneOf` enforces it here, because no single
+  # branch accepts both.
+  mixedNullAndValueThrows = evalValue [
+    { value = null; }
+    { value.present = true; }
+  ];
 
   # One field cannot use both markers. Earlier the named branch won in silence
   # and left a literal `true` in the list.
@@ -371,6 +433,14 @@ let
   };
 in
 {
+  usesV2Merge = kubeValueType.merge ? v2 && kubeValueType.check.isV2MergeCoherent;
+  exposesObjectMetadata = metadataEvaluation.options.value.valueMeta.attrs ? spec;
+  exposesNamedListMetadata =
+    lib.length metadataEvaluation.options.value.valueMeta.attrs.containers.list == 2;
+  exposesNumberedListMetadata =
+    lib.length metadataEvaluation.options.value.valueMeta.attrs.args.list == 2;
+  inherit topLevelNull;
+  inherit conditionalFieldInsideObject;
   inherit namedListOverrideViaMkNamedList;
   inherit plainListOfNamedThingsNeverAutoConverted;
   inherit ownerReferencesWithDuplicateNamesPreserved;
@@ -397,6 +467,7 @@ in
   # Forcing these must throw -- each is exposed as a thunk so the test can
   # assert on the error without eagerly evaluating it above.
   unmarkedAttrsRejectedAgainstListThrows = unmarkedAttrsRejectedAgainstListThrows;
+  mixedNullAndValueThrows = mixedNullAndValueThrows;
   mixedNamedAndNumberedThrows = mixedNamedAndNumberedThrows;
   mkOrderOnNamedEntryThrows = mkOrderOnNamedEntryThrows;
   mkNamedListRejectsNonAttrsInput = mkNamedListRejectsNonAttrsInput;
