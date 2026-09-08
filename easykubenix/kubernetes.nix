@@ -872,13 +872,17 @@ in
               # that had none.
               lib.optionalAttrs (merged != { }) { ${field} = merged; };
           in
-          # The fast path below no longer fires: every unit carries
+          # The fast path below almost never fires now: every unit carries
           # `ekn.dev/deployment-unit` in `labels` by default (see gitops.nix),
-          # so `declared.labels` is never empty. It stays because a unit can
-          # decline that label, and because the work it skips is small --
-          # one shallow merge per object in a unit, over `metadata` only, and
-          # `deploymentUnits` already copies each object here. See
-          # easykubenix issue #11 on measuring evaluation cost.
+          # so `declared.labels` is empty only for a unit that wipes the whole
+          # attribute set with `lib.mkForce { }`. Declining just that one label
+          # does not reach it -- `lib.mkForce (_: null)` leaves a function in
+          # `labels`, which is not an empty set.
+          #
+          # It stays because the work it skips is small: one shallow merge per
+          # object in a unit, over `metadata` only, and `deploymentUnits`
+          # already copies each object here. See easykubenix issue #11 on
+          # measuring evaluation cost.
           if declared.labels == { } && declared.annotations == { } then
             object
           else
