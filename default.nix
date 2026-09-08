@@ -244,14 +244,29 @@ let
   eval = mkInstance { inherit modules specialArgs; };
 in
 {
-  inherit (eval.config.internal)
+  # From `internal.exportable`, not `internal` itself: these are files a
+  # person builds and hands to something else, usually `kubectl apply -f`,
+  # and nothing but `ekn` resolves an `ekn.envSeed` reference. A seeded
+  # object is therefore absent from them -- applying it from here would
+  # write `$ekn:env:VARNAME` over a live credential.
+  #
+  # `internal.manifestJSONFile` keeps the full set, because `ekn validate`,
+  # `ekn _applyManifest` and `ekn.cachePackage` all go through the CLI, which
+  # substitutes first. `ekn render` likewise reads `kubernetes.generated`, so
+  # a person looking at what is about to happen still sees the seeded object
+  # with its reference visible rather than silently missing.
+  #
+  # `manifestYAMLFileList` used to be listed here and was never defined by
+  # any module, so forcing it failed with `attribute missing`. Removed rather
+  # than invented: nothing could have depended on an output that never
+  # evaluated.
+  inherit (eval.config.internal.exportable)
     manifestAttrs
     manifestJSON
     manifestJSONFile
     manifestYAML
     manifestYAMLFile
     manifestYAMLList
-    manifestYAMLFileList
     manifestYAMLDir
     ;
 

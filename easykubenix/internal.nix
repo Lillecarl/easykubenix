@@ -78,17 +78,58 @@
     # Get priority for a kind, default to end if not in list
     getApplyPriority = kind: applyPriorities.${kind} or (lib.length helmOrder);
 
-    generatedOrdered = lib.sort (
-      a: b: (getApplyPriority a.kind) < (getApplyPriority b.kind)
-    ) config.kubernetes.generated;
+    ordered = objects: lib.sort (a: b: (getApplyPriority a.kind) < (getApplyPriority b.kind)) objects;
 
-    manifestAttrs = {
-      apiVersion = "v1";
-      kind = "List";
-      items = generatedOrdered;
+    generatedOrdered = ordered config.kubernetes.generated;
+
+    # Every manifest output, built from whichever object list the caller
+    # should be reading. There are two, and they differ by who applies the
+    # result:
+    #
+    #   `generated`            for `ekn`, which resolves an `ekn.envSeed`
+    #                          reference at apply time.
+    #   `generatedExportable`  for anything that hands objects to a different
+    #                          applier -- including a person running
+    #                          `kubectl apply -f` on a file built here.
+    #
+    # A seeded object dropped from the second set is the point: nothing else
+    # resolves the reference, so applying that file would write
+    # `$ekn:env:VARNAME` over a live credential.
+    #
+    # Nix is lazy, so defining both costs nothing until one is forced, and
+    # with no seeded objects anywhere the two produce identical store paths.
+    manifestsFrom = objects: rec {
+      manifestAttrs = {
+        apiVersion = "v1";
+        kind = "List";
+        items = ordered objects;
+      };
+      manifestJSON = builtins.toJSON manifestAttrs;
+      manifestJSONFile = pkgs.writeText "manifest.json" manifestJSON;
+      manifestYAMLDir = mkManifestYAMLDir (ordered objects);
+      manifestYAMLFile = mkManifestYAMLFile manifestAttrs manifestJSON;
+      manifestYAML = builtins.readFile manifestYAMLFile;
+      manifestYAMLList = builtins.readFile manifestYAMLFile;
     };
-    manifestJSON = builtins.toJSON manifestAttrs;
-    manifestJSONFile = pkgs.writeText "manifest.json" manifestJSON;
+
+    # What `ekn` itself reads: `ekn validate` and `ekn _applyManifest` both
+    # take `internal.manifestJSONFile`, and `ekn.cachePackage` pushes its
+    # closure. All three go through the CLI, which substitutes first, and a
+    # reference is a plain string so `kubeconform` has nothing to object to.
+    # The closure holds variable *names*, never values.
+    inherit (manifestsFrom config.kubernetes.generated)
+      manifestAttrs
+      manifestJSON
+      manifestJSONFile
+      manifestYAML
+      manifestYAMLDir
+      manifestYAMLFile
+      manifestYAMLList
+      ;
+
+    # What `default.nix` exposes to anyone building this repository. See
+    # `manifestsFrom` above for why these are a different set.
+    exportable = manifestsFrom config.kubernetes.generatedExportable;
 
     # A single derivation for the whole namespace/kind/name.yaml tree --
     # one `runCommand` instead of one derivation per object (the previous
@@ -103,11 +144,12 @@
     # `split-manifest` subcommand, reusing the same flatten_manifests logic
     # as ekn/src/ekn/git.py -- so this works identically for ekn users and
     # plain `nix build` users, no fast/slow-path split needed.
-    manifestYAMLDir =
+    mkManifestYAMLDir =
+      objects:
       pkgs.runCommand "manifest-yaml-dir"
         {
           nativeBuildInputs = [ eknPackage ];
-          json = builtins.toJSON generatedOrdered;
+          json = builtins.toJSON objects;
           passAsFile = [ "json" ];
         }
         ''
@@ -130,20 +172,19 @@
     # interpolated content, silently truncating the input and dumping the
     # remainder as literal shell commands). Beware that this path requires
     # IFD.
-    manifestYAMLFile =
+    mkManifestYAMLFile =
+      attrs: json:
       if builtins ? toYAML then
-        pkgs.writeText "manifest.yaml" (builtins.toYAML manifestAttrs)
+        pkgs.writeText "manifest.yaml" (builtins.toYAML attrs)
       else
         pkgs.runCommand "manifest.yaml"
           {
             nativeBuildInputs = [ eknPackage ];
-            json = manifestJSON;
+            inherit json;
             passAsFile = [ "json" ];
           }
           ''
             ekn _jsonToYAML < "$jsonPath" > $out
           '';
-    manifestYAML = builtins.readFile manifestYAMLFile;
-    manifestYAMLList = builtins.readFile manifestYAMLFile;
   };
 }

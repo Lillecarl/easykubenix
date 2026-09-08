@@ -281,6 +281,26 @@ class TestEknModule:
         assert isinstance(result, list)
         assert [(o["kind"], o["metadata"]["name"]) for o in result] == [("ConfigMap", "plain")]
 
+    async def test_the_built_manifest_outputs_drop_a_seeded_object(self) -> None:
+        # `nix build .#manifestYAMLDir` and friends exist to be handed to
+        # something else, and nothing but `ekn` resolves a reference -- so a
+        # `kubectl apply -f` of one must not write `$ekn:env:VARNAME` over a
+        # live credential.
+        public = await evaluate_file(NIX_TEST_FILE, "seededPublicManifest")
+        assert isinstance(public, dict)
+        assert [o["kind"] for o in public["items"]] == ["ConfigMap"]
+
+    async def test_the_internal_manifest_keeps_the_seeded_object(self) -> None:
+        # `ekn validate`, `ekn _applyManifest` and `ekn.cachePackage` read
+        # this one, and all three go through the CLI, which substitutes
+        # first. A reference is a plain string, so kubeconform is content.
+        internal = await evaluate_file(NIX_TEST_FILE, "seededInternalManifest")
+        assert isinstance(internal, dict)
+        kinds = [o["kind"] for o in internal["items"]]
+        assert "Secret" in kinds
+        secret = next(o for o in internal["items"] if o["kind"] == "Secret")
+        assert secret["stringData"]["password"].startswith("$ekn:env:")
+
     async def test_routing_a_seeded_secret_to_gitops_is_refused(self) -> None:
         # Loud rather than silent: a GitOps target is an explicit per-object
         # opt-in, so a seeded object there is an author mistake. ArgoCD would

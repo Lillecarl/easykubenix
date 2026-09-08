@@ -483,6 +483,12 @@ in
 
   seededGenerated = easySeeded.config.kubernetes.generated;
   seededExportable = easySeeded.config.kubernetes.generatedExportable;
+
+  # The manifest outputs `default.nix` exposes are built for a different
+  # applier, so they drop the seeded object. `internal.*` keeps it, because
+  # everything reading that goes through the CLI, which substitutes first.
+  seededPublicManifest = easySeeded.config.internal.exportable.manifestAttrs;
+  seededInternalManifest = easySeeded.config.internal.manifestAttrs;
   # Forcing these must throw -- thunks, so the test can assert on the error.
   seededGitOpsThrows = easySeededGitOpsThrows;
   envSeededWithoutReferenceThrows = easyEnvSeededWithoutReferenceThrows;
