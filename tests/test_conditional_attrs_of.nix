@@ -213,6 +213,116 @@ let
     }
   ];
 
+  # ---------------------------------------------------------------------
+  # Type composition: `functor`, `substSubModules` and `getSubOptions`.
+  #
+  # These exist so the type behaves like `attrsOf` to the rest of the module
+  # system rather than only to a value. Nothing exercised them, and each has a
+  # distinct consumer that fails in a distinct way without it.
+  # ---------------------------------------------------------------------
+
+  # `functor.binOp`, reached when two modules declare one option and the module
+  # system has to prove the two types are the same one.
+  #
+  # This one does NOT work, and its control below says why: a self-referential
+  # type has no bottom, so `typeMerge` walks it forever. That is nixpkgs' own
+  # limit rather than this type's -- see
+  # `twoDeclarationsOfAPlainRecursiveOption`, built from plain `attrsOf`, which
+  # fails identically. `submoduleElementEvaluation` further down is the shape
+  # that does work, because a submodule element type defers instead of
+  # recursing.
+  twoDeclarationsOfOneOption =
+    (lib.evalModules {
+      modules = [
+        {
+          options.value = lib.mkOption {
+            type = conditionalAttrsOf valueType;
+            default = { };
+          };
+        }
+        {
+          # No second `default`. Two declarations may not both carry one, and
+          # that rule is about `default` rather than about the type -- it fires
+          # before `typeMerge` is ever reached, so leaving one here would make
+          # this test pass for the wrong reason.
+          options.value = lib.mkOption { type = conditionalAttrsOf valueType; };
+        }
+        { value.present.base = true; }
+        { value.present = mkIfExists { patch = true; }; }
+      ];
+    }).config.value;
+
+  # The control for the binding above. The same shape built from plain
+  # `attrsOf`, so a failure can be attributed to recursion rather than to
+  # `conditionalAttrsOf`.
+  plainRecursiveType =
+    (lib.types.oneOf [
+      lib.types.bool
+      lib.types.int
+      lib.types.str
+      (lib.types.attrsOf plainRecursiveType)
+    ])
+    // {
+      description = "plain recursive test value";
+    };
+
+  twoDeclarationsOfAPlainRecursiveOption =
+    (lib.evalModules {
+      modules = [
+        {
+          options.value = lib.mkOption {
+            type = lib.types.attrsOf plainRecursiveType;
+            default = { };
+          };
+        }
+        { options.value = lib.mkOption { type = lib.types.attrsOf plainRecursiveType; }; }
+        { value.present.base = true; }
+      ];
+    }).config.value;
+
+  # `substSubModules`, which the module system calls when it pushes a further
+  # module into a `submodule` element type. Without it the extra module is
+  # dropped and `extra` never appears.
+  submoduleElementEvaluation = lib.evalModules {
+    modules = [
+      {
+        options.value = lib.mkOption {
+          type = conditionalAttrsOf (
+            lib.types.submodule {
+              options.replicas = lib.mkOption {
+                type = lib.types.int;
+                default = 1;
+              };
+            }
+          );
+          default = { };
+        };
+      }
+      {
+        options.value = lib.mkOption {
+          type = conditionalAttrsOf (
+            lib.types.submodule {
+              options.extra = lib.mkOption {
+                type = lib.types.str;
+                default = "from-second-declaration";
+              };
+            }
+          );
+        };
+      }
+      { value.application.replicas = 3; }
+      # ...and the marker still works through a submodule element type.
+      { value.application = mkIfExists { extra = "patched"; }; }
+      { value.absent = mkIfExists { replicas = 9; }; }
+    ];
+  };
+
+  # `getSubOptions`, which documentation generation walks. It has to name the
+  # element's options under a `<name>` placeholder, the way `attrsOf` does.
+  subOptionNames = lib.attrNames (
+    submoduleElementEvaluation.options.value.type.getSubOptions [ "value" ]
+  );
+
   # The following bindings must throw. Each one is exposed as a thunk, so the
   # test can assert on the error without an eager evaluation above.
 
@@ -301,7 +411,11 @@ in
     forcedOrdinaryDefinitionTakesTheSlowPath
     conditionalMarkerIsAllowed
     conditionalMarkerSwitchedOff
+    twoDeclarationsOfOneOption
+    twoDeclarationsOfAPlainRecursiveOption
+    subOptionNames
     ;
+  submoduleElementValue = submoduleElementEvaluation.config.value;
   markerOnlyScalarKeyStaysAbsent = !(markerOnlyScalarKeyStaysAbsent ? missing);
 
   inherit

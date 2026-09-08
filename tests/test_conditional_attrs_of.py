@@ -134,6 +134,52 @@ class TestPrioritiesAndMarkers:
         assert result == {"present": {"base": True}}
 
 
+class TestTypeComposition:
+    """`functor`, `substSubModules` and `getSubOptions`.
+
+    These make the type behave like `attrsOf` to the rest of the module system
+    rather than only to a value. Nothing exercised them, and each has its own
+    consumer that fails in its own way without it.
+    """
+
+    async def test_a_submodule_element_type_survives_a_second_declaration(self) -> None:
+        # `substSubModules`, which the module system calls when it pushes a
+        # further module into a `submodule` element type. Without it the second
+        # declaration's module is dropped and `extra` never appears.
+        #
+        # The marker still works through a submodule element type, and a key
+        # only a marker defines is still omitted.
+        result = await evaluate_file(NIX_TEST_FILE, "submoduleElementValue")
+        assert result == {"application": {"replicas": 3, "extra": "patched"}}
+
+    async def test_sub_options_name_the_element_s_options(self) -> None:
+        # `getSubOptions`, which documentation generation walks. It reaches
+        # both declarations' options, under a `<name>` placeholder.
+        result = await evaluate_file(NIX_TEST_FILE, "subOptionNames")
+        assert result == ["_module", "extra", "replicas"]
+
+    async def test_a_self_referential_element_type_cannot_be_redeclared(self) -> None:
+        """A known limit, pinned with the control that says whose it is.
+
+        `functor.binOp` hands `typeMerge` the element type, and a
+        self-referential one has no bottom, so the walk never terminates. This
+        is nixpkgs' `oneOf`/`either` `binOp` rather than anything
+        `conditionalAttrsOf` does -- the control below is the same shape built
+        from plain `attrsOf` and fails identically.
+
+        The shape that does work is a submodule element type, above: it defers
+        instead of recursing. If nixpkgs ever makes `typeMerge` handle a
+        recursive type, this test is what notices.
+        """
+        with pytest.raises(nanopynix.NixError, match="stack overflow"):
+            await evaluate_file(NIX_TEST_FILE, "twoDeclarationsOfOneOption")
+
+    async def test_the_same_limit_applies_to_a_plain_attrs_of_type(self) -> None:
+        # The control. Same failure, no `conditionalAttrsOf` anywhere in it.
+        with pytest.raises(nanopynix.NixError, match="stack overflow"):
+            await evaluate_file(NIX_TEST_FILE, "twoDeclarationsOfAPlainRecursiveOption")
+
+
 class TestAPriorityAroundAMarkerIsRejected:
     """A priority belongs inside the marker's content, never around the marker.
 
