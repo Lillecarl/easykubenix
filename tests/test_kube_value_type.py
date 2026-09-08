@@ -241,6 +241,64 @@ class TestKubeValueType:
             await evaluate_file(NIX_TEST_FILE, "mkNumberedListRejectsNonIntKeys")
 
 
+class TestBranchSelection:
+    """Which branch of `oneOf` takes a definition.
+
+    Every other class here tests how definitions merge. This tests where they
+    land first, which is a separate mechanism and the one that decides whether
+    a value keeps its Nix type on the way to JSON. `types.oneOf` is a left fold
+    of `either`, and `either` takes the first branch whose `check` accepts every
+    definition -- so the order in `baseType` is load-bearing, and a branch whose
+    check is too wide silently swallows a value meant for a later one.
+    """
+
+    async def test_each_scalar_keeps_its_own_type(self) -> None:
+        # An int that arrives as a float, or a bool that arrives as a string,
+        # is a manifest the API server rejects.
+        result = await evaluate_file(NIX_TEST_FILE, "scalarBranches")
+        assert result == {"anInt": 3, "aFloat": 3.0, "aString": "3", "aTrue": True, "aFalse": False}
+        assert isinstance(result, dict)
+        # `3 == 3.0` in Python, so equality above does not separate the two.
+        assert isinstance(result["anInt"], int)
+        assert isinstance(result["aFloat"], float)
+        assert isinstance(result["aTrue"], bool)
+
+    async def test_a_path_renders_as_a_store_path(self) -> None:
+        # `types.path` is a branch of its own and nothing exercised it.
+        assert await evaluate_file(NIX_TEST_FILE, "pathBranch") == "test_kube_value_type.nix"
+
+    async def test_an_empty_attribute_set_stays_an_object(self) -> None:
+        # `{}` and `[]` are not interchangeable in a Kubernetes manifest.
+        assert await evaluate_file(NIX_TEST_FILE, "emptyObjectStaysAnObject") == {"spec": {}}
+
+    async def test_an_empty_list_stays_a_list(self) -> None:
+        # `namedListOf` comes before `objectType`, so an empty list has to fail
+        # `objectType`'s check rather than be taken by it.
+        assert await evaluate_file(NIX_TEST_FILE, "emptyListStaysAList") == {"args": []}
+
+    async def test_a_marked_list_nested_inside_an_object(self) -> None:
+        # `objectType`'s `addCheck` is what stops the object branch taking a
+        # marker: its own check is only `isAttrs`, so without the guard the
+        # marker would merge as an ordinary object and leave `_type` in the
+        # rendered manifest. `loneMkNamedListBecomesList` covers the option
+        # root; this covers a marker further down a value tree.
+        result = await evaluate_file(NIX_TEST_FILE, "markedListInsideAnObject")
+        assert result == {"spec": {"template": {"containers": [{"name": "a", "image": "x"}]}}}
+
+    async def test_one_field_cannot_be_an_int_and_a_string(self) -> None:
+        # No branch accepts both, so `oneOf` rejects the pair. A Kubernetes
+        # field has one fixed type, the same argument that rejects an unmarked
+        # attribute set against a list.
+        with pytest.raises(nanopynix.NixError, match=r"value\.replicas"):
+            await evaluate_file(NIX_TEST_FILE, "intAndStringThrows")
+
+    async def test_a_function_matches_no_branch(self) -> None:
+        # Without a rejection here it would reach `builtins.toJSON` and fail
+        # there instead, naming neither the option nor the module that wrote it.
+        with pytest.raises(nanopynix.NixError, match=r"value\.callback"):
+            await evaluate_file(NIX_TEST_FILE, "aFunctionThrows")
+
+
 class TestWholeListPriorities:
     """Priorities on a whole list definition.
 

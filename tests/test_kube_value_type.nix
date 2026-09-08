@@ -695,6 +695,51 @@ let
     { value.initContainers = lib.mkNumberedList { "3" = lib.mkIf false { name = "late"; }; }; }
   ];
 
+  # ---------------------------------------------------------------------
+  # Which branch of `oneOf` takes a definition.
+  #
+  # Everything above tests how definitions merge. This tests where they land
+  # first, which is a separate mechanism and the one that decides whether a
+  # value keeps its Nix type on the way to JSON. `types.oneOf` is a left fold
+  # of `either`, and `either` takes the first branch whose `check` accepts
+  # every definition -- so the order in `baseType` is load-bearing, and a
+  # branch whose check is too wide silently swallows a value meant for a later
+  # one.
+  # ---------------------------------------------------------------------
+
+  # Each scalar keeps its own Nix type. An int that arrives as a float, or a
+  # bool that arrives as a string, is a manifest the API server rejects.
+  scalarBranches = evalValue [
+    {
+      value = {
+        anInt = 3;
+        aFloat = 3.0;
+        aString = "3";
+        aTrue = true;
+        aFalse = false;
+      };
+    }
+  ];
+
+  # `types.path` is a branch of its own, and nothing exercised it. A path
+  # renders as its store path, not as an attribute set.
+  pathBranch = evalValue [ { value.file = ./test_kube_value_type.nix; } ];
+
+  # An empty attribute set is an object, and an empty list is a list. Both are
+  # legal Kubernetes values, and `{}` and `[]` are not interchangeable there.
+  # `namedListOf` comes before `objectType`, so an empty list has to fail
+  # `objectType` rather than be taken by it.
+  emptyObjectStaysAnObject = evalValue [ { value.spec = { }; } ];
+  emptyListStaysAList = evalValue [ { value.args = [ ]; } ];
+
+  # A marked attribute set nested inside an object, rather than at the option
+  # root. `objectType`'s `addCheck` is what stops the object branch taking it:
+  # its own check is only `isAttrs`, so without the guard the marker would
+  # merge as an ordinary object and keep `_type` in the rendered manifest.
+  markedListInsideAnObject = evalValue [
+    { value.spec.template.containers = lib.mkNamedList { a.image = "x"; }; }
+  ];
+
   # The following bindings must throw. Each one is exposed as a thunk, so the
   # test can assert on the error without an eager evaluation above.
 
@@ -724,6 +769,19 @@ let
     }
     { value.initContainers = lib.mkNumberedList { "0".image = "m2"; }; }
   ];
+
+  # No branch of `oneOf` accepts both an int and a string, so one field cannot
+  # be defined as both. This is the same rejection `unmarkedAttrsRejectedAgainstList`
+  # relies on, at the scalar level: a Kubernetes field has one fixed type.
+  intAndStringThrows = evalValue [
+    { value.replicas = 3; }
+    { value.replicas = "3"; }
+  ];
+
+  # A function matches no branch at all. Without a rejection it would reach
+  # `builtins.toJSON` and fail there instead, naming neither the option nor
+  # the module that wrote it.
+  aFunctionThrows = evalValue [ { value.callback = (x: x); } ];
 
   # A numbered list takes its order from its index keys, exactly as a named
   # list takes its order from its name keys. An order property on an entry
@@ -815,7 +873,15 @@ in
     namedEntrySwitchedOnIsAdded
     numberedEntryMkDefaultLoses
     numberedEntrySwitchedOffIsNotAdded
+    scalarBranches
+    emptyObjectStaysAnObject
+    emptyListStaysAList
+    markedListInsideAnObject
     ;
+
+  # The store path the option resolved to, as a string the test can compare
+  # against the file's own name.
+  pathBranch = builtins.baseNameOf pathBranch.file;
 
   # One metadata entry per element of the value, after a force, a drop and an
   # append have all happened to the same list.
@@ -829,6 +895,8 @@ in
   namedEntryConflictThrows = namedEntryConflictThrows;
   numberedEntryConflictThrows = numberedEntryConflictThrows;
   mkOrderOnNumberedEntryThrows = mkOrderOnNumberedEntryThrows;
+  intAndStringThrows = intAndStringThrows;
+  aFunctionThrows = aFunctionThrows;
   unmarkedAttrsRejectedAgainstListThrows = unmarkedAttrsRejectedAgainstListThrows;
   mixedNullAndValueThrows = mixedNullAndValueThrows;
   mixedNamedAndNumberedThrows = mixedNamedAndNumberedThrows;
