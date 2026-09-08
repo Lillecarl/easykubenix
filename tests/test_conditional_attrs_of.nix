@@ -130,6 +130,90 @@ let
     }
   ];
 
+  # ---------------------------------------------------------------------
+  # Priorities, on an ordinary definition and inside marker content.
+  #
+  # `mergeEntry` decides existence and then hands the surviving definitions to
+  # `elemType`, so the ordinary module rules have to keep working on both sides
+  # of that split.
+  # ---------------------------------------------------------------------
+
+  # Two markers for one existing key. Both contribute; neither is a definition
+  # that makes the key exist.
+  twoMarkersOnOneKey = evalValue [
+    { value.present.base = true; }
+    { value.present = mkIfExists { first = 1; }; }
+    { value.present = mkIfExists { second = 2; }; }
+  ];
+
+  # A marker whose content is `mkDefault` loses to the ordinary definition, and
+  # still fills a field the ordinary definition leaves alone. The content is
+  # merged by the normal rules, so a priority inside it behaves normally.
+  markerContentDefaults = evalValue [
+    {
+      value.present = {
+        replicas = 1;
+      };
+    }
+    {
+      value.present = mkIfExists {
+        replicas = lib.mkDefault 9;
+        paused = lib.mkDefault true;
+      };
+    }
+  ];
+
+  # `mkIf true` is an ordinary definition, so the key exists and the marker
+  # lands. The `mkIf false` half of this pair is `falseBase` above.
+  trueBaseExists = evalValue [
+    { value.conditionalBase = lib.mkIf true { base = true; }; }
+    { value.conditionalBase = mkIfExists { patch = true; }; }
+  ];
+
+  # A key whose ordinary definition is a scalar. `mergeEntry` takes the slow
+  # path here, because the marker carries a `_type`, and the content has to
+  # merge against a non-attribute value like any other definition.
+  markerOnAScalarKey = evalValue [
+    { value.replicas = 1; }
+    { value.replicas = mkIfExists (lib.mkForce 3); }
+  ];
+
+  # A key that only a marker defines, where the marker content is itself a
+  # scalar. Still absent -- the content never gets to make the key exist.
+  markerOnlyScalarKeyStaysAbsent = evalValue [
+    { value.other = 1; }
+    { value.missing = mkIfExists 5; }
+  ];
+
+  # The fast path in `mergeEntry` skips the collector when no definition of a
+  # key carries a `_type`. A `mkForce` carries one, so this key takes the slow
+  # path instead -- and must still merge exactly as `attrsOf` would.
+  forcedOrdinaryDefinitionTakesTheSlowPath = evalValue [
+    { value.present.replicas = 1; }
+    { value.present.replicas = lib.mkForce 3; }
+  ];
+
+  # A probe, not an assertion of what is right.
+  #
+  # The file comment says to put a priority inside the content and never
+  # around the marker. `lib.mkForce (mkIfExists { ... })` is the mistake it
+  # warns about. `mergeEntry` runs `filterOverrides` inside its collector, so
+  # the forced marker at priority 50 outranks the ordinary definition at 100
+  # and removes it from `collected`. `ordinary` is then empty and the key
+  # stops existing -- the ordinary definition is deleted by a patch that meant
+  # to add to it.
+  #
+  # The test records what this does today. Whether the type should refuse it
+  # is a decision about the type.
+  forcedMarkerAroundAnExistingKey = evalValue [
+    { value.present.base = true; }
+    {
+      value.present = lib.mkForce (mkIfExists {
+        patch = true;
+      });
+    }
+  ];
+
   # The following bindings must throw. Each one is exposed as a thunk, so the
   # test can assert on the error without an eager evaluation above.
   emptyPathThrows = mkIfExistsAtPath [ ] { };
@@ -158,6 +242,16 @@ in
     !(pathValues ? missing)
     && !(pathValues.existing ? MissingKind)
     && !(pathValues.existing.Deployment ? missing);
+
+  inherit
+    twoMarkersOnOneKey
+    markerContentDefaults
+    trueBaseExists
+    markerOnAScalarKey
+    forcedOrdinaryDefinitionTakesTheSlowPath
+    forcedMarkerAroundAnExistingKey
+    ;
+  markerOnlyScalarKeyStaysAbsent = !(markerOnlyScalarKeyStaysAbsent ? missing);
 
   inherit
     emptyPathThrows
