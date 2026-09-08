@@ -111,8 +111,29 @@ the ones the current apply no longer produces — `kubectl apply --prune -l` wit
 the ordering and SOPS handling filled in.
 
 The label value comes from `ekn.discriminator`, or from
-`gitOps.targets.<name>.discriminator` for a `--target` apply, so pruning one
-target can never reach another's objects.
+`deployment.units.<name>.discriminator` for a `--target` apply, so pruning one
+unit can never reach another's objects.
+
+`ekn` stamps that label at apply time, so only the objects `ekn` itself applies
+carry it. On a GitOps cluster that is the minority: nearly everything reaches
+the API server through ArgoCD, which applies the committed YAML.
+
+So a unit records itself in the manifest instead. Every object in
+`deployment.units.<name>` renders with an `ekn.dev/deployment-unit` label
+holding `<name>`, whatever ends up applying it:
+
+```console
+$ kubectl get all -A -l ekn.dev/deployment-unit=apps
+```
+
+It is a `mkDefault` entry in that unit's `labels`, so a unit can override the
+value, or decline it with `lib.mkForce (_: null)` and record itself some other
+way. Because the name becomes a label value, easykubenix asserts that it can be
+one: at most 63 characters, starting and ending alphanumeric.
+
+`kubernetes.generated` carries no such label. It is not unit-scoped, the same
+as for every other per-unit label, so a whole-`generated` apply and a `--target`
+apply of one object differ.
 
 Objects apply in barriers ordered by `ekn.resourcePriority`, which defaults to
 Helm's `InstallOrder` numbered in tens (`10`–`380`): namespaces and CRDs go down
