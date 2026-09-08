@@ -299,6 +299,78 @@ async def resolve(objects: Iterable[Manifest], *, api: Api) -> SeedPlan:
     return SeedPlan(objects=planned, actions=actions)
 
 
+class SeedRow(NamedTuple):
+    """One variable a configuration expects, and what is known about it."""
+
+    variable: str
+    namespace: str
+    kind: str
+    name: str
+    field: str
+    is_set: bool
+    #: True, False, or None when no cluster was reachable.
+    in_cluster: bool | None
+
+    @property
+    def identity(self) -> str:
+        return f"{self.namespace}/{self.kind}/{self.name}"
+
+
+def describe(objects: Iterable[Manifest]) -> list[SeedRow]:
+    """Every variable the given objects expect, without touching a cluster.
+
+    The field comes from the reference itself, so it cannot drift from where
+    the value will actually land. A variable an object declares but never
+    references reports an empty field rather than being dropped: that
+    mismatch is worth seeing.
+    """
+    rows: list[SeedRow] = []
+    for obj in objects:
+        variables = annotated_variables(obj)
+        if not variables:
+            continue
+        namespace, kind, name = _identity(obj)
+        fields = {reference.variable: reference.field for reference in references(obj)}
+        rows.extend(
+            SeedRow(
+                variable=variable,
+                namespace=namespace,
+                kind=kind,
+                name=name,
+                field=fields.get(variable, ""),
+                is_set=variable in os.environ,
+                in_cluster=None,
+            )
+            for variable in variables
+        )
+    return rows
+
+
+async def inspect(rows: Iterable[SeedRow], *, api: Api | None) -> list[SeedRow]:
+    """Fill in `in_cluster` for each row, when a cluster is reachable.
+
+    One lookup per object rather than per variable, and `None` throughout
+    when there is no cluster -- "unknown" and "absent" are different answers,
+    and an operator bringing up a new cluster needs to tell them apart.
+    """
+    rows = list(rows)
+    if api is None:
+        return rows
+    present: dict[tuple[str, str, str], bool] = {}
+    result: list[SeedRow] = []
+    for row in rows:
+        key = (row.namespace, row.kind, row.name)
+        if key not in present:
+            probe: Manifest = {
+                "apiVersion": "v1",
+                "kind": row.kind,
+                "metadata": {"name": row.name, "namespace": row.namespace},
+            }
+            present[key] = await _live_values(probe, api) is not None
+        result.append(row._replace(in_cluster=present[key]))
+    return result
+
+
 def report(actions: Iterable[SeedAction]) -> None:
     """Say what happened to each seed, by name and never by value.
 
@@ -321,7 +393,10 @@ __all__ = [
     "SeedAction",
     "SeedPlan",
     "SeedReference",
+    "SeedRow",
     "annotated_variables",
+    "describe",
+    "inspect",
     "is_seeded",
     "references",
     "report",

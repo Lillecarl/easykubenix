@@ -171,8 +171,51 @@ class TestResolve:
         assert [a.verb for a in plan.actions] == ["update"]
         assert plan.objects[0]["stringData"]["password"] == "rotated"
 
+    async def test_a_declared_but_unreferenced_variable_still_reports(self) -> None:
+        # The annotation and the reference are written together, so a
+        # mismatch means something is wrong. Report it rather than hide it.
+        obj = secret(
+            annotations={"ekn.dev/env-0": "ARGOCD_REPO_PASSWORD", "ekn.dev/env-1": "STRAY"},
+            password="$ekn:env:ARGOCD_REPO_PASSWORD",
+        )
+        rows = seeds.describe([obj])
+        assert [(row.variable, row.field) for row in rows] == [
+            ("ARGOCD_REPO_PASSWORD", "stringData.password"),
+            ("STRAY", ""),
+        ]
+
     async def test_an_unseeded_object_passes_through_untouched(self, absent: None) -> None:
         plain = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "plain"}}
         plan = await seeds.resolve([plain], api=object())
         assert plan.objects == [plain]
         assert plan.actions == []
+
+
+class TestDescribe:
+    def test_it_names_the_variable_the_object_and_the_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ARGOCD_REPO_PASSWORD", "s3cret")
+        rows = seeds.describe([SEEDED])
+        assert len(rows) == 1
+        assert rows[0].variable == "ARGOCD_REPO_PASSWORD"
+        assert rows[0].identity == "argocd/Secret/repo-creds"
+        assert rows[0].field == "stringData.password"
+        assert rows[0].is_set is True
+        # No cluster consulted yet: unknown, not absent.
+        assert rows[0].in_cluster is None
+
+    def test_it_ignores_objects_that_need_nothing(self) -> None:
+        assert seeds.describe([secret(password="hunter2")]) == []
+
+    async def test_without_a_cluster_presence_stays_unknown(self) -> None:
+        # "Unknown" and "absent" are different answers, and an operator
+        # bringing up a new cluster has to tell them apart.
+        rows = await seeds.inspect(seeds.describe([SEEDED]), api=None)
+        assert rows[0].in_cluster is None
+
+    async def test_with_a_cluster_presence_is_filled_in(self, present: dict[str, Any]) -> None:
+        rows = await seeds.inspect(seeds.describe([SEEDED]), api=object())
+        assert rows[0].in_cluster is True
+
+    async def test_an_absent_object_reports_absent(self, absent: None) -> None:
+        rows = await seeds.inspect(seeds.describe([SEEDED]), api=object())
+        assert rows[0].in_cluster is False

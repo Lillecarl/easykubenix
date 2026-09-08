@@ -714,6 +714,60 @@ class KubeApply(AttrCommand):
             _report_server_error("apply", exc)
 
 
+class Secrets(AttrCommand):
+    """List the bootstrap credentials this configuration expects.
+
+    Read-only, and answers the question before a cluster exists: which
+    environment variables does `ekn kubeapply` want, where does each value
+    land, and is it already in the cluster.
+
+    That last column needs a reachable cluster; without one this still lists
+    what is expected, so a new cluster can be brought up against a checklist
+    rather than against a failed apply. The failure this exists for is a
+    bootstrap that completes cleanly and then cannot sync, because nothing in
+    the apply said a credential was expected.
+    """
+
+    target: str | None = opt(
+        None,
+        help="Only this GitOps target's objects. Omit for the full kubernetes.generated set.",
+    )
+
+    async def run(self) -> None:
+        uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
+        try:
+            cfg = await evaluate_kubeapply_config(self.file, uri, customer, self.attr, self.target)
+        except NixError as exc:
+            _report_nix_error(exc)
+        except ValidationError as exc:
+            _report_validation_error("kubeapply config", exc)
+
+        rows = seeds.describe(cfg.objects)
+        if not rows:
+            _log.info("no bootstrap credentials are expected")
+            return
+
+        api: kr8s.asyncio.Api | None = None
+        try:
+            api = await kr8s.asyncio.api()
+        except Exception:
+            # Any failure to reach a cluster means the same thing here, and
+            # it is not an error: the point of this command is to answer
+            # before a cluster exists.
+            _log.info("no cluster reachable; reporting what is expected only")
+            _log.debug("cluster unreachable", exc_info=True)
+
+        for row in await seeds.inspect(rows, api=api):
+            _log.info(
+                "seed",
+                variable=row.variable,
+                object=row.identity,
+                field=row.field,
+                set=row.is_set,
+                in_cluster=row.in_cluster,
+            )
+
+
 class ClusterDiff(AttrCommand):
     """Diff Kubernetes objects against the live cluster.
 
@@ -946,6 +1000,7 @@ class Ekn(AttrCommand):
         Rollback,
         Validate,
         KubeApply,
+        Secrets,
         ClusterDiff,
         PushCache,
         SplitManifest,
