@@ -10,6 +10,24 @@ self: lib: rec {
     mkIfExistsAtPath
     ;
 
+  # Seeded bootstrap credentials. `envSeed` makes a reference to an
+  # environment variable and `envSeeded` marks the object holding one; `ekn`
+  # substitutes the value at apply time. A module author reaches both as
+  # `ekn.envSeed`/`ekn.envSeeded`. The rest is for this repository's own
+  # module code. See envSeed.nix.
+  inherit (import ./envSeed.nix { inherit lib; })
+    envSeed
+    envSeedAnnotationPrefix
+    envSeeded
+    envSeedPrefix
+    envSeedVariable
+    envSeedVariables
+    hasEnvSeed
+    isEnvSeed
+    isSeededObject
+    seededVariables
+    ;
+
   # The three markers use `_type`. This is the tag that the module system uses
   # for its own directives. `mkIf`, `mkMerge` and `mkOverride` all use it.
   # Nixpkgs ignores a `_type` value that it does not know. Such a value goes

@@ -193,6 +193,14 @@ let
       # `values`) stays overridable leaf-by-leaf instead of a caller's
       # single definition replacing the whole thing.
       mkDefaults = lib.mapAttrsRecursive (_: v: lib.mkDefault v);
+      # Reference an environment variable that `ekn` substitutes at apply
+      # time, for a bootstrap credential the cluster cannot invent:
+      #
+      #   stringData.password = ekn.envSeed "ARGOCD_REPO_PASSWORD";
+      #
+      # Evaluation never reads the variable, so no secret can reach
+      # `/nix/store`. See easykubenix/lib/envSeed.nix.
+      inherit (lib) envSeed envSeeded;
       lib = {
         # Evaluate a whole separate easykubenix configuration from inside
         # this one. Used by gitops.nix for `gitOps.targets.<name>.modules`;
