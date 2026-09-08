@@ -467,6 +467,53 @@ let
       ];
     }).config.kubernetes.generated;
 
+  # A special argument reaching a module inside a GitOps target's nested
+  # instance. This is the only way to pass something the module system must
+  # evaluate to learn a module's shape -- a constructor a module is written
+  # as a call to. `_module.args` cannot carry one: working out the shape
+  # would require `config`, and evaluation stops with infinite recursion.
+  #
+  # The module below is written in exactly that shape, so it only evaluates
+  # at all if the argument arrived.
+  easyForwardedSpecialArgs = import ../. {
+    inherit pkgs;
+    specialArgs.mkThing = name: { kubernetes.objects.default.ConfigMap.${name}.data.made = "yes"; };
+    modules = [
+      {
+        ekn.discriminator = "easykubenix";
+        gitOps.deployBranch = "deploy";
+        gitOps.targets.bootstrap = {
+          path = "bootstrap";
+          modules = [ ({ mkThing, ... }: mkThing "from-a-special-arg") ];
+        };
+      }
+    ];
+  };
+
+  # `parent` is gitops.nix's own, and a consumer must not be able to shadow
+  # it by passing one at the top level.
+  easyParentStillWins = import ../. {
+    inherit pkgs;
+    specialArgs.parent = "shadowed";
+    modules = [
+      {
+        ekn.discriminator = "easykubenix";
+        gitOps.deployBranch = "deploy";
+        gitOps.targets.bootstrap = {
+          path = "bootstrap";
+          modules = [
+            (
+              { parent, ... }:
+              {
+                kubernetes.objects.default.ConfigMap.probe.data.parentDiscriminator = parent.ekn.discriminator;
+              }
+            )
+          ];
+        };
+      }
+    ];
+  };
+
   easyNoDiscriminator = import ../. {
     inherit pkgs;
     modules = [
@@ -487,6 +534,11 @@ in
   # The manifest outputs `default.nix` exposes are built for a different
   # applier, so they drop the seeded object. `internal.*` keeps it, because
   # everything reading that goes through the CLI, which substitutes first.
+  forwardedSpecialArgs =
+    easyForwardedSpecialArgs.config.gitOps.targets.bootstrap.instance.config.kubernetes.generated;
+  parentStillWins =
+    easyParentStillWins.config.gitOps.targets.bootstrap.instance.config.kubernetes.generated;
+
   seededPublicManifest = easySeeded.config.internal.exportable.manifestAttrs;
   seededInternalManifest = easySeeded.config.internal.manifestAttrs;
   # Forcing these must throw -- thunks, so the test can assert on the error.

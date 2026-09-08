@@ -154,15 +154,41 @@ let
   # attrset this file returns -- a nested instance has no use for
   # `validationScript`/`manifestJSONFile`, and building them would force work
   # nobody asked for.
+  # The special arguments this repository was called with, kept under a name
+  # `mkInstance`'s own parameter cannot shadow.
+  #
+  # Every instance gets them, including a nested one built for a
+  # `gitOps.targets.<name>`. A nested instance is the same configuration in a
+  # different mood: a special argument the outer one needed is almost always
+  # one the inner one needs too, and forwarding means nobody has to remember.
+  #
+  # This is not a convenience. A special argument is the only way to pass
+  # something the module system must evaluate to learn a module's *shape* --
+  # a constructor a module is written as a call to, say. Such an argument
+  # cannot come through `_module.args`, because working out the shape would
+  # then require `config`, and the module system says so and stops:
+  #
+  #     noting that argument `mkComponent' is not externally provided, so
+  #     querying `_module.args' instead, requiring `config'
+  #     error: infinite recursion encountered
+  #
+  # So without forwarding there is no way at all to write such a module
+  # inside a bootstrap target, and no workaround from the consumer's side.
+  callerSpecialArgs = specialArgs;
+
   mkInstance =
     {
       modules ? [ ],
       specialArgs ? { },
     }:
     lib.evalModules {
+      # The caller's own arguments win over the forwarded ones, so
+      # gitops.nix's `parent` cannot be shadowed by a consumer passing a
+      # `parent` of its own at the top level.
       specialArgs = {
         inherit adios template;
       }
+      // callerSpecialArgs
       // specialArgs;
 
       modules = [ { _module.args = moduleArgs; } ] ++ baseModules ++ modules;

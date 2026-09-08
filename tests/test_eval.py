@@ -281,6 +281,30 @@ class TestEknModule:
         assert isinstance(result, list)
         assert [(o["kind"], o["metadata"]["name"]) for o in result] == [("ConfigMap", "plain")]
 
+    async def test_a_special_arg_reaches_a_gitops_target_instance(self) -> None:
+        # A nested instance is the same configuration in a different mood, so
+        # a special argument the outer one was given reaches the inner one.
+        #
+        # This is the only way to pass something the module system must
+        # evaluate to learn a module's shape -- a constructor a module is
+        # written as a call to. `_module.args` cannot carry one: the shape
+        # lookup would require `config`, and evaluation stops with infinite
+        # recursion. So without forwarding, such a module cannot be written
+        # inside a bootstrap target at all, and nothing on the consumer's
+        # side can work around it.
+        result = await evaluate_file(NIX_TEST_FILE, "forwardedSpecialArgs")
+        assert isinstance(result, list)
+        assert result[0]["metadata"]["name"] == "from-a-special-arg"
+        assert result[0]["data"] == {"made": "yes"}
+
+    async def test_gitops_parent_is_not_shadowed_by_a_forwarded_arg(self) -> None:
+        # `parent` is gitops.nix's own, and it is passed after the forwarded
+        # ones, so a consumer passing `parent` at the top level cannot
+        # replace it by accident.
+        result = await evaluate_file(NIX_TEST_FILE, "parentStillWins")
+        assert isinstance(result, list)
+        assert result[0]["data"] == {"parentDiscriminator": "easykubenix"}
+
     async def test_the_built_manifest_outputs_drop_a_seeded_object(self) -> None:
         # `nix build .#manifestYAMLDir` and friends exist to be handed to
         # something else, and nothing but `ekn` resolves a reference -- so a
