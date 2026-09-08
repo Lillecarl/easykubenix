@@ -584,6 +584,13 @@ in
     easyParentStillWins.config.deployment.units.bootstrap.instance.config.kubernetes.generated;
 
   oldGitOpsNamesStillWork = easyOldGitOpsNames.config.kubernetes.deploymentUnits;
+  # `generatedWithEkn` publishes each object's `ekn` sidecar. A deprecated
+  # alias is still a declared option, so without a strip it rides along on
+  # every object -- and, while the alias warned on read, printed a deprecation
+  # notice for a configuration that never wrote the old name.
+  eknSidecarKeys = map (
+    object: builtins.attrNames object.ekn
+  ) easy.config.kubernetes.generatedWithEkn;
 
   seededPublicManifest = easySeeded.config.internal.exportable.manifestAttrs;
   seededInternalManifest = easySeeded.config.internal.manifestAttrs;

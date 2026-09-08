@@ -7,6 +7,46 @@
 }:
 let
   cfg = config.kubernetes;
+
+  # An old option name inside a submodule, kept working after a rename.
+  #
+  # Not `lib.mkRenamedOptionModule`, which wraps the old option's value in
+  # `lib.warn` and so prints its notice when something *reads* the old name --
+  # not when a configuration writes it. That is wrong for an option declared in
+  # a submodule that is then serialized whole. Both of these submodules are:
+  # `generatedWithEkn` publishes each object's `ekn`, and `ekn kubeapply` sends
+  # `kubernetes.rawFiles` through `to_python`. So every evaluation printed
+  #
+  #   trace: Obsolete option `gitOpsTarget' is used. It was renamed to `deploymentUnit'.
+  #
+  # for a configuration that never mentioned the old name -- and sent its
+  # author looking through their own tree for a name that is not in it.
+  #
+  # `warn = false` and `use = id` keep the aliasing and drop the notice. The
+  # cost is that writing the old name is now silent. That trade is right here:
+  # the false notice fired on every evaluation forever, and the true one only
+  # helps during a migration that is already done.
+  #
+  # The old name still exists as an option, so it still appears in a serialized
+  # submodule as a null. `stripEknAliases` below removes it from
+  # `generatedWithEkn`, which is the one output where that reaches a consumer.
+  # A `kubernetes.rawFiles` entry keeps its null: `ekn kubeapply` reads
+  # `entry["path"]` from it and nothing writes those entries to a manifest.
+  deprecatedAlias =
+    from: to:
+    lib.doRename {
+      inherit from to;
+      visible = false;
+      warn = false;
+      use = lib.id;
+    };
+
+  # The `ekn` sidecar, without the option names that only exist as deprecated
+  # aliases. `removeAttrs` never forces the attribute it removes, so this also
+  # keeps a `lib.warn`-wrapped alias quiet if one is ever added again.
+  eknAliases = [ "gitOpsTarget" ];
+  stripEknAliases =
+    object: if object ? ekn then object // { ekn = removeAttrs object.ekn eknAliases; } else object;
   # Type for a single top-level `metadata.labels`/`metadata.annotations`
   # value: real strings pass straight through; when coercion is enabled,
   # `lib.types.coercedTo` handles bool/int conversion (and gives a proper
@@ -108,6 +148,9 @@ let
     ++ lib.optional needsMarkerPass (map (lib.walkWithPath lib.kubeAttrsToLists))
     ++ [
       (map stripEmptyTopLevelLabelsAnnotations)
+      # `generatedWithEkn` is published with `ekn` attached, so a deprecated
+      # alias would otherwise ride along on every object. See `deprecatedAlias`.
+      (map stripEknAliases)
     ]
   );
   # cfg.crds objects deliberately don't flow through generatedWithEkn's
@@ -250,10 +293,10 @@ in
                             type = lib.types.submodule {
                               # `gitOpsTarget` was the old name. The alias
                               # lives inside the submodule because a
-                              # top-level `mkRenamedOptionModule` cannot
-                              # reach an option declared in one.
+                              # top-level rename cannot reach an option
+                              # declared in one.
                               imports = [
-                                (lib.mkRenamedOptionModule [ "gitOpsTarget" ] [ "deploymentUnit" ])
+                                (deprecatedAlias [ "gitOpsTarget" ] [ "deploymentUnit" ])
                               ];
                               options = {
                                 deploymentUnit = lib.mkOption {
@@ -678,7 +721,7 @@ in
           # `gitOpsTarget` was the old name here too, and the alias has to be
           # inside the submodule for the same reason.
           imports = [
-            (lib.mkRenamedOptionModule [ "gitOpsTarget" ] [ "deploymentUnit" ])
+            (deprecatedAlias [ "gitOpsTarget" ] [ "deploymentUnit" ])
           ];
           options = {
             path = lib.mkOption {

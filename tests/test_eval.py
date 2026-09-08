@@ -423,6 +423,42 @@ class TestEknModule:
         assert "hello" in result
 
 
+class TestRenamedOptionAliases:
+    """The old `gitOps.*` names, and what keeping them costs.
+
+    `easyOldGitOpsNames` existed before this class but nothing read it, so the
+    aliases had no assertion behind them at all.
+    """
+
+    async def test_the_old_names_still_route(self) -> None:
+        # `gitOps.deployBranch`, `gitOps.targets.<name>` and
+        # `ekn.gitOpsTarget` together, in one configuration that mentions no
+        # new name anywhere.
+        result = await evaluate_file(NIX_TEST_FILE, "oldGitOpsNamesStillWork")
+        assert isinstance(result, dict)
+        assert list(result) == ["apps"]
+        assert result["apps"]["target"]["path"] == "clusters/home/apps"
+        assert [obj["metadata"]["name"] for obj in result["apps"]["objects"]] == ["routed"]
+
+    async def test_a_deprecated_alias_stays_out_of_the_ekn_sidecar(self) -> None:
+        """An alias is a declared option, so it is serialized with the submodule.
+
+        `generatedWithEkn` publishes each object's `ekn`, so without a strip
+        `gitOpsTarget` rode along on every object. Worse, while the alias
+        warned on read, serializing it printed
+
+            trace: Obsolete option `gitOpsTarget' is used.
+
+        on every evaluation of a configuration that never wrote the old name.
+        `ekn kubeapply` hit the same thing through `kubernetes.rawFiles`.
+        """
+        result = await evaluate_file(NIX_TEST_FILE, "eknSidecarKeys")
+        assert isinstance(result, list)
+        assert result, "fixture rendered no objects, so this asserts nothing"
+        for keys in result:
+            assert keys == ["deploymentUnit", "novalidate"]
+
+
 class TestGitOpsTargetMetadata:
     """A bootstrap target impersonating the controller that takes over.
 
