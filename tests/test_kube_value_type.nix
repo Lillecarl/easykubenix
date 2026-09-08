@@ -695,17 +695,6 @@ let
     { value.initContainers = lib.mkNumberedList { "3" = lib.mkIf false { name = "late"; }; }; }
   ];
 
-  # A probe, not an assertion of what is right. The named branch rejects an
-  # order property on an entry, because a named list takes its order from the
-  # keys and the property would be lost in silence. `orderedNamedKeys` only
-  # looks at `isNamedList` definitions, so the numbered branch does not get
-  # that check -- even though a numbered list takes its order from the keys
-  # too. The test records what this actually does.
-  numberedEntryWithAnOrderProperty = evalValue [
-    { value.initContainers = [ { name = "migrate"; } ]; }
-    { value.initContainers = lib.mkNumberedList { "0" = lib.mkBefore { image = "m2"; }; }; }
-  ];
-
   # The following bindings must throw. Each one is exposed as a thunk, so the
   # test can assert on the error without an eager evaluation above.
 
@@ -734,6 +723,15 @@ let
       ];
     }
     { value.initContainers = lib.mkNumberedList { "0".image = "m2"; }; }
+  ];
+
+  # A numbered list takes its order from its index keys, exactly as a named
+  # list takes its order from its name keys. An order property on an entry
+  # therefore does nothing, so it is refused rather than discharged in
+  # silence. `mkOrderOnNamedEntryThrows` is the same rule on the other branch.
+  mkOrderOnNumberedEntryThrows = evalValue [
+    { value.initContainers = [ { name = "migrate"; } ]; }
+    { value.initContainers = lib.mkNumberedList { "0" = lib.mkBefore { image = "m2"; }; }; }
   ];
 
   # `null` and a value cannot both be definitions of one field. This is
@@ -817,7 +815,6 @@ in
     namedEntrySwitchedOnIsAdded
     numberedEntryMkDefaultLoses
     numberedEntrySwitchedOffIsNotAdded
-    numberedEntryWithAnOrderProperty
     ;
 
   # One metadata entry per element of the value, after a force, a drop and an
@@ -831,6 +828,7 @@ in
   # assert on the error without eagerly evaluating it above.
   namedEntryConflictThrows = namedEntryConflictThrows;
   numberedEntryConflictThrows = numberedEntryConflictThrows;
+  mkOrderOnNumberedEntryThrows = mkOrderOnNumberedEntryThrows;
   unmarkedAttrsRejectedAgainstListThrows = unmarkedAttrsRejectedAgainstListThrows;
   mixedNullAndValueThrows = mixedNullAndValueThrows;
   mixedNamedAndNumberedThrows = mixedNamedAndNumberedThrows;

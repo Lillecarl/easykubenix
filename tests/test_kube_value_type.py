@@ -420,21 +420,18 @@ class TestPrioritiesInsideAnEntry:
         result = await evaluate_file(NIX_TEST_FILE, "numberedEntrySwitchedOffIsNotAdded")
         assert result == {"initContainers": [{"name": "migrate"}]}
 
-    async def test_an_order_property_on_a_numbered_entry_is_tolerated(self) -> None:
-        """Recorded, not endorsed -- the two branches disagree here.
+    async def test_an_order_property_on_a_numbered_entry_is_rejected(self) -> None:
+        # A numbered list takes its order from its index keys, exactly as a
+        # named list takes its order from its name keys. So an order property
+        # on an entry does nothing, and both branches now say so. This used to
+        # be discharged in silence: `orderedEntryKeys` inspected only
+        # `isNamedList` definitions.
+        with pytest.raises(nanopynix.NixError, match="mkBefore/mkAfter/mkOrder"):
+            await evaluate_file(NIX_TEST_FILE, "mkOrderOnNumberedEntryThrows")
 
-        The named branch refuses `mkBefore`/`mkAfter`/`mkOrder` on an entry,
-        because a named list takes its order from the keys and the property
-        would be lost in silence. A numbered list takes its order from the keys
-        too, but `orderedNamedKeys` only inspects `isNamedList` definitions, so
-        the numbered branch never runs that check. The property is discharged
-        and the entry merges as if it had not been written.
-
-        This test states what happens today. Whether it should throw instead is
-        a decision about the type, not about this test.
-        """
-        result = await evaluate_file(NIX_TEST_FILE, "numberedEntryWithAnOrderProperty")
-        assert result == {"initContainers": [{"name": "migrate", "image": "m2"}]}
+    async def test_the_numbered_order_error_names_the_index_keys(self) -> None:
+        with pytest.raises(nanopynix.NixError, match=r"mkNumberedList entries: 0"):
+            await evaluate_file(NIX_TEST_FILE, "mkOrderOnNumberedEntryThrows")
 
     async def test_two_definitions_of_one_field_inside_an_entry_conflict(self) -> None:
         # This is why every other test here writes `mkForce`: without one, a

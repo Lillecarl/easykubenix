@@ -111,13 +111,17 @@ let
             anyNamed = any (def: isNamedList def.value) defs;
             anyNumbered = any (def: isNumberedList def.value) defs;
 
-            # Reject `mkBefore`, `mkAfter` and `mkOrder` on an entry of a named
+            # Reject `mkBefore`, `mkAfter` and `mkOrder` on an entry of a marked
             # list. The module system sorts the definitions before it calls this
-            # merge. A named list then takes its order from the keys, so the sort
+            # merge. A marked list then takes its order from the keys, so the sort
             # has no effect. An error is better than a silent loss of the order.
-            orderedNamedKeys = concatMap (
+            #
+            # Both branches, because both take their order from their keys. This
+            # used to read `isNamedList` alone, so a numbered list discharged the
+            # property and merged the entry as if nobody had written it.
+            orderedEntryKeys = concatMap (
               def:
-              if isNamedList def.value then
+              if isNamedList def.value || isNumberedList def.value then
                 filter (key: ((def.value.${key} or null)._type or null) == "order") (
                   attrNames (stripListMarker def.value)
                 )
@@ -142,12 +146,20 @@ let
               field. mkNamedList addresses an entry by its `name'. mkNumberedList
               addresses an entry by its index.
             ''
-          else if anyNamed && orderedNamedKeys != [ ] then
+          else if anyNamed && orderedEntryKeys != [ ] then
             throw ''
               The option `${lib.showOption loc}' uses mkBefore/mkAfter/mkOrder on
-              the mkNamedList entries: ${lib.concatStringsSep ", " orderedNamedKeys}.
+              the mkNamedList entries: ${lib.concatStringsSep ", " orderedEntryKeys}.
               A named list takes its order from the plain list definitions. It
               appends a new name at the end. Use mkNumberedList to set an order.
+            ''
+          else if anyNumbered && orderedEntryKeys != [ ] then
+            throw ''
+              The option `${lib.showOption loc}' uses mkBefore/mkAfter/mkOrder on
+              the mkNumberedList entries: ${lib.concatStringsSep ", " orderedEntryKeys}.
+              A numbered list takes its order from its index keys, so an order
+              property on an entry does nothing. Give the entry the index you
+              want it at.
             ''
           else if anyNamed then
             let
