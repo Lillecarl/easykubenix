@@ -1,5 +1,16 @@
 self: lib: rec {
-  # The two markers use `_type`. This is the tag that the module system uses
+  # The `mkIfExists` marker and the type that reads it. See
+  # conditionalAttrsOf.nix. A module author reaches them as
+  # `lib.mkIfExists`, `lib.mkIfExistsAtPath` and `lib.conditionalAttrsOf`,
+  # the same way it reaches `lib.mkNamedList`.
+  inherit (import ./conditionalAttrsOf.nix { inherit lib; })
+    conditionalAttrsOf
+    isIfExists
+    mkIfExists
+    mkIfExistsAtPath
+    ;
+
+  # The three markers use `_type`. This is the tag that the module system uses
   # for its own directives. `mkIf`, `mkMerge` and `mkOverride` all use it.
   # Nixpkgs ignores a `_type` value that it does not know. Such a value goes
   # through `dischargeProperties` and `pushDownProperties` without a change.
