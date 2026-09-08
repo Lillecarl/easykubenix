@@ -371,6 +371,36 @@ async def inspect(rows: Iterable[SeedRow], *, api: Api | None) -> list[SeedRow]:
     return result
 
 
+def table(rows: Iterable[SeedRow]) -> str:
+    """Render seed rows as a plain table.
+
+    `ekn secrets` exists to be read, and its columns are wide -- a variable
+    name beside a namespace/kind/name. One structured log line per seed is
+    legible for one seed and stops being so at five.
+
+    `in_cluster` is "?" when no cluster was reachable, because unknown and
+    absent are different answers.
+    """
+    rows = list(rows)
+    header = ("VARIABLE", "OBJECT", "FIELD", "SET", "IN CLUSTER")
+    body = [
+        (
+            row.variable,
+            row.identity,
+            row.field,
+            "yes" if row.is_set else "no",
+            "?" if row.in_cluster is None else ("yes" if row.in_cluster else "no"),
+        )
+        for row in rows
+    ]
+    widths = [max(len(cell) for cell in column) for column in zip(header, *body, strict=False)]
+    lines = [
+        "  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)).rstrip()
+        for row in (header, *body)
+    ]
+    return "\n".join(lines)
+
+
 def report(actions: Iterable[SeedAction]) -> None:
     """Say what happened to each seed, by name and never by value.
 
@@ -402,4 +432,5 @@ __all__ = [
     "report",
     "resolve",
     "substitute",
+    "table",
 ]

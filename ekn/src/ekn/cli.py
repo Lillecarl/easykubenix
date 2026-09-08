@@ -757,15 +757,11 @@ class Secrets(AttrCommand):
             _log.info("no cluster reachable; reporting what is expected only")
             _log.debug("cluster unreachable", exc_info=True)
 
-        for row in await seeds.inspect(rows, api=api):
-            _log.info(
-                "seed",
-                variable=row.variable,
-                object=row.identity,
-                field=row.field,
-                set=row.is_set,
-                in_cluster=row.in_cluster,
-            )
+        # A table, not one structured log line per seed. The columns are
+        # wide -- a variable name and a namespace/kind/name -- so at five or
+        # ten seeds the log form stops being readable, and reading it is the
+        # whole job of this command.
+        print(seeds.table(await seeds.inspect(rows, api=api)))
 
 
 class ClusterDiff(AttrCommand):

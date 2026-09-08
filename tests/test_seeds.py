@@ -219,3 +219,24 @@ class TestDescribe:
     async def test_an_absent_object_reports_absent(self, absent: None) -> None:
         rows = await seeds.inspect(seeds.describe([SEEDED]), api=object())
         assert rows[0].in_cluster is False
+
+
+class TestTable:
+    def test_it_lines_the_columns_up(self) -> None:
+        rows = [
+            seeds.SeedRow("SHORT", "argocd", "Secret", "repo-creds", "stringData.password", True, False),
+            seeds.SeedRow(
+                "A_MUCH_LONGER_VARIABLE_NAME", "external-secrets", "Secret", "store", "stringData.token", False, None
+            ),
+        ]
+        lines = seeds.table(rows).splitlines()
+        assert lines[0].startswith("VARIABLE")
+        # Every row's OBJECT column starts at the same offset.
+        offsets = {line.index("argocd") for line in lines[1:2]}
+        assert lines[2].index("external-secrets") in offsets
+
+    def test_unknown_presence_is_not_reported_as_absent(self) -> None:
+        row = seeds.SeedRow("V", "ns", "Secret", "n", "stringData.p", False, None)
+        assert seeds.table([row]).splitlines()[1].split()[-1] == "?"
+        present = row._replace(in_cluster=False)
+        assert seeds.table([present]).splitlines()[1].split()[-1] == "no"
