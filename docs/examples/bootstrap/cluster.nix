@@ -15,6 +15,11 @@
   config = {
     clusterRepoURL = "https://github.com/example/cluster.git";
 
+    # Required, and no default. It is the prune scope, and it also names each
+    # GitOps target: `gitOps.targets.<name>.discriminator` is
+    # "${ekn.discriminator}-${name}".
+    ekn.discriminator = "bootstrap-example";
+
     gitOps = {
       enable = true;
       deployBranch = "deploy";
