@@ -512,16 +512,72 @@ class TestGitOpsTargetMetadata:
         assert "annotations" not in crd["metadata"]
         assert crd["metadata"]["labels"]["ekn.dev/kind"] == "CustomResourceDefinition"
 
-    async def test_a_target_declaring_no_metadata_stamps_none(self) -> None:
+    async def test_a_target_declaring_no_metadata_stamps_only_the_unit_label(self) -> None:
         result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadata")
         assert isinstance(result, dict)
         unstamped = self._by_name(result["apps"])["unstamped"]
 
         # The control for everything above: being in a target is not what
-        # stamps an object, declaring the metadata is. `metadata` here is
-        # untouched -- no empty `labels: {}` either, which would show up as a
-        # spurious field in every committed manifest.
-        assert sorted(unstamped["metadata"]) == ["name", "namespace"]
+        # stamps an object, declaring the metadata is. The one exception is
+        # the unit label, which every unit declares by default.
+        assert sorted(unstamped["metadata"]) == ["labels", "name", "namespace"]
+        assert unstamped["metadata"]["labels"] == {"ekn.dev/deployment-unit": "apps"}
+        # No empty `annotations: {}` either, which would show up as a spurious
+        # field in every committed manifest.
+        assert "annotations" not in unstamped["metadata"]
+
+    async def test_every_unit_records_its_name_on_its_objects(self) -> None:
+        """The mark has to be in the rendered manifest, not stamped at apply time.
+
+        `ekn` writes `ekn.dev/discriminator` in `_with_discriminator_label`,
+        so only objects `ekn` itself applies carry it. On a GitOps cluster
+        nearly every object arrives through ArgoCD instead, which applies the
+        committed YAML -- measured on a live cluster, such an object had no
+        labels at all. A label Nix renders reaches the cluster whatever
+        applies it.
+        """
+        result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadata")
+        assert isinstance(result, dict)
+
+        for unit in ("apps", "bootstrap"):
+            for obj in result[unit]["objects"]:
+                labels = obj["metadata"]["labels"]
+                assert labels["ekn.dev/deployment-unit"] == unit, (unit, obj["metadata"]["name"])
+
+        # Both sources, since a unit's objects come from two places: `routed`
+        # arrives from the parent via `ekn.deploymentUnit`, `root` from the
+        # unit's own `modules`.
+        bootstrap = self._by_name(result["bootstrap"])
+        assert bootstrap["routed"]["metadata"]["labels"]["ekn.dev/deployment-unit"] == "bootstrap"
+        assert bootstrap["root"]["metadata"]["labels"]["ekn.dev/deployment-unit"] == "bootstrap"
+
+    async def test_a_unit_can_decline_the_label(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadata")
+        assert isinstance(result, dict)
+        opted_out = self._by_name(result["declined"])["opted-out"]
+
+        # `mkForce (_: null)` over the default. The escape hatch for a project
+        # that would rather record the unit some other way.
+        assert "labels" not in opted_out["metadata"]
+        assert opted_out["metadata"]["annotations"] == {"ekn.dev/deployment-unit": "declined"}
+
+    async def test_generated_carries_no_unit_label(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadataGenerated")
+        assert isinstance(result, list)
+
+        # `generated` is not unit-scoped, so it carries no per-unit stamp --
+        # the unit label included. A whole-`generated` apply and a `--target`
+        # apply of the same object therefore differ, which is the existing
+        # contract for `labels`/`annotations` and stays true for this one.
+        for obj in result:
+            assert "ekn.dev/deployment-unit" not in obj["metadata"].get("labels", {})
+
+    async def test_a_unit_name_that_cannot_be_a_label_value_is_rejected(self) -> None:
+        # A leading underscore is legal in a label value's middle and not at
+        # its ends. Caught here, it names the unit; caught at the API server,
+        # it names the label, once per object.
+        with pytest.raises(nanopynix.NixError, match=r"ekn\.dev/deployment-unit"):
+            await evaluate_file(NIX_TEST_FILE, "badUnitNameThrows")
 
 
 class TestGitOpsTargetSubmoduleEndToEnd:
@@ -584,7 +640,14 @@ class TestGitOpsTargetSubmoduleEndToEnd:
         # Applied as the controller that takes over, so SSA hands the fields
         # across instead of leaving `ekn` owning them permanently.
         assert cfg.field_manager == "argocd-controller"
-        assert cfg.objects[0]["metadata"]["labels"] == {"app.kubernetes.io/instance": "argocd"}
+        # Both labels reach the CLI: the one this unit declares, and the unit
+        # label every unit declares by default. `ekn kubeapply --target` and
+        # `ekn commit` read the same `deploymentUnits` objects, so what the
+        # committed YAML carries is what an apply carries.
+        assert cfg.objects[0]["metadata"]["labels"] == {
+            "app.kubernetes.io/instance": "argocd",
+            "ekn.dev/deployment-unit": "bootstrap",
+        }
 
     async def test_field_manager_defaults_without_a_target(self, tmp_path: Path) -> None:
         # No `--target`: the objects come from `kubernetes.generated`, which

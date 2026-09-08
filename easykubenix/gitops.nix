@@ -142,6 +142,10 @@
                   committed YAML and what `ekn kubeapply --target ${name}`
                   applies agree.
 
+                  One entry is here by default: `ekn.dev/deployment-unit`,
+                  holding this unit's name. It is what makes `kubectl get all
+                  -A -l ekn.dev/deployment-unit=${name}` answer.
+
                   A value may be a function of the object rather than a
                   string, for metadata that has to encode the object's own
                   identity -- `ekn.lib.argocdTrackingId` is one. Such a
@@ -233,6 +237,36 @@
               };
             };
 
+            # Which unit an object belongs to, recorded on the object itself.
+            #
+            # `ekn.deploymentUnit` is EKN-only routing and is stripped before
+            # render, so before this the cluster held no record of it. Nor did
+            # it hold `ekn.dev/discriminator` for most objects: `ekn` stamps
+            # that at apply time (see `_with_discriminator_label` in
+            # ekn/src/ekn/apply.py), and on a GitOps cluster nearly every
+            # object reaches the API server through ArgoCD instead, carrying
+            # whatever the committed YAML carries. Measured on a live cluster:
+            # an `Application` synced that way had no labels at all.
+            #
+            # So the mark has to be rendered here rather than stamped by the
+            # CLI. It goes through this unit's own `labels`, which
+            # `stampTargetMetadata` (kubernetes.nix) already applies to routed
+            # objects and to a nested instance's objects alike.
+            #
+            # A label and not an annotation, because the question this answers
+            # is a query: `kubectl get all -A -l ekn.dev/deployment-unit=apps`.
+            # An annotation stores the same bytes and cannot be selected on,
+            # so answering it would mean listing every object and filtering
+            # client-side. The API server keeps no index of arbitrary labels
+            # either way -- its watch cache indexes namespace, and matches
+            # label selectors by iterating -- so the label costs its bytes and
+            # nothing more. `ekn.dev/discriminator` is the same shape.
+            #
+            # `mkDefault`, so a unit can `mkForce` another value, or
+            # `mkForce (_: null)` to decline it and record the unit some other
+            # way (`annotations` takes the same values).
+            config.labels."ekn.dev/deployment-unit" = lib.mkDefault name;
+
             config.instance = ekn.lib.mkInstance {
               modules = [
                 # At `mkDefault`, so a nested module can still set its own.
@@ -292,4 +326,57 @@
       '';
     };
   };
+
+  config.assertions =
+    let
+      # Every unit records its name in `ekn.dev/deployment-unit` (see the
+      # unit submodule), so a unit name is now a label value and has to obey
+      # the API server's rules for one: at most 63 characters, starting and
+      # ending alphanumeric, with dashes, underscores and dots between.
+      #
+      # Without this check an offending name renders fine and fails at apply
+      # time, per object, with a validation error that names the label rather
+      # than the unit that produced it.
+      #
+      # Reads the resolved label rather than the attribute name, so a unit
+      # that overrides the value is checked on what it actually sets. A unit
+      # that declines the label -- `mkForce (_: null)`, which resolves to a
+      # function -- is skipped: it puts no label on anything, so its name
+      # never has to be a legal one.
+      offenders = lib.filter (value: value != null) (
+        lib.mapAttrsToList (
+          name: unit:
+          let
+            value = unit.labels."ekn.dev/deployment-unit" or null;
+          in
+          if !(lib.isString value) then
+            null
+          else if builtins.stringLength value > 63 then
+            "${name}: ${toString (builtins.stringLength value)} characters, over the 63 a label value allows"
+          else if builtins.match "[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?" value == null then
+            "${name}: ${value}"
+          else
+            null
+        ) config.deployment.units
+      );
+    in
+    [
+      {
+        assertion = offenders == [ ];
+        message = ''
+          These deployment units cannot be recorded in the
+          `ekn.dev/deployment-unit` label:
+
+          ${lib.concatMapStringsSep "\n" (entry: "  ${entry}") offenders}
+
+          A label value is at most 63 characters. It starts and ends with a
+          letter or a digit, and holds only letters, digits, dashes,
+          underscores and dots between them.
+
+          Rename the unit, or set
+          `deployment.units.<name>.labels."ekn.dev/deployment-unit"' to a
+          legal value. `lib.mkForce (_: null)' declines the label instead.
+        '';
+      }
+    ];
 }

@@ -264,9 +264,15 @@ in
                                     to. Deliberately single-valued, not a list: an object
                                     synced by two GitOps targets at once means two
                                     controllers independently reconciling (and potentially
-                                    pruning) the same resource. This is EKN-only routing
-                                    metadata and is stripped before Kubernetes manifests
-                                    are rendered.
+                                    pruning) the same resource.
+
+                                    The field itself is EKN-only and is stripped before
+                                    Kubernetes manifests are rendered. Its *value* is not:
+                                    the object's copy in `kubernetes.deploymentUnits` carries
+                                    it in the `ekn.dev/deployment-unit` label, so the unit an
+                                    object belongs to survives to the cluster whatever
+                                    applies it. The copy in `kubernetes.generated` is
+                                    unstamped, as it is for every other per-unit label.
                                   '';
                                 };
                                 novalidate = lib.mkOption {
@@ -688,7 +694,19 @@ in
             deploymentUnit = lib.mkOption {
               type = lib.types.nullOr lib.types.str;
               default = null;
-              description = "Same routing as ekn.deploymentUnit on a normal object -- which deployment.units entry this file belongs to. Null omits it from every deploymentUnits entry (still kubeapply-able via the full kubernetes.rawFiles list, just never committed to a GitOps branch).";
+              description = ''
+                Same routing as ekn.deploymentUnit on a normal object -- which
+                deployment.units entry this file belongs to. Null omits it from
+                every deploymentUnits entry (still kubeapply-able via the full
+                kubernetes.rawFiles list, just never committed to a GitOps
+                branch).
+
+                A raw file gets none of its unit's `labels`/`annotations`, and
+                so no `ekn.dev/deployment-unit` label either. Nix never parses
+                it -- that is the whole point of a raw file -- so there is
+                nothing here to stamp. Write the label into the file if the
+                objects in it should carry one.
+              '';
             };
           };
         }
@@ -854,6 +872,13 @@ in
               # that had none.
               lib.optionalAttrs (merged != { }) { ${field} = merged; };
           in
+          # The fast path below no longer fires: every unit carries
+          # `ekn.dev/deployment-unit` in `labels` by default (see gitops.nix),
+          # so `declared.labels` is never empty. It stays because a unit can
+          # decline that label, and because the work it skips is small --
+          # one shallow merge per object in a unit, over `metadata` only, and
+          # `deploymentUnits` already copies each object here. See
+          # easykubenix issue #11 on measuring evaluation cost.
           if declared.labels == { } && declared.annotations == { } then
             object
           else

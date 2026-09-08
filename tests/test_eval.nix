@@ -273,11 +273,24 @@ let
     inherit pkgs;
     modules = [
       (
-        { ekn, ... }:
+        { ekn, lib, ... }:
         {
           ekn.discriminator = "easykubenix";
           deployment.deployBranch = "deploy";
           deployment.units.apps.path = "clusters/home/apps";
+          # Declines the built-in `ekn.dev/deployment-unit` label the way the
+          # option documents: a function returning null, forced over the
+          # default. A project that would rather record the unit in an
+          # annotation needs this to work.
+          deployment.units.declined = {
+            path = "declined";
+            labels."ekn.dev/deployment-unit" = lib.mkForce (_: null);
+            annotations."ekn.dev/deployment-unit" = "declined";
+          };
+          kubernetes.objects.default.ConfigMap.opted-out = {
+            ekn.deploymentUnit = "declined";
+            data.key = "no-label";
+          };
           # Routed here from the parent, and stamped exactly like a submodule
           # object -- a target's metadata covers both sources.
           kubernetes.objects.default.ConfigMap.routed = {
@@ -328,6 +341,20 @@ let
       )
     ];
   };
+  # A unit whose name cannot be a label value. Underscores are legal inside
+  # one but not at its ends, which is the sort of name that renders fine and
+  # then fails per object at the API server.
+  easyBadUnitName = import ../. {
+    inherit pkgs;
+    modules = [
+      {
+        ekn.discriminator = "easykubenix";
+        deployment.deployBranch = "deploy";
+        deployment.units."_apps".path = "clusters/home/apps";
+      }
+    ];
+  };
+
   # A deprecated `kluctl.*` option whose value names a rendered output.
   # Pushing the manifest to a cache before deploying it is the obvious thing
   # to write there, and nixkube does exactly this.
@@ -571,6 +598,10 @@ in
     inherit (easy.config.kubernetes) generatedByPath deploymentUnits;
   };
   deploymentUnitMetadata = easyGitOpsTargetMetadata.config.kubernetes.deploymentUnits;
+  # The same objects as they appear outside any unit. `generated` is not
+  # unit-scoped, so it carries no per-unit stamp -- including the built-in
+  # `ekn.dev/deployment-unit` one.
+  deploymentUnitMetadataGenerated = easyGitOpsTargetMetadata.config.kubernetes.generated;
   gitOpsSubmodule = {
     inherit (easyGitOpsSubmodule.config.kubernetes) generated deploymentUnits;
     nestedDiscriminator =
@@ -585,6 +616,7 @@ in
   hoistedFromSubmodule = easyHoistedFromSubmodule.config.kubernetes.generated;
   # Forcing this one must throw -- exposed as a thunk so the test can assert on
   # the error without eagerly evaluating it above.
+  badUnitNameThrows = easyBadUnitName.config.kubernetes.generated;
   crdMarkerThrows = easyCrdMarkerThrows;
   crdIfExistsMarkerThrows = easyCrdIfExistsMarkerThrows;
 }
