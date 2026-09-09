@@ -144,7 +144,12 @@
 
                   One entry is here by default: `ekn.dev/deployment-unit`,
                   holding this unit's name. It is what makes `kubectl get all
-                  -A -l ekn.dev/deployment-unit=${name}` answer.
+                  -A -l ekn.dev/deployment-unit=${name}` answer, and it is
+                  what scopes pruning. `mkForce` a different string if the
+                  name does not suit. Do not remove it and do not make it a
+                  function: an assertion rejects both, because a unit that
+                  cannot be selected by this label cannot be pruned, and its
+                  objects look unowned to the next whole-instance prune.
 
                   A value may be a function of the object rather than a
                   string, for metadata that has to encode the object's own
@@ -263,9 +268,9 @@
             # label selectors by iterating -- so the label costs its bytes and
             # nothing more. `ekn.dev/discriminator` is the same shape.
             #
-            # `mkDefault`, so a unit can `mkForce` another value, or
-            # `mkForce (_: null)` to decline it and record the unit some other
-            # way (`annotations` takes the same values).
+            # `mkDefault`, so a unit can `mkForce` another string. It cannot
+            # decline it: an assertion below requires a plain string here,
+            # because this label is the prune scope in both directions.
             config.labels."ekn.dev/deployment-unit" = lib.mkDefault name;
 
             config.instance = ekn.lib.mkInstance {
@@ -340,15 +345,21 @@
       # than the unit that produced it.
       #
       # Reads the resolved label rather than the attribute name, so a unit
-      # that overrides the value is checked on what it actually sets. A unit
-      # that declines the label -- `mkForce (_: null)`, which resolves to a
-      # function -- is skipped: it puts no label on anything, so its name
-      # never has to be a legal one.
+      # that overrides the value is checked on what it actually sets.
+      labelOf = unit: unit.labels."ekn.dev/deployment-unit" or null;
+
+      # A unit that puts no plain string here cannot be selected, and a unit
+      # that cannot be selected cannot be pruned -- in either direction. See
+      # the assertion message below.
+      unlabelled = lib.attrNames (
+        lib.filterAttrs (_name: unit: !(lib.isString (labelOf unit))) config.deployment.units
+      );
+
       offenders = lib.filter (value: value != null) (
         lib.mapAttrsToList (
           name: unit:
           let
-            value = unit.labels."ekn.dev/deployment-unit" or null;
+            value = labelOf unit;
           in
           if !(lib.isString value) then
             null
@@ -363,6 +374,31 @@
     in
     [
       {
+        assertion = unlabelled == [ ];
+        message = ''
+          These deployment units set no `ekn.dev/deployment-unit' label to a
+          plain string:
+
+          ${lib.concatMapStringsSep "\n" (entry: "  ${entry}") unlabelled}
+
+          The label is what scopes pruning, so every unit has to carry one.
+          `ekn kubeapply --target <name> --prune' selects on its value, and a
+          whole-instance `ekn kubeapply --prune' selects on its *absence* --
+          that is how a whole-instance prune leaves a bootstrap unit's
+          objects alone. Those objects exist nowhere but in the unit, so
+          nothing else marks them as somebody's.
+
+          A unit with no label therefore does not merely lose its own
+          `--target' prune. Its objects look unowned to the next
+          whole-instance `--prune', which deletes them. For a bootstrap unit
+          that is ArgoCD and the CNI.
+
+          A function is not enough either: pruning selects on the label
+          before it sees an object, so the value has to be the same string
+          for every object in the unit.
+        '';
+      }
+      {
         assertion = offenders == [ ];
         message = ''
           These deployment units cannot be recorded in the
@@ -376,7 +412,7 @@
 
           Rename the unit, or set
           `deployment.units.<name>.labels."ekn.dev/deployment-unit"' to a
-          legal value. `lib.mkForce (_: null)' declines the label instead.
+          legal value.
         '';
       }
     ];

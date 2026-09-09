@@ -708,15 +708,24 @@ class TestGitOpsTargetMetadata:
         assert bootstrap["routed"]["metadata"]["labels"]["ekn.dev/deployment-unit"] == "bootstrap"
         assert bootstrap["root"]["metadata"]["labels"]["ekn.dev/deployment-unit"] == "bootstrap"
 
-    async def test_a_unit_can_decline_the_label(self) -> None:
+    async def test_a_unit_can_rename_the_label_value(self) -> None:
         result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadata")
         assert isinstance(result, dict)
-        opted_out = self._by_name(result["declined"])["opted-out"]
+        renamed = self._by_name(result["renamed"])["renamed-unit"]
 
-        # `mkForce (_: null)` over the default. The escape hatch for a project
-        # that would rather record the unit some other way.
-        assert "labels" not in opted_out["metadata"]
-        assert opted_out["metadata"]["annotations"] == {"ekn.dev/deployment-unit": "declined"}
+        # `mkForce` over the default. The value is free; the label is not.
+        assert renamed["metadata"]["labels"]["ekn.dev/deployment-unit"] == "renamed-scope"
+
+    async def test_a_unit_declining_the_label_is_rejected(self) -> None:
+        """The label scopes pruning in both directions, so it cannot be opted out of.
+
+        A whole-instance `--prune` selects on the label's *absence*, which is
+        what makes it leave a bootstrap unit's objects alone. Those objects
+        exist nowhere but in the unit, so nothing else marks them as anyone's.
+        A unit that declines the label hands them to that prune.
+        """
+        with pytest.raises(nanopynix.NixError, match=r"ekn\.dev/deployment-unit"):
+            await evaluate_file(NIX_TEST_FILE, "declinedUnitLabelThrows")
 
     async def test_generated_carries_the_unit_label_too(self) -> None:
         result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadataGenerated")
@@ -733,9 +742,8 @@ class TestGitOpsTargetMetadata:
         # The whole unit stamp comes along, not just the one label.
         assert by_name["routed"]["metadata"]["labels"]["app.kubernetes.io/instance"] == "argocd"
 
-        # A unit that declines the label still declines it here.
-        assert "labels" not in by_name["opted-out"]["metadata"]
-        assert by_name["opted-out"]["metadata"]["annotations"] == {"ekn.dev/deployment-unit": "declined"}
+        # A unit that renamed the value is stamped with the renamed one.
+        assert by_name["renamed-unit"]["metadata"]["labels"]["ekn.dev/deployment-unit"] == "renamed-scope"
 
     async def test_a_unit_name_that_cannot_be_a_label_value_is_rejected(self) -> None:
         # A leading underscore is legal in a label value's middle and not at

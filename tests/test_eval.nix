@@ -278,18 +278,16 @@ let
           ekn.discriminator = "easykubenix";
           deployment.deployBranch = "deploy";
           deployment.units.apps.path = "clusters/home/apps";
-          # Declines the built-in `ekn.dev/deployment-unit` label the way the
-          # option documents: a function returning null, forced over the
-          # default. A project that would rather record the unit in an
-          # annotation needs this to work.
-          deployment.units.declined = {
-            path = "declined";
-            labels."ekn.dev/deployment-unit" = lib.mkForce (_: null);
-            annotations."ekn.dev/deployment-unit" = "declined";
+          # A unit renaming the label rather than taking its own name. That
+          # is the whole extent of the freedom here: the value must stay a
+          # plain string, since it is what pruning selects on.
+          deployment.units.renamed = {
+            path = "renamed";
+            labels."ekn.dev/deployment-unit" = lib.mkForce "renamed-scope";
           };
-          kubernetes.objects.default.ConfigMap.opted-out = {
-            ekn.deploymentUnit = "declined";
-            data.key = "no-label";
+          kubernetes.objects.default.ConfigMap.renamed-unit = {
+            ekn.deploymentUnit = "renamed";
+            data.key = "renamed";
           };
           # Routed here from the parent, and stamped exactly like a submodule
           # object -- a target's metadata covers both sources.
@@ -352,6 +350,25 @@ let
         deployment.deployBranch = "deploy";
         deployment.units."_apps".path = "clusters/home/apps";
       }
+    ];
+  };
+
+  # A unit declining the label that scopes its pruning. Legal once, and now
+  # rejected: its objects would look unowned to a whole-instance `--prune`.
+  easyDeclinedUnitLabel = import ../. {
+    inherit pkgs;
+    modules = [
+      (
+        { lib, ... }:
+        {
+          ekn.discriminator = "easykubenix";
+          deployment.deployBranch = "deploy";
+          deployment.units.declined = {
+            path = "declined";
+            labels."ekn.dev/deployment-unit" = lib.mkForce (_: null);
+          };
+        }
+      )
     ];
   };
 
@@ -831,6 +848,7 @@ in
   # Forcing this one must throw -- exposed as a thunk so the test can assert on
   # the error without eagerly evaluating it above.
   badUnitNameThrows = easyBadUnitName.config.kubernetes.generated;
+  declinedUnitLabelThrows = easyDeclinedUnitLabel.config.kubernetes.generated;
   crdMarkerThrows = easyCrdMarkerThrows;
   crdIfExistsMarkerThrows = easyCrdIfExistsMarkerThrows;
 }
