@@ -160,11 +160,12 @@
                   is exactly the key a GitOps engine may be using to decide
                   ownership.
 
-                  Scoped to this target's rendered output. An object routed
-                  here also appears in `kubernetes.generated`, which is not
-                  target-scoped and carries no stamp -- so a whole-`generated`
-                  apply and a `--target` apply of the same object differ.
-                  Bootstrap objects are unaffected, existing nowhere but here.
+                  An object routed here also appears in
+                  `kubernetes.generated`, and carries the same stamp there.
+                  Both copies must agree: a whole-instance apply and a
+                  `--target` apply write as the same field manager, so a
+                  stamp on only one of them flips with whichever apply ran
+                  last. See `stampRouted` in kubernetes.nix.
                 '';
                 example = lib.literalExpression ''{ "app.kubernetes.io/instance" = "root"; }'';
               };

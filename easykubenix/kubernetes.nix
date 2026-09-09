@@ -187,7 +187,81 @@ let
       the marker. You can also write the value directly.
     '' crd)
   ) cfg.crds;
-  allGenerated = generatedWithEkn ++ checkedCrds;
+  # Stamp a unit's `labels`/`annotations` onto one of its objects.
+  #
+  # A value may be a function of the object rather than a string --
+  # ArgoCD's tracking-id annotation encodes each object's own
+  # group/kind/namespace/name, so a constant cannot express it (see
+  # lib/argocdTrackingId.nix).
+  #
+  # The unit's entries win over the object's own. Helm charts routinely set
+  # `app.kubernetes.io/instance` to their release name, which is exactly the
+  # key a GitOps engine may be reading to decide what belongs to it, so
+  # losing that fight would defeat the point.
+  stampTargetMetadata =
+    declared: object:
+    let
+      merge =
+        field: defined:
+        let
+          # A function may return `null` to decline this object -- ArgoCD
+          # puts no tracking annotation on a CRD, and stamping one anyway is
+          # a permanent diff (see lib/argocdTrackingId.nix). Declining leaves
+          # whatever the object already had, rather than removing it: "no
+          # opinion", not "unset".
+          resolved = lib.filterAttrs (_: value: value != null) (
+            lib.mapAttrs (_: value: if lib.isFunction value then value object else value) defined
+          );
+          merged = (object.metadata.${field} or { }) // resolved;
+        in
+        # Guarded on the result, not on `defined`: a unit whose every value
+        # declined must not leave `labels: {}` behind on an object that had
+        # none.
+        lib.optionalAttrs (merged != { }) { ${field} = merged; };
+    in
+    # The fast path almost never fires now: every unit carries
+    # `ekn.dev/deployment-unit` in `labels` by default (see gitops.nix), so
+    # `declared.labels` is empty only for a unit that wipes the whole
+    # attribute set with `lib.mkForce { }`. It stays because the work it
+    # skips is small: one shallow merge per object, over `metadata` only.
+    # See easykubenix issue #11 on measuring evaluation cost.
+    if declared.labels == { } && declared.annotations == { } then
+      object
+    else
+      object
+      // {
+        metadata =
+          object.metadata // merge "labels" declared.labels // merge "annotations" declared.annotations;
+      };
+
+  # Stamp a routed object with its unit's metadata, here rather than only in
+  # `deploymentUnits`.
+  #
+  # An object carrying `ekn.deploymentUnit` appears in two outputs:
+  # `kubernetes.generated`, which a plain `ekn kubeapply` applies, and
+  # `kubernetes.deploymentUnits.<name>`, which `ekn kubeapply --target
+  # <name>` applies. Both applies write as the same field manager, so
+  # whichever ran last owns `metadata.labels`: stamping in only one of them
+  # means each apply removes the label the other wrote.
+  #
+  # That matters because `ekn.dev/deployment-unit` decides the prune scope.
+  # An object carrying it is pruned only by its own unit's `--target <name>
+  # --prune`; a whole-instance `--prune` skips it, by selecting on the
+  # label's *absence*. A label that flips depending on which apply ran last
+  # makes that scope flip too.
+  stampRouted =
+    object:
+    let
+      unit = object.ekn.deploymentUnit or null;
+      declared =
+        config.deployment.units.${unit} or (throw ''
+          ekn.deploymentUnit references unknown deployment unit "${unit}".
+          Declared units: ${lib.concatStringsSep ", " (lib.attrNames config.deployment.units)}
+        '');
+    in
+    if unit == null then object else stampTargetMetadata declared object;
+
+  allGenerated = map stampRouted (generatedWithEkn ++ checkedCrds);
 
   # `assertions`/`warnings` (assertions.nix) are collected from every module,
   # but a plain `lib.evalModules` has nothing playing the part NixOS'
@@ -883,57 +957,6 @@ in
           lib.attrNames objectsByTarget ++ lib.attrNames rawFilesByTarget ++ lib.attrNames submodulesByTarget
         );
 
-        # Stamp a target's `labels`/`annotations` onto one of its objects.
-        #
-        # A value may be a function of the object rather than a string --
-        # ArgoCD's tracking-id annotation encodes each object's own
-        # group/kind/namespace/name, so a constant cannot express it (see
-        # lib/argocdTrackingId.nix).
-        #
-        # The target's entries win over the object's own. Helm charts
-        # routinely set `app.kubernetes.io/instance` to their release name,
-        # which is exactly the key a GitOps engine may be reading to decide
-        # what belongs to it, so losing that fight would defeat the point.
-        stampTargetMetadata =
-          declared: object:
-          let
-            merge =
-              field: defined:
-              let
-                # A function may return `null` to decline this object --
-                # ArgoCD puts no tracking annotation on a CRD, and stamping
-                # one anyway is a permanent diff (see lib/argocdTrackingId.nix).
-                # Declining leaves whatever the object already had, rather
-                # than removing it: "no opinion", not "unset".
-                resolved = lib.filterAttrs (_: value: value != null) (
-                  lib.mapAttrs (_: value: if lib.isFunction value then value object else value) defined
-                );
-                merged = (object.metadata.${field} or { }) // resolved;
-              in
-              # Guarded on the result, not on `defined`: a target whose every
-              # value declined must not leave `labels: {}` behind on an object
-              # that had none.
-              lib.optionalAttrs (merged != { }) { ${field} = merged; };
-          in
-          # The fast path below almost never fires now: every unit carries
-          # `ekn.dev/deployment-unit` in `labels` by default (see gitops.nix),
-          # so `declared.labels` is empty only for a unit that wipes the whole
-          # attribute set with `lib.mkForce { }`. Declining just that one label
-          # does not reach it -- `lib.mkForce (_: null)` leaves a function in
-          # `labels`, which is not an empty set.
-          #
-          # It stays because the work it skips is small: one shallow merge per
-          # object in a unit, over `metadata` only, and `deploymentUnits`
-          # already copies each object here. See easykubenix issue #11 on
-          # measuring evaluation cost.
-          if declared.labels == { } && declared.annotations == { } then
-            object
-          else
-            object
-            // {
-              metadata =
-                object.metadata // merge "labels" declared.labels // merge "annotations" declared.annotations;
-            };
       in
       checked (
         lib.listToAttrs (
@@ -965,9 +988,13 @@ in
                 target = {
                   inherit (declared) path discriminator fieldManager;
                 };
-                objects = map (stampTargetMetadata declared) (
-                  (objectsByTarget.${name} or [ ]) ++ (if submodule == null then [ ] else submodule.generated)
-                );
+                # Only the nested instance's half is stamped here.
+                # `objectsByTarget` comes from `allGenerated`, where
+                # `stampRouted` already stamped every routed object -- see
+                # its comment for why that has to happen there.
+                objects =
+                  (objectsByTarget.${name} or [ ])
+                  ++ (if submodule == null then [ ] else map (stampTargetMetadata declared) submodule.generated);
                 # Paths only, deliberately not read/parsed here -- reading them
                 # would mean round-tripping their content through Nix's
                 # attrset representation, exactly what rawFiles exists to

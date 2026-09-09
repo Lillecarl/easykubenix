@@ -813,9 +813,8 @@ in
     inherit (easy.config.kubernetes) generatedByPath deploymentUnits;
   };
   deploymentUnitMetadata = easyGitOpsTargetMetadata.config.kubernetes.deploymentUnits;
-  # The same objects as they appear outside any unit. `generated` is not
-  # unit-scoped, so it carries no per-unit stamp -- including the built-in
-  # `ekn.dev/deployment-unit` one.
+  # The same objects as they appear outside any unit. A routed object carries
+  # its unit's stamp here too -- see `stampRouted` in kubernetes.nix.
   deploymentUnitMetadataGenerated = easyGitOpsTargetMetadata.config.kubernetes.generated;
   gitOpsSubmodule = {
     inherit (easyGitOpsSubmodule.config.kubernetes) generated deploymentUnits;

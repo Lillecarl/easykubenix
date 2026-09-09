@@ -718,16 +718,24 @@ class TestGitOpsTargetMetadata:
         assert "labels" not in opted_out["metadata"]
         assert opted_out["metadata"]["annotations"] == {"ekn.dev/deployment-unit": "declined"}
 
-    async def test_generated_carries_no_unit_label(self) -> None:
+    async def test_generated_carries_the_unit_label_too(self) -> None:
         result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadataGenerated")
         assert isinstance(result, list)
+        by_name = {cast("dict[str, Any]", o)["metadata"]["name"]: o for o in result}
 
-        # `generated` is not unit-scoped, so it carries no per-unit stamp --
-        # the unit label included. A whole-`generated` apply and a `--target`
-        # apply of the same object therefore differ, which is the existing
-        # contract for `labels`/`annotations` and stays true for this one.
-        for obj in result:
-            assert "ekn.dev/deployment-unit" not in obj["metadata"].get("labels", {})
+        # A routed object is in `generated` *and* in its unit, and both applies
+        # write as the same field manager. So the stamp has to be the same on
+        # both sides, or each apply removes the label the other wrote. See
+        # `stampRouted` in kubernetes.nix.
+        assert by_name["routed"]["metadata"]["labels"]["ekn.dev/deployment-unit"] == "bootstrap"
+        assert by_name["unstamped"]["metadata"]["labels"]["ekn.dev/deployment-unit"] == "apps"
+
+        # The whole unit stamp comes along, not just the one label.
+        assert by_name["routed"]["metadata"]["labels"]["app.kubernetes.io/instance"] == "argocd"
+
+        # A unit that declines the label still declines it here.
+        assert "labels" not in by_name["opted-out"]["metadata"]
+        assert by_name["opted-out"]["metadata"]["annotations"] == {"ekn.dev/deployment-unit": "declined"}
 
     async def test_a_unit_name_that_cannot_be_a_label_value_is_rejected(self) -> None:
         # A leading underscore is legal in a label value's middle and not at
