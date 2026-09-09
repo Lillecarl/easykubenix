@@ -82,6 +82,15 @@ in
 
                   Not to be confused with `kubernetes.transformers`, which is
                   per object, instance-wide, and runs long after grouping.
+
+                  A marker is safe here, and that is the opposite of the rule
+                  for `kubernetes.transformers`. This output still has to pass
+                  through `kubernetes.objects`, whose freeform type is
+                  `kubeValueType`, so `namedListOf` resolves an `mkNamedList`
+                  when it merges. Introducing one in `kubernetes.transformers`
+                  is what needs `needsMarkerPass` (kubernetes.nix), because
+                  that seam runs past the type and a marker it leaves behind
+                  reaches the manifest as a literal `_type` field.
                 '';
                 # `listOf attrs` rather than the recursive value type: these
                 # objects are typed again when they land in

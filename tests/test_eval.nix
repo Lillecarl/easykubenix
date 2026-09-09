@@ -684,6 +684,53 @@ let
     ];
   };
 
+  # A marker introduced by an import-time transformer.
+  #
+  # `kubernetes.transformers` runs past the type, so a marker it introduces
+  # needs `needsMarkerPass` to convert it back or it reaches the manifest as a
+  # literal `_type`. The seam here is on the other side of that boundary: its
+  # output still has to go through `kubernetes.objects`, whose freeform type is
+  # `kubeValueType`, and `namedListOf` resolves the marker when it merges. So
+  # `mkNamedList` is safe here and needs no pass.
+  easyImportTransformerMarker = import ../. {
+    inherit pkgs;
+    modules = [
+      (
+        { pkgs, lib, ... }:
+        {
+          ekn.discriminator = "transformers";
+          importyaml.marker = {
+            src = pkgs.writeText "pod.yaml" ''
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: web
+                namespace: default
+              spec:
+                containers:
+                  - name: app
+                    image: v1
+            '';
+            transformers = [
+              (
+                objects:
+                map (
+                  object:
+                  object
+                  // {
+                    spec = object.spec // {
+                      containers = lib.mkNamedList { app.image = lib.mkForce "v2"; };
+                    };
+                  }
+                ) objects
+              )
+            ];
+          };
+        }
+      )
+    ];
+  };
+
   # The control: the same manifest with no transformer. The namespace-less
   # object lands in `none` and renders without a namespace.
   easyImportNoTransformers = import ../. {
@@ -739,6 +786,7 @@ in
   seededGitOpsThrows = easySeededGitOpsThrows;
   envSeededWithoutReferenceThrows = easyEnvSeededWithoutReferenceThrows;
 
+  importTransformerMarker = easyImportTransformerMarker.config.kubernetes.generated;
   importTransformers = easyImportTransformers.config.kubernetes.generated;
   importTransformersBuckets = builtins.attrNames easyImportTransformers.config.kubernetes.objects;
   importWithoutTransformers = easyImportNoTransformers.config.kubernetes.generated;

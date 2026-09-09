@@ -485,6 +485,25 @@ class TestImportTimeTransformers:
         labels = objects["with-namespace"]["metadata"]["labels"]
         assert labels == {"stage": "override", "count": "2"}
 
+    async def test_a_marker_from_a_transformer_resolves(self) -> None:
+        """The opposite of the rule for `kubernetes.transformers`.
+
+        That seam runs past the type, so a marker it introduces reaches the
+        manifest as a literal `_type` field unless `needsMarkerPass` converts
+        it back. This seam is on the other side of that boundary: its output
+        still passes through `kubernetes.objects`, whose freeform type is
+        `kubeValueType`, and `namedListOf` resolves the marker when it merges.
+
+        Worth pinning because a reader who knows about `needsMarkerPass` would
+        reasonably expect the hazard here too.
+        """
+        result = await evaluate_file(NIX_TEST_FILE, "importTransformerMarker")
+        assert isinstance(result, list)
+        pod = cast("dict[str, Any]", result[0])
+        # A real list, and the `mkForce` applied against the parsed value.
+        assert pod["spec"]["containers"] == [{"name": "app", "image": "v2"}]
+        assert "_type" not in pod["spec"]
+
     async def test_transformers_compose_in_order(self) -> None:
         # The third transformer adds an object whose namespace it reads off
         # the ServiceAccount -- which only has one because the second
