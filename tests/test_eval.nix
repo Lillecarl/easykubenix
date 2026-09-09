@@ -370,6 +370,79 @@ let
     ];
   };
 
+  # Unit dependencies, with the two shapes that make a closure a closure:
+  # `bootstrap` reaches `certs` only through `secrets`, and `secrets` and
+  # `argocd` both reach `certs`, which must still appear once.
+  easyUnitDependencies = import ../. {
+    inherit pkgs;
+    modules = [
+      {
+        ekn.environment = "easykubenix";
+        deployment.deployBranch = "deploy";
+        deployment.units = {
+          certs.path = "certs";
+          secrets = {
+            path = "secrets";
+            dependencies = [ "certs" ];
+          };
+          argocd = {
+            path = "argocd";
+            dependencies = [ "certs" ];
+          };
+          bootstrap = {
+            path = "bootstrap";
+            dependencies = [
+              "secrets"
+              "argocd"
+            ];
+          };
+        };
+        kubernetes.objects.default.ConfigMap = {
+          ca.ekn.deploymentUnit = "certs";
+          creds.ekn.deploymentUnit = "secrets";
+          server.ekn.deploymentUnit = "argocd";
+          root.ekn.deploymentUnit = "bootstrap";
+        };
+      }
+    ];
+  };
+
+  # A cycle. Forcing this must throw and print the chain.
+  easyUnitDependencyCycle = import ../. {
+    inherit pkgs;
+    modules = [
+      {
+        ekn.environment = "easykubenix";
+        deployment.deployBranch = "deploy";
+        deployment.units.a = {
+          path = "a";
+          dependencies = [ "b" ];
+        };
+        deployment.units.b = {
+          path = "b";
+          dependencies = [ "a" ];
+        };
+        kubernetes.objects.default.ConfigMap.one.ekn.deploymentUnit = "a";
+      }
+    ];
+  };
+
+  # A dependency no `deployment.units` entry declares.
+  easyUnknownUnitDependency = import ../. {
+    inherit pkgs;
+    modules = [
+      {
+        ekn.environment = "easykubenix";
+        deployment.deployBranch = "deploy";
+        deployment.units.a = {
+          path = "a";
+          dependencies = [ "nope" ];
+        };
+        kubernetes.objects.default.ConfigMap.one.ekn.deploymentUnit = "a";
+      }
+    ];
+  };
+
   # A deprecated `kluctl.*` option whose value names a rendered output.
   # Pushing the manifest to a cache before deploying it is the obvious thing
   # to write there, and nixkube does exactly this.
@@ -847,6 +920,13 @@ in
   # the error without eagerly evaluating it above.
   badUnitNameThrows = easyBadUnitName.config.kubernetes.generated;
   declinedUnitLabelThrows = easyDeclinedUnitLabel.config.kubernetes.generated;
+
+  unitDependencies = pkgs.lib.mapAttrs (
+    _name: entry: entry.dependencies
+  ) easyUnitDependencies.config.kubernetes.deploymentUnits;
+  # Forcing either of these must throw.
+  unitDependencyCycleThrows = easyUnitDependencyCycle.config.kubernetes.deploymentUnits;
+  unknownUnitDependencyThrows = easyUnknownUnitDependency.config.kubernetes.deploymentUnits;
   crdMarkerThrows = easyCrdMarkerThrows;
   crdIfExistsMarkerThrows = easyCrdIfExistsMarkerThrows;
 }

@@ -743,6 +743,35 @@ class TestGitOpsTargetMetadata:
         # A unit that renamed the value is stamped with the renamed one.
         assert by_name["renamed-unit"]["metadata"]["labels"]["ekn.dev/deployment-unit"] == "renamed-scope"
 
+    async def test_dependencies_resolve_to_a_transitive_closure(self) -> None:
+        """Every unit whose objects go into one `--target` apply.
+
+        `bootstrap` names `secrets` and `argocd`; it reaches `certs` only
+        through them. A consumer wants the whole set, not one hop of it.
+        """
+        result = await evaluate_file(NIX_TEST_FILE, "unitDependencies")
+        assert isinstance(result, dict)
+
+        assert result["certs"] == []
+        assert result["secrets"] == ["certs"]
+        assert result["argocd"] == ["certs"]
+
+        # `certs` is reached twice, through `secrets` and through `argocd`,
+        # and appears once. Deepest first, so a reader sees what has to exist
+        # before what needs it -- the apply itself is ordered by
+        # `ekn.resourcePriority`, not by this.
+        assert result["bootstrap"] == ["certs", "secrets", "argocd"]
+
+    async def test_a_dependency_cycle_is_rejected(self) -> None:
+        # The chain, not just the name. "a depends on itself" is true of
+        # every unit in a cycle and tells nobody which edge to remove.
+        with pytest.raises(nanopynix.NixError, match=r"a -> b -> a"):
+            await evaluate_file(NIX_TEST_FILE, "unitDependencyCycleThrows")
+
+    async def test_a_dependency_on_an_undeclared_unit_is_rejected(self) -> None:
+        with pytest.raises(nanopynix.NixError, match=r'unknown unit "nope"'):
+            await evaluate_file(NIX_TEST_FILE, "unknownUnitDependencyThrows")
+
     async def test_a_unit_name_that_cannot_be_a_label_value_is_rejected(self) -> None:
         # A leading underscore is legal in a label value's middle and not at
         # its ends. Caught here, it names the unit; caught at the API server,

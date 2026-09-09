@@ -84,6 +84,40 @@
                 default = "./";
                 description = "Subdirectory within deployBranch/sourceBranch where this target's manifests are stored.";
               };
+              dependencies = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [ ];
+                description = ''
+                  Other deployment units this one needs on the cluster.
+                  `ekn kubeapply --target ${name}` contributes each of their
+                  objects to its apply plan, transitively.
+
+                  Apply-time only. `ekn commit` still writes each unit to its
+                  own `path` and nothing else: a dependency is about what has
+                  to be *on the cluster*, not about where a manifest lives.
+
+                  The use it exists for is a bootstrap unit that needs
+                  credentials it cannot render. Put the Secrets in their own
+                  unit, depend on it, and re-seeding them is
+                  `ekn kubeapply --target <secrets>` on its own -- rather
+                  than a full bootstrap apply, which is the thing you do only
+                  after breaking a cluster badly enough that ArgoCD or the
+                  CNI is gone.
+
+                  Not an ordering constraint. Objects from every contributing
+                  unit go into one apply, and `ekn.resourcePriority` orders
+                  that apply by kind as always.
+
+                  Each unit keeps its own prune scope, because
+                  `ekn.dev/deployment-unit` is rendered per unit. Naming a
+                  dependency does not widen what this unit's `--prune`
+                  deletes.
+
+                  A cycle is an error, and so is a name no
+                  `deployment.units` entry declares.
+                '';
+                example = lib.literalExpression ''[ "bootstrap-secrets" ]'';
+              };
               fieldManager = lib.mkOption {
                 type = lib.types.str;
                 default = "ekn";
