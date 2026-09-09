@@ -26,6 +26,42 @@ let
           type = lib.types.listOf (types.functionTo ekn.lib.kubeValueType);
           default = [ ];
         };
+        transformers = mkOption {
+          description = ''
+            Functions from this source's whole object list to a new one,
+            applied in order. Run after `overrides` and before the objects are
+            grouped into `kubernetes.objects`.
+
+            `overrides` is the per-object hook and cannot express anything
+            that needs the set: detecting two objects that render to one
+            identity, or deriving a value from a sibling. This is that hook.
+
+            Being before the grouping is the point, and it is what
+            `kubernetes.transformers` cannot offer. Grouping reads
+            `metadata.namespace`, and an object without one goes to the `none`
+            bucket, where kubernetes.nix deliberately injects no namespace. A
+            manifest may legitimately omit it, because `kubectl apply
+            --namespace` does not rewrite the file either -- it lets the API
+            server default it. Only a hook here runs early enough to put one
+            back.
+
+            easykubenix ships no transformer. This is a seam; the policy is
+            the caller's, because "which kinds are namespaced" needs API scope
+            data that a project has and this module does not.
+
+            Not to be confused with `kubernetes.transformers`, which is per
+            object, instance-wide, and runs long after grouping.
+          '';
+          # `listOf attrs` rather than the recursive value type: these objects
+          # are typed again when they land in `kubernetes.objects`, so
+          # validating each leaf here would pay that cost twice. See
+          # easykubenix issue #11.
+          type = lib.types.listOf (types.functionTo (lib.types.listOf lib.types.attrs));
+          default = [ ];
+          example = lib.literalExpression ''
+            [ (objects: map (object: object // { metadata = object.metadata // { namespace = "app"; }; }) objects) ]
+          '';
+        };
         yamlVersion = mkOption {
           description = ''
             YAML version to parse `src` with -- matches nanopynix's
@@ -86,7 +122,13 @@ in
     let
       allObjects = lib.pipe cfg [
         (lib.mapAttrsToList (
-          _: importspec: lib.map (object: lib.pipe object importspec.overrides) importspec.objects
+          _: importspec:
+          # Per-object first, then the whole set. A set transformer that has
+          # to reason about identities must see what `overrides` produced,
+          # not what the file contained.
+          lib.pipe (lib.map (
+            object: lib.pipe object importspec.overrides
+          ) importspec.objects) importspec.transformers
         ))
         lib.flatten
       ];

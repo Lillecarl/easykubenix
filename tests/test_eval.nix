@@ -574,6 +574,131 @@ let
     ];
   };
 
+  # The import-time set transformer seam. `importyaml` rather than `helm`,
+  # because a YAML file costs nothing to render and the two modules wire the
+  # hook identically.
+  #
+  # The manifest deliberately has one object WITHOUT `metadata.namespace`.
+  # That is the shape a chart is entitled to produce -- `kubectl apply
+  # --namespace` and `helm install --namespace` both leave the manifest alone
+  # and let the API server default it -- and the shape that lands in the
+  # `none` bucket, where kubernetes.nix injects no namespace and the object
+  # ships with none at all.
+  transformerSource =
+    pkgs:
+    pkgs.writeText "sample.yaml" ''
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: with-namespace
+        namespace: explicit
+      data:
+        key: value
+      ---
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: without-namespace
+    '';
+
+  easyImportTransformers = import ../. {
+    inherit pkgs;
+    modules = [
+      (
+        { pkgs, ... }:
+        {
+          ekn.discriminator = "transformers";
+          importyaml.sample = {
+            src = transformerSource pkgs;
+            # Runs first, per object. Proves the ordering below.
+            overrides = [
+              (
+                object:
+                object
+                // {
+                  metadata = object.metadata // {
+                    labels.stage = "override";
+                  };
+                }
+              )
+            ];
+            transformers = [
+              # Sees the whole set at once, which `overrides` cannot. Stamps
+              # the count so the test can tell it was not called per object.
+              (
+                objects:
+                map (
+                  object:
+                  object
+                  // {
+                    metadata = object.metadata // {
+                      # Merged, not replaced, so `overrides`' own label
+                      # survives and the test can prove the two ran in order.
+                      labels = (object.metadata.labels or { }) // {
+                        count = toString (builtins.length objects);
+                      };
+                    };
+                  }
+                ) objects
+              )
+              # Defaults the namespace for one kind, which is the job the whole
+              # seam exists for. A real one would read API scope data; this is
+              # a test, so it names the kind.
+              (
+                objects:
+                map (
+                  object:
+                  if object.kind == "ServiceAccount" && !(object.metadata ? namespace) then
+                    object
+                    // {
+                      metadata = object.metadata // {
+                        namespace = "defaulted";
+                      };
+                    }
+                  else
+                    object
+                ) objects
+              )
+              # Composition, and order: this one runs last and can see what the
+              # one above did.
+              (
+                objects:
+                objects
+                ++ [
+                  {
+                    apiVersion = "v1";
+                    kind = "ConfigMap";
+                    metadata = {
+                      name = "added-by-transformer";
+                      namespace =
+                        (builtins.head (builtins.filter (o: o.kind == "ServiceAccount") objects)).metadata.namespace;
+                    };
+                    data.key = "value";
+                  }
+                ]
+              )
+            ];
+          };
+        }
+      )
+    ];
+  };
+
+  # The control: the same manifest with no transformer. The namespace-less
+  # object lands in `none` and renders without a namespace.
+  easyImportNoTransformers = import ../. {
+    inherit pkgs;
+    modules = [
+      (
+        { pkgs, ... }:
+        {
+          ekn.discriminator = "transformers";
+          importyaml.sample.src = transformerSource pkgs;
+        }
+      )
+    ];
+  };
+
   easyNoDiscriminator = import ../. {
     inherit pkgs;
     modules = [
@@ -613,6 +738,11 @@ in
   # Forcing these must throw -- thunks, so the test can assert on the error.
   seededGitOpsThrows = easySeededGitOpsThrows;
   envSeededWithoutReferenceThrows = easyEnvSeededWithoutReferenceThrows;
+
+  importTransformers = easyImportTransformers.config.kubernetes.generated;
+  importTransformersBuckets = builtins.attrNames easyImportTransformers.config.kubernetes.objects;
+  importWithoutTransformers = easyImportNoTransformers.config.kubernetes.generated;
+  importWithoutTransformersBuckets = builtins.attrNames easyImportNoTransformers.config.kubernetes.objects;
 
   serviceSubnetReachesTheApiserverFlag =
     let

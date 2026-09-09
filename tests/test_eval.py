@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import nanopynix
@@ -421,6 +421,80 @@ class TestEknModule:
         assert isinstance(result, str)
         assert "ConfigMap" in result
         assert "hello" in result
+
+
+class TestImportTimeTransformers:
+    """The set-level seam on the chart and importyaml paths.
+
+    `overrides` is per object and cannot express anything needing the whole
+    set. `kubernetes.transformers` sees the set but runs far too late: by then
+    the objects have been grouped into `kubernetes.objects` by
+    `metadata.namespace`, an object without one is in the `none` bucket, and
+    kubernetes.nix deliberately injects no namespace there. The release
+    namespace is gone.
+
+    easykubenix ships no transformer -- "which kinds are namespaced" needs API
+    scope data a project has and these modules do not. These tests are about
+    the seam, so the fixture's transformer names a kind directly.
+    """
+
+    @staticmethod
+    def _by_name(objects: object) -> dict[str, Any]:
+        assert isinstance(objects, list)
+        return {cast("dict[str, Any]", o)["metadata"]["name"]: o for o in objects}
+
+    async def test_without_a_transformer_a_namespaceless_object_gets_no_namespace(self) -> None:
+        """The control, and the bug it exists to make visible.
+
+        A chart or manifest may legitimately omit `metadata.namespace` --
+        `helm install --namespace` and `kubectl apply --namespace` both leave
+        the manifest alone and let the API server default it. easykubenix
+        reads the omission as cluster-scoped instead, so the object reaches
+        the cluster with no namespace at all.
+        """
+        buckets = await evaluate_file(NIX_TEST_FILE, "importWithoutTransformersBuckets")
+        assert buckets == ["explicit", "none"]
+
+        objects = self._by_name(await evaluate_file(NIX_TEST_FILE, "importWithoutTransformers"))
+        assert "namespace" not in objects["without-namespace"]["metadata"]
+
+    async def test_a_transformer_can_default_the_namespace(self) -> None:
+        # The job the seam exists for: the `none` bucket is gone entirely,
+        # because the transformer ran before the grouping read the namespace.
+        buckets = await evaluate_file(NIX_TEST_FILE, "importTransformersBuckets")
+        assert buckets == ["defaulted", "explicit"]
+        assert "none" not in buckets
+
+        objects = self._by_name(await evaluate_file(NIX_TEST_FILE, "importTransformers"))
+        assert objects["without-namespace"]["metadata"]["namespace"] == "defaulted"
+        # The object that already had one keeps it.
+        assert objects["with-namespace"]["metadata"]["namespace"] == "explicit"
+
+    async def test_a_transformer_sees_the_whole_set(self) -> None:
+        # The fixture stamps the list length. Two, not one -- so this is one
+        # call with every object, not a call per object like `overrides`.
+        objects = self._by_name(await evaluate_file(NIX_TEST_FILE, "importTransformers"))
+        assert objects["without-namespace"]["metadata"]["labels"]["count"] == "2"
+        assert objects["with-namespace"]["metadata"]["labels"]["count"] == "2"
+
+    async def test_overrides_run_before_transformers(self) -> None:
+        # Both labels survive, so the per-object hook ran first and the set
+        # hook saw its output. A set transformer reasoning about identities
+        # has to see what `overrides` produced, not what the file contained.
+        objects = self._by_name(await evaluate_file(NIX_TEST_FILE, "importTransformers"))
+        labels = objects["with-namespace"]["metadata"]["labels"]
+        assert labels == {"stage": "override", "count": "2"}
+
+    async def test_transformers_compose_in_order(self) -> None:
+        # The third transformer adds an object whose namespace it reads off
+        # the ServiceAccount -- which only has one because the second
+        # transformer put it there. So they run in order, each seeing the last
+        # one's output.
+        objects = self._by_name(await evaluate_file(NIX_TEST_FILE, "importTransformers"))
+        assert objects["added-by-transformer"]["metadata"]["namespace"] == "defaulted"
+        # An added object is grouped like any other, not appended raw.
+        buckets = await evaluate_file(NIX_TEST_FILE, "importTransformersBuckets")
+        assert "defaulted" in cast("list[Any]", buckets)
 
 
 class TestValidationServiceSubnet:
