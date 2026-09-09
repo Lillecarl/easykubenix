@@ -95,8 +95,8 @@ in
       them any more: they are orphaned, not deleted, and nothing reports it.
       Relabel them once before the next prune:
 
-        kubectl get <kinds> -A -l ekn.dev/discriminator=<value> -o name \
-          | xargs kubectl label ekn.dev/environment=<value>
+        kubectl label <kinds> -A -l ekn.dev/discriminator=<value> \
+          ekn.dev/environment=<value>
     '')
   ];
 
