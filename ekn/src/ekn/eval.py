@@ -22,7 +22,7 @@ from nanopynix_helpers.fod import (
 )
 from pydantic import BaseModel, Field, StringConstraints
 
-from ekn.apply import DEFAULT_FIELD_MANAGER
+from ekn.apply import DEFAULT_FIELD_MANAGER, DEFAULT_UNIT_LABEL
 from ekn.gitops import load_raw_manifest
 
 # `JsonValue` and `LogEvent` are type-only despite the pydantic models below:
@@ -569,7 +569,7 @@ async def evaluate_gitops_manifests(
 def _unpack_gitops_target(
     gitops_targets: JsonValue,
     target: str,
-) -> tuple[list[dict[str, Any]], list[JsonValue], str]:
+) -> tuple[list[dict[str, Any]], list[tuple[JsonValue, str | None]], str]:
     """Pull one `kubernetes.deploymentUnits` entry apart into the three things
     a `--target` apply needs: its objects (with `.ekn` routing metadata
     stripped), its raw-file paths, and the field manager to apply as.
@@ -610,7 +610,42 @@ def _unpack_gitops_target(
     if not isinstance(field_manager, str):
         raise TypeError(f"gitops target {target!r} has no fieldManager")
 
-    return objects, raw_file_paths, field_manager
+    # Every raw file in a unit's entry belongs to that unit, by construction:
+    # `kubernetes.deploymentUnits` groups them by their own `deploymentUnit`.
+    return objects, [(path, target) for path in raw_file_paths], field_manager
+
+
+def _raw_manifest_in_unit(path: str, unit: str | None) -> dict[str, Any]:
+    """Load one `kubernetes.rawFiles` entry, carrying its unit label.
+
+    Every other object gets `ekn.dev/deployment-unit` from Nix, where
+    `stampRouted` writes it into the rendered manifest. A raw file is never
+    parsed by Nix -- that is the whole point of one -- so there is nothing
+    there to stamp, and the label has to be added here instead.
+
+    It is not optional. `ekn` applies a routed raw file with the environment
+    label like everything else, and the prune scope is decided by whether the
+    unit label is *there*: without it, the next whole-instance `--prune` sees
+    an object of this environment that belongs to no unit, does not find it
+    in its own desired set, and deletes it. A bootstrap unit's raw file is
+    typically ArgoCD's own `install.yaml`.
+
+    Stamped on both apply paths, never on the commit path. Both applies write
+    as the same field manager, so stamping on only one of them would make the
+    label flip with whichever ran last -- the same trap `stampRouted` exists
+    for. `ekn commit` leaves the file byte-identical, which is what
+    `kubernetes.rawFiles` is for.
+    """
+    manifest = load_raw_manifest(path)
+    if unit is None:
+        return manifest
+    metadata = manifest.get("metadata")
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    labels = metadata.get("labels")
+    labels = dict(labels) if isinstance(labels, dict) else {}
+    labels.setdefault(DEFAULT_UNIT_LABEL, unit)
+    metadata["labels"] = labels
+    return {**manifest, "metadata": metadata}
 
 
 async def evaluate_kubeapply_config(
@@ -659,9 +694,12 @@ async def evaluate_kubeapply_config(
             raw_files = await proxy.attr("kubernetes").attr("rawFiles").to_python()
             if not isinstance(raw_files, list):
                 raise ValueError("kubernetes.rawFiles did not evaluate to a list")
-            raw_file_paths = [
-                entry["path"] for entry in raw_files if isinstance(entry, dict) and isinstance(entry.get("path"), str)
-            ]
+            raw_file_paths = []
+            for entry in raw_files:
+                if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                    continue
+                entry_unit = entry.get("deploymentUnit")
+                raw_file_paths.append((entry["path"], entry_unit if isinstance(entry_unit, str) else None))
             # Only a GitOps target can name a field manager. A whole-`generated`
             # apply has no successor to hand ownership to -- it *is* the steady
             # state, and it runs again, so keeping conflict detection is right.
@@ -673,7 +711,10 @@ async def evaluate_kubeapply_config(
         # easykubenix's kubernetes.nix). Appended to `objects`: once
         # parsed, a raw-file-sourced manifest applies through
         # apply_and_prune/maybe_decrypt identically to any other object.
-        objects = [*objects, *(load_raw_manifest(p) for p in raw_file_paths if isinstance(p, str))]
+        objects = [
+            *objects,
+            *(_raw_manifest_in_unit(path, raw_unit) for path, raw_unit in raw_file_paths if isinstance(path, str)),
+        ]
 
         resource_priority = await proxy.attr("ekn").attr("resourcePriority").to_python()
         sops_age_identities = await proxy.attr("kubernetes").attr("sopsAgeIdentities").to_python()

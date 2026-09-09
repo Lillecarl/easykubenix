@@ -7,7 +7,7 @@ import anyio
 import pytest
 from kr8s.asyncio.objects import new_class
 
-from ekn.apply import _wait_established, apply_and_prune, discover
+from ekn.apply import _wait_established, apply_and_prune, discover, prune_selector
 
 
 @pytest.fixture(scope="module")
@@ -248,6 +248,77 @@ class TestApplyAndPrune:
         await apply_and_prune([spec], api=api, environment="full")  # type: ignore[arg-type]
 
         assert api.deleted == [("argocd", "verticalpodautoscaler", "long-gone")]
+
+
+class TestPruneSelector:
+    """The two prune scopes, as the string `kr8s` is handed.
+
+    A raw string is passed through verbatim as `labelSelector`, which is what
+    makes the not-exists form work at all -- there is no dict spelling of it.
+    """
+
+    def test_a_whole_instance_apply_owns_what_belongs_to_no_unit(self) -> None:
+        assert prune_selector(environment="prod", unit=None) == "ekn.dev/environment=prod,!ekn.dev/deployment-unit"
+
+    def test_a_target_apply_owns_that_unit(self) -> None:
+        assert (
+            prune_selector(environment="prod", unit="bootstrap")
+            == "ekn.dev/environment=prod,ekn.dev/deployment-unit=bootstrap"
+        )
+
+
+class TestUnitLabelGuard:
+    """A `--target` apply must not carry an object outside its own scope.
+
+    The dangerous half is a *missing* label. The object is applied with the
+    environment label, this apply's prune never looks at it, and the next
+    whole-instance prune -- which selects on the label's absence -- takes it
+    as its own and deletes it.
+    """
+
+    async def test_an_unlabelled_object_is_refused(self) -> None:
+        spec = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "raw", "namespace": "argocd"},
+        }
+        api = FakeApi()
+
+        with pytest.raises(ValueError, match=r"ConfigMap/raw: None"):
+            await apply_and_prune([spec], api=api, environment="full", unit="bootstrap")  # type: ignore[arg-type]
+
+        assert api.patched == []
+
+    async def test_an_object_of_another_unit_is_refused(self) -> None:
+        spec = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "stray",
+                "namespace": "argocd",
+                "labels": {"ekn.dev/deployment-unit": "apps"},
+            },
+        }
+        api = FakeApi()
+
+        with pytest.raises(ValueError, match=r"ConfigMap/stray: 'apps'"):
+            await apply_and_prune([spec], api=api, environment="full", unit="bootstrap")  # type: ignore[arg-type]
+
+    async def test_a_correctly_labelled_object_applies(self) -> None:
+        spec = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "root",
+                "namespace": "argocd",
+                "labels": {"ekn.dev/deployment-unit": "bootstrap"},
+            },
+        }
+        api = FakeApi()
+
+        await apply_and_prune([spec], api=api, environment="full", unit="bootstrap", prune=False)  # type: ignore[arg-type]
+
+        assert api.patched == [("argocd", "ConfigMap", "root")]
 
 
 class FakeCrd:

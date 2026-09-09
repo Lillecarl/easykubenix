@@ -761,13 +761,23 @@ class TestGitOpsTargetSubmoduleEndToEnd:
     """
 
     @staticmethod
-    def _probe(tmp_path: Path) -> Path:
+    def _raw_file(tmp_path: Path) -> Path:
+        # Stands in for ArgoCD's own `install.yaml`, which is the reason
+        # `kubernetes.rawFiles` exists and the canonical thing a bootstrap
+        # unit points at. Deliberately carries no labels of its own.
+        raw = tmp_path / "install.yaml"
+        raw.write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: raw\n  namespace: argocd\ndata:\n  from: file\n"
+        )
+        return raw
+
+    @classmethod
+    def _probe(cls, tmp_path: Path) -> Path:
         probe = tmp_path / "bootstrap.nix"
         probe.write_text(f"""
             import {PROJECT_ROOT} {{
               modules = [{{
-                # No default for this, and every target derives its own
-                # prune scope from it -- see easykubenix/ekn.nix.
+                # No default for this -- see easykubenix/ekn.nix.
                 ekn.environment = "easykubenix";
                 deployment.deployBranch = "deploy";
                 deployment.units.bootstrap = {{
@@ -776,6 +786,7 @@ class TestGitOpsTargetSubmoduleEndToEnd:
                   labels."app.kubernetes.io/instance" = "argocd";
                   modules = [{{
                     kubernetes.objects.argocd.ConfigMap.root.data.key = "value";
+                    kubernetes.rawFiles = [{{ path = {cls._raw_file(tmp_path)}; }}];
                   }}];
                 }};
               }}];
@@ -804,7 +815,7 @@ class TestGitOpsTargetSubmoduleEndToEnd:
     async def test_kubeapply_target_applies_submodule_objects(self, tmp_path: Path) -> None:
         cfg = await evaluate_kubeapply_config(self._probe(tmp_path), None, None, None, "bootstrap")
 
-        assert [obj["metadata"]["name"] for obj in cfg.objects] == ["root"]
+        assert [obj["metadata"]["name"] for obj in cfg.objects] == ["root", "raw"]
         # The instance's environment, shared with a whole-instance apply. The
         # unit label below is what keeps the two prune scopes apart.
         assert cfg.environment == "easykubenix"
@@ -819,6 +830,69 @@ class TestGitOpsTargetSubmoduleEndToEnd:
             "app.kubernetes.io/instance": "argocd",
             "ekn.dev/deployment-unit": "bootstrap",
         }
+
+    async def test_a_raw_file_in_a_unit_carries_the_unit_label(self, tmp_path: Path) -> None:
+        """Nix never parses a raw file, so `ekn` adds the label at load time.
+
+        Without it the object reaches the cluster with the environment label
+        and no unit label, and the next whole-instance `--prune` -- which
+        selects on that label's absence -- deletes it. For a bootstrap unit
+        the raw file is typically ArgoCD's own `install.yaml`.
+        """
+        cfg = await evaluate_kubeapply_config(self._probe(tmp_path), None, None, None, "bootstrap")
+
+        raw = next(obj for obj in cfg.objects if obj["metadata"]["name"] == "raw")
+        assert raw["metadata"]["labels"] == {"ekn.dev/deployment-unit": "bootstrap"}
+        # The unit's own `labels` are not stamped: a raw file is byte-identical
+        # by design, and only the label that decides deletion is added.
+        assert "app.kubernetes.io/instance" not in raw["metadata"]["labels"]
+        assert raw["data"] == {"from": "file"}
+
+    async def test_a_routed_raw_file_carries_the_unit_label_without_a_target(self, tmp_path: Path) -> None:
+        """The same stamp on the whole-instance path, and for the same reason.
+
+        Both applies write as the same field manager, so a stamp on only the
+        `--target` path would make the label flip with whichever apply ran
+        last -- and a flip to absent is a delete.
+        """
+        probe = tmp_path / "routed-raw.nix"
+        probe.write_text(f"""
+            import {PROJECT_ROOT} {{
+              modules = [{{
+                ekn.environment = "easykubenix";
+                deployment.deployBranch = "deploy";
+                deployment.units.bootstrap.path = "bootstrap";
+                kubernetes.rawFiles = [{{
+                  path = {self._raw_file(tmp_path)};
+                  deploymentUnit = "bootstrap";
+                }}];
+              }}];
+            }}
+        """)
+
+        cfg = await evaluate_kubeapply_config(probe, None, None, None, None)
+
+        raw = next(obj for obj in cfg.objects if obj["metadata"]["name"] == "raw")
+        assert raw["metadata"]["labels"] == {"ekn.dev/deployment-unit": "bootstrap"}
+
+    async def test_an_unrouted_raw_file_gets_no_unit_label(self, tmp_path: Path) -> None:
+        # The control. A raw file belonging to no unit is the whole
+        # instance's, and the whole-instance prune scope is exactly "carries
+        # no unit label" -- so adding one here would orphan it instead.
+        probe = tmp_path / "plain-raw.nix"
+        probe.write_text(f"""
+            import {PROJECT_ROOT} {{
+              modules = [{{
+                ekn.environment = "easykubenix";
+                kubernetes.rawFiles = [{{ path = {self._raw_file(tmp_path)}; }}];
+              }}];
+            }}
+        """)
+
+        cfg = await evaluate_kubeapply_config(probe, None, None, None, None)
+
+        raw = next(obj for obj in cfg.objects if obj["metadata"]["name"] == "raw")
+        assert "labels" not in raw["metadata"]
 
     async def test_field_manager_defaults_without_a_target(self, tmp_path: Path) -> None:
         # No `--target`: the objects come from `kubernetes.generated`, which

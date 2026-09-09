@@ -818,11 +818,17 @@ in
                 kubernetes.rawFiles list, just never committed to a GitOps
                 branch).
 
-                A raw file gets none of its unit's `labels`/`annotations`, and
-                so no `ekn.dev/deployment-unit` label either. Nix never parses
-                it -- that is the whole point of a raw file -- so there is
-                nothing here to stamp. Write the label into the file if the
-                objects in it should carry one.
+                A raw file gets none of its unit's `labels`/`annotations`.
+                Nix never parses it -- that is the whole point of a raw
+                file -- so there is nothing here to stamp. Write any label
+                you want into the file.
+
+                `ekn.dev/deployment-unit` is the exception, and `ekn` adds it
+                at apply time (see `_raw_manifest_in_unit` in
+                ekn/src/ekn/eval.py). It is the prune scope, and a routed
+                object without it is deleted by the next whole-instance
+                `--prune`, which selects on that label's absence. `ekn commit`
+                still writes the file byte-identical.
               '';
             };
           };

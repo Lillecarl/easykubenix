@@ -335,6 +335,8 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     """
     resource_priority = resource_priority or {}
     protected = protect or set()
+    if unit is not None:
+        _check_unit_labels(objects, unit, unit_label)
     desired_keys: set[tuple[str, str, str]] = set()
     kinds: set[str] = set()
     # The class each kind was applied through, kept for the prune scan. See
@@ -381,6 +383,39 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
         desired_keys=desired_keys,
         protected=protected,
     )
+
+
+def _check_unit_labels(objects: list[Manifest], unit: str, unit_label: str) -> None:
+    """Refuse an apply whose objects do not all belong to the unit it claims.
+
+    A `--target <name>` apply prunes by `unit_label=<name>`, so an object in
+    its set that carries a different value -- or none -- is applied into a
+    scope its own prune will never look at. Absent the label it is worse than
+    orphaned: the next whole-instance `--prune` selects on the label's
+    absence, so it takes the object as its own and deletes it.
+
+    Nothing here should be reachable: easykubenix renders the label onto every
+    object in a unit, and `eval._raw_manifest_in_unit` adds it to the one kind
+    of object Nix never sees. This is the check that says so, and it fails
+    with the object named rather than with a deletion two applies later.
+    """
+    wrong: list[str] = []
+    for spec in objects:
+        metadata = spec.get("metadata")
+        labels = metadata.get("labels") if isinstance(metadata, dict) else None
+        found = labels.get(unit_label) if isinstance(labels, dict) else None
+        if found != unit:
+            name = metadata.get("name", "<unnamed>") if isinstance(metadata, dict) else "<unnamed>"
+            wrong.append(f"  {spec.get('kind', '<unknown>')}/{name}: {found!r}")
+    if wrong:
+        listed = "\n".join(wrong)
+        msg = (
+            f"these objects do not carry {unit_label}={unit!r}, which is the scope this apply prunes by:\n"
+            f"{listed}\n"
+            f"An object applied into a unit without the unit's label is deleted by the next "
+            f"whole-instance prune, which selects on that label's absence."
+        )
+        raise ValueError(msg)
 
 
 def prune_selector(
