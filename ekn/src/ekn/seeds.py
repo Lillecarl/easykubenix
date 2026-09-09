@@ -289,12 +289,19 @@ async def resolve(objects: Iterable[Manifest], *, api: Api) -> SeedPlan:
     seed is exported once, applied once, and dropped, so every apply after
     the bootstrap takes that cell.
 
-    A skipped object is REMOVED from the returned apply set rather than
-    applied unchanged. `ssa_apply` is a real server-side apply under field
-    manager `ekn`, and server-side apply deletes fields that manager
-    previously owned and then omits -- so applying the rendered object
-    (whose field still holds the reference) would overwrite the live
-    credential with the literal `$ekn:env:VARNAME`.
+    A skipped object is applied with the credential the cluster already
+    holds, NOT with the rendered one and NOT by being dropped. `ssa_apply` is
+    a real server-side apply under field manager `ekn`, and server-side apply
+    deletes fields that manager previously owned and then omits -- so
+    applying the rendered object (whose field still holds the reference)
+    would overwrite the live credential with the literal `$ekn:env:VARNAME`,
+    and omitting the field would delete it. Writing the live value back does
+    neither, and lets every other field of the object reconcile.
+
+    One case still drops the object: the live value cannot be read back, so
+    there is nothing to write. `--prune` then has a live object that this
+    apply did not produce, and deletes a credential nobody can recreate --
+    see `_with_live_values` below.
     """
     planned: list[Manifest] = []
     actions: list[SeedAction] = []
