@@ -1,4 +1,4 @@
-# helm defines kubenix module with options for using helm charts with kubenix
+# helm defines a kubenix module with options for using helm charts with kubenix
 # Based on hall/kubenix
 {
   config,
@@ -16,13 +16,18 @@ in
   options.helm = {
     package = lib.mkPackageOption pkgs "kubernetes-helm" { };
     releases = mkOption {
-      description = "Attribute set of helm releases";
+      description = ''
+        Attribute set of helm releases.
+
+        A thin wrapper over `ekn.lib.importHelm`, which is the primitive and
+        takes the same arguments. Use the function directly when building
+        objects from a plain function rather than from a module -- it returns a
+        config fragment you place with `lib.mkMerge`, with no option to declare
+        and read back.
+      '';
       type = types.attrsOf (
         types.submodule (
-          { config, name, ... }:
-          let
-            releaseConfig = config;
-          in
+          { name, ... }:
           {
             options = {
               name = mkOption {
@@ -35,7 +40,14 @@ in
                 type = types.either types.package types.path;
               };
               namespace = mkOption {
-                description = "Namespace to install helm chart to";
+                description = ''
+                  Namespace to install the helm chart to.
+
+                  This is `.Release.Namespace` and `--namespace`, and it also
+                  creates the Namespace object. It does NOT put a namespace on
+                  an object whose template omits one -- see
+                  `ekn.lib.importHelm`.
+                '';
                 type = types.nullOr types.str;
                 default = null;
               };
@@ -49,58 +61,34 @@ in
                 type = types.str;
                 default = globalConfig.kubernetes.package.version;
               };
-              overrides = mkOption {
-                description = "Overrides to apply to all chart objects, don't do namespace here";
-                type = lib.types.listOf (types.functionTo ekn.lib.kubeValueType);
-                default = [ ];
-              };
               transformers = mkOption {
                 description = ''
-                  Functions from this release's whole object list to a new
-                  one, applied in order. Run after `overrides` and before the
-                  objects are grouped into `kubernetes.objects`.
+                  Functions from this release's whole object list to a new one,
+                  applied in order. Passed straight through to
+                  `ekn.lib.importHelm` and on to `ekn.lib.importYaml`, where
+                  the semantics are documented -- they run before the CRD split
+                  and before the objects are grouped by namespace, they see
+                  CRDs, and a marker is safe in one.
 
-                  `overrides` is the per-object hook and cannot express
-                  anything that needs the set: detecting two objects that
-                  render to one identity, or deriving a value from a sibling.
-                  This is that hook.
-
-                  Being before the grouping is the point, and it is what
-                  `kubernetes.transformers` cannot offer. Grouping reads
-                  `metadata.namespace`, and an object without one goes to the
-                  `none` bucket, where kubernetes.nix deliberately injects no
-                  namespace. A chart may legitimately omit it -- `helm
-                  install` does not rewrite the manifest either, it lets the
-                  API server default the namespace to the release's. Only a
-                  hook here still knows `namespace`, so only a hook here can
-                  put it back.
-
-                  easykubenix ships no transformer. This is a seam; the
-                  policy is the caller's, because "which kinds are namespaced"
-                  needs API scope data that a project has and this module does
-                  not.
-
-                  Not to be confused with `kubernetes.transformers`, which is
-                  per object, instance-wide, and runs long after grouping.
-
-                  A marker is safe here, and that is the opposite of the rule
-                  for `kubernetes.transformers`. This output still has to pass
-                  through `kubernetes.objects`, whose freeform type is
-                  `kubeValueType`, so `namedListOf` resolves an `mkNamedList`
-                  when it merges. Introducing one in `kubernetes.transformers`
-                  is what needs `needsMarkerPass` (kubernetes.nix), because
-                  that seam runs past the type and a marker it leaves behind
-                  reaches the manifest as a literal `_type` field.
+                  This replaced a per-object `overrides` option. `map f`
+                  expresses that, so the two hooks bought nothing but an
+                  ordering rule to remember.
                 '';
-                # `listOf attrs` rather than the recursive value type: these
-                # objects are typed again when they land in
-                # `kubernetes.objects`, so validating each leaf here would pay
-                # that cost twice. See easykubenix issue #11.
                 type = lib.types.listOf (types.functionTo (lib.types.listOf lib.types.attrs));
                 default = [ ];
                 example = lib.literalExpression ''
                   [ (objects: map (object: object // { metadata = object.metadata // { namespace = "app"; }; }) objects) ]
                 '';
+              };
+              crdSplit = mkOption {
+                description = ''
+                  Route CustomResourceDefinitions to `kubernetes.crds` instead
+                  of `kubernetes.resources`. See `ekn.lib.importYaml` for the
+                  measured cost of turning it off, and for the pipeline stages
+                  a split CRD skips.
+                '';
+                type = types.bool;
+                default = true;
               };
               yamlVersion = mkOption {
                 description = ''
@@ -153,45 +141,6 @@ in
                 type = types.listOf types.str;
                 default = [ ];
               };
-
-              objects = mkOption {
-                description = "Generated kubernetes objects";
-                type = types.listOf ekn.lib.kubeValueType;
-                default = [ ];
-              };
-            };
-
-            config = {
-              # No list-to-attribute-set pass runs on the chart output. A
-              # rendered chart list stays a plain list, and
-              # `ekn.lib.kubeValueType` merges it with an
-              # `ekn.lib.mkNamedList` override by name when the object reaches
-              # `kubernetes.objects`.
-              objects =
-                let
-                  resourcesYaml = pkgs.chart2yaml.override { kubernetes-helm = cfg.package; } {
-                    inherit (releaseConfig)
-                      chart
-                      name
-                      namespace
-                      values
-                      kubeVersion
-                      includeCRDs
-                      noHooks
-                      apiVersions
-                      ;
-                  };
-                  list = ekn.lib.parseYAMLStream {
-                    src = resourcesYaml;
-                    yamlVersion = releaseConfig.yamlVersion;
-                  };
-                in
-                list
-                ++ lib.optional (releaseConfig.namespace != null) {
-                  apiVersion = "v1";
-                  kind = "Namespace";
-                  metadata.name = releaseConfig.namespace;
-                };
             };
           }
         )
@@ -200,49 +149,42 @@ in
     };
   };
 
+  # One fragment per release. Every downstream concern -- transformers, the CRD
+  # split, namespace grouping, apiMappings from CRDs -- lives in the primitive,
+  # so this module and importyaml.nix cannot drift apart. They used to carry
+  # byte-identical `apiMappings` blocks.
+  #
+  # The option paths below are written out rather than `mkMerge`-ing the
+  # fragments whole. See the same note in importyaml.nix: making the set of
+  # defined options depend on `cfg` recurses, and this module reaches it faster
+  # because `kubeVersion` defaults from `config.kubernetes.package.version`.
   config =
     let
-      allObjects = lib.pipe cfg.releases [
-        (lib.mapAttrsToList (
-          _: release:
-          # Per-object first, then the whole set. A set transformer that has
-          # to reason about identities must see what `overrides` produced,
-          # not what the chart rendered.
-          lib.pipe (lib.map (object: lib.pipe object release.overrides) release.objects) release.transformers
-        ))
-        lib.flatten
-      ];
+      fragments = lib.mapAttrsToList (
+        _name: release:
+        ekn.lib.importHelm {
+          # The configurable Helm binary. The primitive defaults to the package
+          # set's, so passing it here is what keeps `helm.package` working.
+          helmPackage = cfg.package;
+          inherit (release)
+            chart
+            name
+            namespace
+            values
+            kubeVersion
+            includeCRDs
+            noHooks
+            apiVersions
+            yamlVersion
+            transformers
+            crdSplit
+            ;
+        }
+      ) cfg.releases;
     in
     {
-      kubernetes.objects = lib.pipe allObjects [
-        (lib.map (
-          object:
-          let
-            kind = object.kind or (throw "no kind for ${object}");
-            name = object.metadata.name or (throw "no name for ${object}");
-            namespace = object.metadata.namespace or "none";
-          in
-          {
-            ${namespace}.${kind}.${name} = object;
-          }
-        ))
-        lib.mkMerge
-      ];
-      kubernetes.apiMappings = lib.pipe allObjects [
-        (lib.filter (object: object.kind or null == "CustomResourceDefinition"))
-        (map (crd: {
-          name = crd.spec.names.kind;
-          value =
-            let
-              version = lib.pipe crd.spec.versions [
-                (lib.filter (x: x.storage or false == true))
-                lib.head
-                (x: x.name)
-              ];
-            in
-            lib.mkDefault "${crd.spec.group}/${version}";
-        }))
-        lib.listToAttrs
-      ];
+      kubernetes.resources = lib.mkMerge (map (fragment: fragment.kubernetes.resources) fragments);
+      kubernetes.crds = lib.concatMap (fragment: fragment.kubernetes.crds) fragments;
+      kubernetes.apiMappings = lib.mkMerge (map (fragment: fragment.kubernetes.apiMappings) fragments);
     };
 }

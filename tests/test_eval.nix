@@ -610,21 +610,21 @@ let
           ekn.discriminator = "transformers";
           importyaml.sample = {
             src = transformerSource pkgs;
-            # Runs first, per object. Proves the ordering below.
-            overrides = [
-              (
+            transformers = [
+              # What the removed per-object `overrides` option did, written as
+              # `map f`. That equivalence is the whole reason it is gone: one
+              # hook instead of two, and no ordering rule to remember.
+              (map (
                 object:
                 object
                 // {
                   metadata = object.metadata // {
-                    labels.stage = "override";
+                    labels.stage = "mapped";
                   };
                 }
-              )
-            ];
-            transformers = [
-              # Sees the whole set at once, which `overrides` cannot. Stamps
-              # the count so the test can tell it was not called per object.
+              ))
+              # Sees the whole set at once, which `map f` cannot. Stamps the
+              # count so the test can tell it was not called per object.
               (
                 objects:
                 map (
@@ -632,8 +632,8 @@ let
                   object
                   // {
                     metadata = object.metadata // {
-                      # Merged, not replaced, so `overrides`' own label
-                      # survives and the test can prove the two ran in order.
+                      # Merged, not replaced, so the previous transformer's
+                      # label survives and the test can prove the order.
                       labels = (object.metadata.labels or { }) // {
                         count = toString (builtins.length objects);
                       };

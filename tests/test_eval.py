@@ -477,13 +477,16 @@ class TestImportTimeTransformers:
         assert objects["without-namespace"]["metadata"]["labels"]["count"] == "2"
         assert objects["with-namespace"]["metadata"]["labels"]["count"] == "2"
 
-    async def test_overrides_run_before_transformers(self) -> None:
-        # Both labels survive, so the per-object hook ran first and the set
-        # hook saw its output. A set transformer reasoning about identities
-        # has to see what `overrides` produced, not what the file contained.
+    async def test_map_replaces_the_removed_per_object_hook(self) -> None:
+        # `overrides` was a per-object hook, which is `map f` — a strictly
+        # weaker special case of this one. It is gone, and the fixture's first
+        # transformer is what it used to be, written as `map`.
+        #
+        # Both labels survive, so the `map` transformer ran and the next one
+        # saw its output.
         objects = self._by_name(await evaluate_file(NIX_TEST_FILE, "importTransformers"))
         labels = objects["with-namespace"]["metadata"]["labels"]
-        assert labels == {"stage": "override", "count": "2"}
+        assert labels == {"stage": "mapped", "count": "2"}
 
     async def test_a_marker_from_a_transformer_resolves(self) -> None:
         """The opposite of the rule for `kubernetes.transformers`.

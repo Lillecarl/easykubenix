@@ -194,6 +194,16 @@ let
       modules = [ { _module.args = moduleArgs; } ] ++ baseModules ++ modules;
     };
 
+  # Bound here rather than inline in `ekn.lib` below, because `importYaml`
+  # needs `parseYAMLStream` and `importHelm` needs `importYaml`. Inline, each
+  # would import its dependency again.
+  parseYAMLStream = import ./easykubenix/lib/parseYamlStream.nix {
+    inherit lib pkgs;
+    eknPackage = eknCli;
+  };
+  importYaml = import ./easykubenix/lib/importYaml.nix { inherit lib parseYAMLStream; };
+  importHelm = import ./easykubenix/lib/importHelm.nix { inherit lib pkgs importYaml; };
+
   moduleArgs = {
     inherit pkgs;
     inherit (pkgs) lib;
@@ -249,10 +259,18 @@ let
         # derivation fallback) used by importyaml.nix and helm.nix so
         # neither hand-rolls the primop-vs-CLI-fallback dispatch. See
         # parseYamlStream.nix.
-        parseYAMLStream = import ./easykubenix/lib/parseYamlStream.nix {
-          inherit lib pkgs;
-          eknPackage = eknCli;
-        };
+        inherit parseYAMLStream;
+        # The two import primitives. Each returns a config fragment
+        # (`kubernetes.resources` + `kubernetes.crds` + `kubernetes.apiMappings`)
+        # that a caller places with `lib.mkMerge`, so a component built as a
+        # plain function -- with the real fixpoint in scope -- can produce
+        # objects without declaring an option and reading it back.
+        #
+        # `importyaml.nix` and `helm.nix` are wrappers over these. Before they
+        # existed the two modules carried byte-identical `apiMappings` blocks
+        # and near-identical downstreams, which is how one gained a hook the
+        # other lacked. See importYaml.nix.
+        inherit importYaml importHelm;
         # The write direction, same dispatch (primop path + `ekn
         # _jsonToYAML` derivation fallback). Drop-in for
         # `builtins.toYAML`, which is a nanopynix primop and therefore
