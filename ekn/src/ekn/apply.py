@@ -14,7 +14,16 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger()
 
-DEFAULT_DISCRIMINATOR_LABEL = "ekn.dev/discriminator"
+# Stamped by `ekn` at apply time, on every object it applies. Its value is
+# `ekn.environment`. Deliberately not rendered into the manifests: an object a
+# GitOps engine synced from the committed YAML must not carry it, or `ekn` and
+# that engine both consider it theirs to prune.
+DEFAULT_ENVIRONMENT_LABEL = "ekn.dev/environment"
+
+# Rendered by easykubenix onto every object in a deployment unit (see
+# gitops.nix), so it is on the object whoever applies it. `ekn` never writes
+# it, and only reads it to scope a prune.
+DEFAULT_UNIT_LABEL = "ekn.dev/deployment-unit"
 
 # Where a kind with no configured priority sorts -- in practice, every custom
 # resource, since `ekn.resourcePriority` lists only built-in kinds.
@@ -188,10 +197,10 @@ async def apply_one(spec: Manifest, api: Api, *, field_manager: str) -> APIObjec
     APIObject.
 
     The shared "put this object on the cluster" primitive: `apply_and_prune`'s
-    tier loop calls this per discriminator-labeled object it tracks for
+    tier loop calls this per environment-labeled object it tracks for
     pruning, and `ekn.sops.ensure_age_identities`' cluster-bootstrap step
     calls it directly for its Namespace/Secret objects -- which deliberately
-    skip discriminator labeling (they aren't part of any `apply_and_prune`
+    skip environment labeling (they aren't part of any `apply_and_prune`
     generation and must never be pruned), so that decision stays with each
     caller rather than being baked in here.
     """
@@ -204,7 +213,7 @@ def _object_key(obj: APIObject) -> tuple[str, str, str]:
     return (obj.namespace or "none", obj.kind, obj.name)
 
 
-def _with_discriminator_label(spec: Manifest, label: str, value: str) -> Manifest:
+def _with_environment_label(spec: Manifest, label: str, value: str) -> Manifest:
     labeled = dict(spec)
     metadata_value = labeled.get("metadata") or {}
     metadata: Manifest = dict(metadata_value) if isinstance(metadata_value, dict) else {}
@@ -270,8 +279,10 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     objects: list[Manifest],
     *,
     api: Api,
-    discriminator: str,
-    discriminator_label: str = DEFAULT_DISCRIMINATOR_LABEL,
+    environment: str,
+    unit: str | None = None,
+    environment_label: str = DEFAULT_ENVIRONMENT_LABEL,
+    unit_label: str = DEFAULT_UNIT_LABEL,
     resource_priority: dict[str, int] | None = None,
     field_manager: str = DEFAULT_FIELD_MANAGER,
     crd_establish_timeout: int = 60,
@@ -280,8 +291,13 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     protect: set[tuple[str, str, str]] | None = None,
 ) -> None:
     """Apply `objects` in barrier order, then (if `prune`) prune anything
-    previously applied under the same discriminator that this run no longer
-    generates.
+    previously applied in the same scope that this run no longer generates.
+
+    `environment` is stamped onto every applied object as `environment_label`.
+    `unit` names the deployment unit this apply covers, or `None` for a
+    whole-instance apply; it is never stamped, because easykubenix renders
+    `unit_label` into the manifests themselves. Together they pick the prune
+    scope -- see `_prune`.
 
     Known limitation: pruning only scans kinds present in *this* apply --
     if every object of some kind is removed from the generated config in one
@@ -335,7 +351,7 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
         _log.info("applying", barrier=f"{index}/{len(tiers)}", objects=len(tier))
         applied: list[APIObject] = []
         for spec in tier:
-            labeled = _with_discriminator_label(spec, discriminator_label, discriminator)
+            labeled = _with_environment_label(spec, environment_label, environment)
             obj = await apply_one(labeled, api, field_manager=field_manager)
             applied.append(obj)
             desired_keys.add(_object_key(obj))
@@ -354,8 +370,12 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
 
     await _prune(
         api=api,
-        discriminator=discriminator,
-        discriminator_label=discriminator_label,
+        selector=prune_selector(
+            environment=environment,
+            unit=unit,
+            environment_label=environment_label,
+            unit_label=unit_label,
+        ),
         scan_kinds=kinds | (prune_kinds or set()),
         classes=classes,
         desired_keys=desired_keys,
@@ -363,23 +383,56 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     )
 
 
+def prune_selector(
+    *,
+    environment: str,
+    unit: str | None,
+    environment_label: str = DEFAULT_ENVIRONMENT_LABEL,
+    unit_label: str = DEFAULT_UNIT_LABEL,
+) -> str:
+    """The label selector naming everything one apply is allowed to prune.
+
+    Two scopes, and the difference between them is the deployment-unit label:
+
+    - A whole-instance apply (`unit is None`) owns this environment's objects
+      that belong to no unit: `ekn.dev/environment=E,!ekn.dev/deployment-unit`.
+    - A `--target X` apply owns this environment's objects in that unit:
+      `ekn.dev/environment=E,ekn.dev/deployment-unit=X`.
+
+    The not-exists clause is the load-bearing half. A deployment unit's
+    objects never reach `kubernetes.generated` -- a bootstrap unit renders a
+    whole nested instance, and only `ekn kubeapply --target <name>` applies
+    it. Without the clause, a whole-instance prune would list those objects
+    (they carry the environment label, since `ekn` applied them), find them
+    absent from its own desired set, and delete them. That is ArgoCD and the
+    CNI. easykubenix requires the unit label for exactly this reason; see the
+    assertion in easykubenix/gitops.nix.
+
+    Returned as a string rather than a dict because a not-exists clause has no
+    dict form. `kr8s` passes a string selector through verbatim as
+    `labelSelector`, which is what makes `!key` work.
+    """
+    if unit is None:
+        return f"{environment_label}={environment},!{unit_label}"
+    return f"{environment_label}={environment},{unit_label}={unit}"
+
+
 async def _prune(  # noqa: PLR0913 -- one caller, and every argument is state that caller built
     *,
     api: Api,
-    discriminator: str,
-    discriminator_label: str,
+    selector: str,
     scan_kinds: set[str],
     classes: dict[str, type[APIObject]],
     desired_keys: set[tuple[str, str, str]],
     protected: set[tuple[str, str, str]],
 ) -> None:
-    """Delete objects carrying this run's discriminator that it did not produce.
+    """Delete objects in this run's prune scope that it did not produce.
 
     Split out of `apply_and_prune` to keep that function under the complexity
     limit rather than growing its `noqa`. The apply half and the prune half
-    share only the four values passed here.
+    share only the values passed here. See `prune_selector` for the scope.
     """
-    _log.info("pruning", kinds=len(scan_kinds), discriminator=discriminator)
+    _log.info("pruning", kinds=len(scan_kinds), selector=selector)
     for kind in scan_kinds:
         # The class, when this apply built one. `async_get` takes either, and
         # a name sends it through `async_lookup_kind` -- the lowercasing lookup
@@ -397,7 +450,7 @@ async def _prune(  # noqa: PLR0913 -- one caller, and every argument is state th
         async for obj in api.async_get(  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType] -- kr8s Api.async_get's selector params and yield type are unannotated upstream
             target,
             namespace=kr8s.ALL,
-            label_selector={discriminator_label: discriminator},
+            label_selector=selector,
         ):
             if not isinstance(obj, APIObject):
                 continue
@@ -426,13 +479,15 @@ async def _prune(  # noqa: PLR0913 -- one caller, and every argument is state th
 
 __all__ = [
     "DEFAULT_BARRIER_PRIORITY",
-    "DEFAULT_DISCRIMINATOR_LABEL",
+    "DEFAULT_ENVIRONMENT_LABEL",
     "DEFAULT_FIELD_MANAGER",
+    "DEFAULT_UNIT_LABEL",
     "Manifest",
     "apply_and_prune",
     "apply_one",
     "barriers",
     "build_object",
     "discover",
+    "prune_selector",
     "ssa_apply",
 ]

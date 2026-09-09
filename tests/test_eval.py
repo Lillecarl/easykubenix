@@ -111,9 +111,6 @@ class TestEknModule:
         assert "ekn" not in deployment
         target = result["deploymentUnits"]["apps"]
         assert target["target"]["path"] == "clusters/home/apps"
-        # Derived from `ekn.discriminator`, per target, so pruning one target
-        # cannot reach another's objects -- see gitops.nix.
-        assert target["target"]["discriminator"] == "easykubenix-apps"
         assert target["objects"][0]["metadata"]["name"] == "api"
 
     async def test_gitops_target_submodule_renders_into_its_target_only(self) -> None:
@@ -146,10 +143,10 @@ class TestEknModule:
         assert [obj["metadata"]["name"] for obj in targets["apps"]["objects"]] == ["routed"]
 
     async def test_gitops_target_exposes_only_serializable_fields(self) -> None:
-        """`target` must stay exactly `{path, discriminator, fieldManager}`.
+        """`target` must stay exactly `{path, fieldManager}`.
 
         It is serialized to JSON for `ekn` (eval.py's `_GitOpsTargetRef` and
-        `_unpack_gitops_target` read those three), while the target submodule
+        `_unpack_gitops_target` read those two), while the target submodule
         itself also holds `modules` and `instance` -- module functions and a
         whole evaluated option tree -- plus `labels`/`annotations`, whose
         values may be functions. Passing the submodule through whole would
@@ -160,16 +157,17 @@ class TestEknModule:
         assert isinstance(result, dict)
 
         for name, entry in result["deploymentUnits"].items():
-            assert sorted(entry["target"]) == ["discriminator", "fieldManager", "path"], name
+            assert sorted(entry["target"]) == ["fieldManager", "path"], name
 
         assert result["deploymentUnits"]["bootstrap"]["target"] == {
             "path": "bootstrap",
-            "discriminator": "easykubenix-bootstrap",
             "fieldManager": "ekn",
         }
-        # The nested instance agrees with the prune scope a
-        # `--target bootstrap` apply will actually use.
-        assert result["nestedDiscriminator"] == "easykubenix-bootstrap"
+        # The nested instance inherits the parent's environment. Both applies
+        # stamp `ekn.dev/environment`, and the unit label is what separates
+        # the two prune scopes -- so this has to match, or a
+        # `--target bootstrap --prune` would find none of its own objects.
+        assert result["nestedEnvironment"] == "easykubenix"
 
     async def test_labels_annotations_are_coerced_by_default(self) -> None:
         result = await evaluate_file(NIX_TEST_FILE, "labelsAnnotationsCoercion")
@@ -303,7 +301,7 @@ class TestEknModule:
         # replace it by accident.
         result = await evaluate_file(NIX_TEST_FILE, "parentStillWins")
         assert isinstance(result, list)
-        assert result[0]["data"] == {"parentDiscriminator": "easykubenix"}
+        assert result[0]["data"] == {"parentEnvironment": "easykubenix"}
 
     async def test_the_built_manifest_outputs_drop_a_seeded_object(self) -> None:
         # `nix build .#manifestYAMLDir` and friends exist to be handed to
@@ -348,22 +346,22 @@ class TestEknModule:
         secret = next(o for o in result if o["kind"] == "Secret")
         assert secret["metadata"]["annotations"]["ekn.dev/env-0"] == "ARGOCD_REPO_PASSWORD"
 
-    async def test_a_manifest_renders_without_a_discriminator(self) -> None:
-        # `ekn.discriminator` has no default. Rendering must not read it:
+    async def test_a_manifest_renders_without_an_environment(self) -> None:
+        # `ekn.environment` has no default. Rendering must not read it:
         # a manifest is a file, and a file prunes nothing.
-        result = await evaluate_file(NIX_TEST_FILE, "noDiscriminatorRenders")
+        result = await evaluate_file(NIX_TEST_FILE, "noEnvironmentRenders")
         assert isinstance(result, list)
         assert result[0]["kind"] == "ConfigMap"
 
-    async def test_a_deploy_without_a_discriminator_is_refused(self) -> None:
+    async def test_a_deploy_without_an_environment_is_refused(self) -> None:
         # The other half, and the reason there is no default. A default is a
         # value every project shares until somebody changes it, and two
         # projects sharing one on a cluster prune each other's objects --
         # each sees objects under its own label that its own apply did not
         # produce. Nothing inside one project can detect that, so the name
         # has to be a decision, and this is where it gets asked for.
-        with pytest.raises(nanopynix.NixError, match=r"ekn\.discriminator"):
-            await evaluate_file(NIX_TEST_FILE, "noDiscriminatorDeployThrows")
+        with pytest.raises(nanopynix.NixError, match=r"ekn\.environment"):
+            await evaluate_file(NIX_TEST_FILE, "noEnvironmentDeployThrows")
 
     async def test_marker_in_crds_is_rejected(self) -> None:
         # kubernetes.crds goes around the type for speed, so nothing there
@@ -686,7 +684,7 @@ class TestGitOpsTargetMetadata:
     async def test_every_unit_records_its_name_on_its_objects(self) -> None:
         """The mark has to be in the rendered manifest, not stamped at apply time.
 
-        `ekn` writes `ekn.dev/discriminator` in `_with_discriminator_label`,
+        `ekn` writes `ekn.dev/environment` in `_with_environment_label`,
         so only objects `ekn` itself applies carry it. On a GitOps cluster
         nearly every object arrives through ArgoCD instead, which applies the
         committed YAML -- measured on a live cluster, such an object had no
@@ -770,7 +768,7 @@ class TestGitOpsTargetSubmoduleEndToEnd:
               modules = [{{
                 # No default for this, and every target derives its own
                 # prune scope from it -- see easykubenix/ekn.nix.
-                ekn.discriminator = "easykubenix";
+                ekn.environment = "easykubenix";
                 deployment.deployBranch = "deploy";
                 deployment.units.bootstrap = {{
                   path = "bootstrap";
@@ -807,9 +805,9 @@ class TestGitOpsTargetSubmoduleEndToEnd:
         cfg = await evaluate_kubeapply_config(self._probe(tmp_path), None, None, None, "bootstrap")
 
         assert [obj["metadata"]["name"] for obj in cfg.objects] == ["root"]
-        # The target's own prune scope, not the instance-wide one -- pruning
-        # a bootstrap apply must not be able to reach anything else.
-        assert cfg.discriminator == "easykubenix-bootstrap"
+        # The instance's environment, shared with a whole-instance apply. The
+        # unit label below is what keeps the two prune scopes apart.
+        assert cfg.environment == "easykubenix"
         # Applied as the controller that takes over, so SSA hands the fields
         # across instead of leaving `ekn` owning them permanently.
         assert cfg.field_manager == "argocd-controller"
@@ -831,7 +829,7 @@ class TestGitOpsTargetSubmoduleEndToEnd:
               modules = [{{
                 # A kubeapply config carries the prune scope, so it has to
                 # name one -- this test is about the field manager.
-                ekn.discriminator = "easykubenix";
+                ekn.environment = "easykubenix";
                 kubernetes.objects.default.ConfigMap.plain.data.key = "value";
               }}];
             }}
@@ -948,5 +946,5 @@ class TestValidationConfig:
         ordinary = [priority for kind, priority in c.ekn.resource_priority.items() if kind not in intercepting]
         assert max(ordinary) < DEFAULT_BARRIER_PRIORITY
         assert all(c.ekn.resource_priority[kind] > DEFAULT_BARRIER_PRIORITY for kind in intercepting)
-        assert c.ekn.discriminator
+        assert c.ekn.environment
         assert c.internal.manifest_json_file.out_path.startswith("/nix/store/")

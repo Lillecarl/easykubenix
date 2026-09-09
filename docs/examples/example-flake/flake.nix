@@ -32,7 +32,7 @@
                   # objects carrying this label that this apply did not
                   # produce, so two projects sharing a name on one cluster
                   # delete each other's work.
-                  ekn.discriminator = "example-flake";
+                  ekn.environment = "example-flake";
                   deployment.enable = true;
                   deployment.deployBranch = "flake-branch";
                 }

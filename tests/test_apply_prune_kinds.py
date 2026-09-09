@@ -75,7 +75,7 @@ async def test_prune_kinds_is_scanned_even_when_absent_from_the_current_apply() 
     await apply_and_prune(
         [],
         api=api,
-        discriminator="disc",
+        environment="disc",
         prune=True,
         prune_kinds={"ConfigMap"},
     )
@@ -91,7 +91,7 @@ async def test_prune_kinds_none_preserves_current_behavior_of_scanning_nothing_e
     await apply_and_prune(
         [],
         api=api,
-        discriminator="disc",
+        environment="disc",
         prune=True,
         prune_kinds=None,
     )

@@ -38,8 +38,8 @@ let
     works but will be removed.
 
     `ekn kubeapply` applies and prunes natively, using `ekn.resourcePriority`
-    for ordering and `ekn.discriminator` (or a GitOps target's own) for prune
-    scope.
+    for ordering and the `ekn.dev/environment`/`ekn.dev/deployment-unit`
+    label pair for prune scope.
   '';
 
   # Objects routed (via kubernetes.deploymentUnits / ekn.deploymentUnit) to one of
@@ -91,7 +91,7 @@ in
   # is used at all. `mkRenamedOptionModule` keeps existing definitions working
   # and warns with the new path, so a config only has to move once.
   imports = [
-    (lib.mkRenamedOptionModule [ "kluctl" "discriminator" ] [ "ekn" "discriminator" ])
+    (lib.mkRenamedOptionModule [ "kluctl" "discriminator" ] [ "ekn" "environment" ])
     (lib.mkRenamedOptionModule [ "kluctl" "resourcePriority" ] [ "ekn" "resourcePriority" ])
     # Renamed with the option it names. See gitops.nix.
     (lib.mkRenamedOptionModule
@@ -242,7 +242,7 @@ in
             deploy \
               --no-update-check \
               --target local \
-              --discriminator ${config.ekn.discriminator} \
+              --discriminator ${config.ekn.environment} \
               --project-dir ${cfg.projectDir} \
               $@ # --dry-run? --yes? --prune!
           ${cfg.postDeployScript}

@@ -201,6 +201,6 @@ nix run --file ./nix packages.bootstrapValidationScript
 That applies ArgoCD's three CRDs, waits for them to become Established, and
 then applies the `Application` that depends on them — in a later barrier,
 because an unlisted kind sorts at 1000 while `CustomResourceDefinition` sorts
-at 150. Pruning scopes itself to `easykubenix-bootstrap`, the target's own
-discriminator, so a bootstrap apply can never reach anything the main
-configuration owns.
+at 150. Pruning scopes itself to `ekn.dev/deployment-unit=bootstrap`, the
+unit's own rendered label, so a bootstrap apply can never reach anything the
+main configuration owns.

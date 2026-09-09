@@ -443,7 +443,7 @@ class Validate(AttrCommand):
                 await apply_and_prune(
                     objects,
                     api=kr8s_api,
-                    discriminator=c.ekn.discriminator,
+                    environment=c.ekn.environment,
                     resource_priority=c.ekn.resource_priority,
                 )
             except kr8s.ServerError as exc:
@@ -663,7 +663,7 @@ class KubeApply(AttrCommand):
     )
     prune: bool = opt(
         False,
-        help="Delete previously-applied objects no longer present in this apply. Scoped to this apply's discriminator: the target's own with --target, otherwise ekn.discriminator.",
+        help="Delete previously-applied objects no longer present in this apply. Scoped by label: ekn.dev/environment plus this target's ekn.dev/deployment-unit with --target, otherwise ekn.dev/environment and no unit label.",
     )
     confirm_context: str | None = opt(
         None,
@@ -705,7 +705,8 @@ class KubeApply(AttrCommand):
             await apply_and_prune(
                 plan.objects,
                 api=api,
-                discriminator=cfg.discriminator,
+                environment=cfg.environment,
+                unit=self.target,
                 field_manager=cfg.field_manager,
                 resource_priority=cfg.resource_priority,
                 prune=self.prune,
@@ -883,7 +884,11 @@ class ApplyManifest(Command):
     cli_name = "_applyManifest"
 
     manifest_file: _Path = pos(help="JSON file holding the already-evaluated manifest list.")
-    discriminator: str = opt(required=True, help="Value for the ekn.dev/discriminator label (ekn.discriminator).")
+    environment: str = opt(required=True, help="Value for the ekn.dev/environment label (ekn.environment).")
+    unit: str | None = opt(
+        None,
+        help="Deployment unit this manifest is. Scopes pruning to objects carrying that ekn.dev/deployment-unit label; omitted, pruning covers objects carrying no unit label at all.",
+    )
     resource_priority_file: _Path | None = opt(
         None,
         help="JSON file holding ekn.resourcePriority ({kind: int}). Omitted means no barrier ordering.",
@@ -918,7 +923,8 @@ class ApplyManifest(Command):
             await apply_and_prune(
                 objects,
                 api=api,
-                discriminator=self.discriminator,
+                environment=self.environment,
+                unit=self.unit,
                 resource_priority=resource_priority,
             )
         except kr8s.ServerError as exc:

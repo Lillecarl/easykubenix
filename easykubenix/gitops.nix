@@ -70,7 +70,7 @@
       type = lib.types.attrsOf (
         lib.types.submodule (
           # `config` is deliberately not in the pattern: the options below
-          # read the *outer* one (this instance's `ekn.discriminator`,
+          # read the *outer* one (this instance's `ekn.environment`,
           # `deployment`, ...) by closure, and naming it here would shadow that
           # with the target submodule's own. `@target` reaches the
           # submodule's as `target.config` without the shadowing -- and
@@ -83,23 +83,6 @@
                 type = lib.types.str;
                 default = "./";
                 description = "Subdirectory within deployBranch/sourceBranch where this target's manifests are stored.";
-              };
-              discriminator = lib.mkOption {
-                type = lib.types.str;
-                default = "${config.ekn.discriminator}-${name}";
-                defaultText = lib.literalExpression ''"''${config.ekn.discriminator}-''${name}"'';
-                description = ''
-                  Prune scope for `ekn kubeapply --target ${name} --prune`.
-
-                  Per-target rather than shared, because pruning selects by
-                  this label across every namespace and every kind the apply
-                  touched: with one value shared between targets, applying
-                  target A with `--prune` would delete target B's objects,
-                  which carry the same label but are not in A's desired set.
-                  Deriving it from `ekn.discriminator` keeps the scopes
-                  disjoint by construction while still letting a project
-                  rename all of them at once.
-                '';
               };
               fieldManager = lib.mkOption {
                 type = lib.types.str;
@@ -220,8 +203,7 @@
                   configuration, not a cut-down one, so it can render a Helm
                   chart like any other. It receives its parent's evaluated
                   config as the `parent` module argument, and its
-                  `ekn.discriminator` defaults to this target's
-                  `discriminator`.
+                  `ekn.environment` defaults to this instance's.
 
                   Definitions concatenate, so several modules can each add to
                   one target's list.
@@ -247,8 +229,8 @@
             #
             # `ekn.deploymentUnit` is EKN-only routing and is stripped before
             # render, so before this the cluster held no record of it. Nor did
-            # it hold `ekn.dev/discriminator` for most objects: `ekn` stamps
-            # that at apply time (see `_with_discriminator_label` in
+            # it hold `ekn.dev/environment` for most objects: `ekn` stamps
+            # that at apply time (see `_with_environment_label` in
             # ekn/src/ekn/apply.py), and on a GitOps cluster nearly every
             # object reaches the API server through ArgoCD instead, carrying
             # whatever the committed YAML carries. Measured on a live cluster:
@@ -266,7 +248,7 @@
             # client-side. The API server keeps no index of arbitrary labels
             # either way -- its watch cache indexes namespace, and matches
             # label selectors by iterating -- so the label costs its bytes and
-            # nothing more. `ekn.dev/discriminator` is the same shape.
+            # nothing more. `ekn.dev/environment` is the same shape.
             #
             # `mkDefault`, so a unit can `mkForce` another string. It cannot
             # decline it: an assertion below requires a plain string here,
@@ -275,12 +257,16 @@
 
             config.instance = ekn.lib.mkInstance {
               modules = [
-                # At `mkDefault`, so a nested module can still set its own.
-                # Without this the nested instance would default to the bare
-                # `ekn.discriminator`, disagreeing with the prune scope
-                # `ekn kubeapply --target ${name}` actually applies
-                # under -- which reads this target's `discriminator`.
-                { ekn.discriminator = lib.mkDefault target.config.discriminator; }
+                # The parent's environment, not a derived one. Both applies
+                # stamp `ekn.dev/environment`, and the unit's own
+                # `ekn.dev/deployment-unit` label is what separates the two
+                # prune scopes -- so the environment has to match, or a
+                # `--target ${name} --prune` would find none of its own
+                # objects. `mkDefault`, so a nested module can still set its
+                # own. `ekn.environment` is required and has no default, so
+                # this is also what saves every nested instance from
+                # declaring it.
+                { ekn.environment = lib.mkDefault config.ekn.environment; }
               ]
               ++ target.config.modules;
               specialArgs = {
@@ -294,7 +280,7 @@
                 # this instance, and `generated`/`generatedWithEkn` run the
                 # assertion checker that `deploymentUnits` also runs. Read
                 # inputs -- `parent.deployment.deployBranch`,
-                # `parent.ekn.discriminator`, a module's own options -- not
+                # `parent.ekn.environment`, a module's own options -- not
                 # results.
                 parent = config;
               };

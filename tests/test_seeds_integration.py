@@ -58,7 +58,7 @@ def anyio_backend() -> str:
 
 @pytest.fixture(scope="module")
 async def cluster() -> AsyncIterator[tuple[Any, list[dict[str, Any]], str]]:
-    """A booted control plane, the rendered objects, and the discriminator.
+    """A booted control plane, the rendered objects, and the environment.
 
     Module-scoped: booting etcd and an API server costs far more than every
     assertion in this file put together. `EphemeralControlPlane` mutates
@@ -80,7 +80,7 @@ async def cluster() -> AsyncIterator[tuple[Any, list[dict[str, Any]], str]]:
         kubeadm_config=c.validation.kubeadm_config,
     ) as plane:
         api = await kr8s.asyncio.api(kubeconfig=plane.kubeconfig)
-        yield api, objects, c.ekn.discriminator
+        yield api, objects, c.ekn.environment
 
 
 async def live_password(api: Any) -> str | None:
@@ -95,10 +95,10 @@ async def live_password(api: Any) -> str | None:
     return base64.b64decode(encoded).decode() if isinstance(encoded, str) else None
 
 
-async def apply(api: Any, objects: list[dict[str, Any]], discriminator: str) -> list[Any]:
+async def apply(api: Any, objects: list[dict[str, Any]], environment: str) -> list[Any]:
     """What `ekn kubeapply` does: resolve seeds, then apply what survives."""
     plan = await seeds.resolve(objects, api=api)
-    await apply_and_prune(plan.objects, api=api, discriminator=discriminator, prune=False)
+    await apply_and_prune(plan.objects, api=api, environment=environment, prune=False)
     return plan.actions
 
 
@@ -119,17 +119,17 @@ async def test_the_seeded_credential_lifecycle(
     cluster: tuple[Any, list[dict[str, Any]], str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api, objects, discriminator = cluster
+    api, objects, environment = cluster
 
     # --- not in cluster, variable unset: abort, and create nothing ---------
     monkeypatch.delenv(VARIABLE, raising=False)
     with pytest.raises(seeds.MissingVariablesError, match=VARIABLE):
-        await apply(api, objects, discriminator)
+        await apply(api, objects, environment)
     assert await live_password(api) is None, "the abort must happen before anything is applied"
 
     # --- not in cluster, variable set: create with the real value ----------
     monkeypatch.setenv(VARIABLE, "first-secret")
-    actions = await apply(api, objects, discriminator)
+    actions = await apply(api, objects, environment)
     assert [a.verb for a in actions] == ["create"]
     assert await live_password(api) == "first-secret"
 
@@ -139,31 +139,31 @@ async def test_the_seeded_credential_lifecycle(
     # implemented as applying the rendered object, server-side apply would
     # replace the stored password with the literal reference.
     monkeypatch.delenv(VARIABLE, raising=False)
-    actions = await apply(api, objects, discriminator)
+    actions = await apply(api, objects, environment)
     assert [a.verb for a in actions] == ["skip"]
     assert await live_password(api) == "first-secret", "a second apply with the variable unset overwrote the credential"
 
     # A third apply, because a field manager's ownership only becomes
     # interesting once it has applied more than once.
-    actions = await apply(api, objects, discriminator)
+    actions = await apply(api, objects, environment)
     assert [a.verb for a in actions] == ["skip"]
     assert await live_password(api) == "first-secret"
 
     # --- in cluster, variable set to the same value: no-op -----------------
     monkeypatch.setenv(VARIABLE, "first-secret")
-    actions = await apply(api, objects, discriminator)
+    actions = await apply(api, objects, environment)
     assert [a.verb for a in actions] == ["unchanged"]
     assert await live_password(api) == "first-secret"
 
     # --- in cluster, variable set to a different value: update -------------
     monkeypatch.setenv(VARIABLE, "second-secret")
-    actions = await apply(api, objects, discriminator)
+    actions = await apply(api, objects, environment)
     assert [a.verb for a in actions] == ["update"]
     assert await live_password(api) == "second-secret"
 
     # --- and back to the steady state, on the rotated value ----------------
     monkeypatch.delenv(VARIABLE, raising=False)
-    actions = await apply(api, objects, discriminator)
+    actions = await apply(api, objects, environment)
     assert [a.verb for a in actions] == ["skip"]
     assert await live_password(api) == "second-secret"
 
@@ -178,9 +178,9 @@ async def test_the_unseeded_objects_are_applied_normally(
     variable set -- the point is that the ConfigMap beside the Secret lands
     normally rather than being caught up in seed handling.
     """
-    api, objects, discriminator = cluster
+    api, objects, environment = cluster
     monkeypatch.setenv(VARIABLE, "second-secret")
-    await apply(api, objects, discriminator)
+    await apply(api, objects, environment)
 
     config_map = await build_object(
         {
@@ -247,7 +247,7 @@ async def test_an_empty_variable_does_not_count_as_supplied(
     That is worse than the unset case, because it looks like success until
     the consumer fails to authenticate.
     """
-    api, objects, discriminator = cluster
+    api, objects, environment = cluster
     secret = await build_object(dict(SECRET), api)
     try:
         await secret.async_refresh()
@@ -257,7 +257,7 @@ async def test_an_empty_variable_does_not_count_as_supplied(
 
     monkeypatch.setenv(VARIABLE, "")
     with pytest.raises(seeds.MissingVariablesError, match=VARIABLE):
-        await apply(api, objects, discriminator)
+        await apply(api, objects, environment)
     assert await live_password(api) is None
 
 
@@ -273,10 +273,10 @@ async def test_other_fields_reconcile_while_the_credential_is_left_alone(
     other field until the password itself changed. Found in use, on a
     `username` edit that silently did not apply.
     """
-    api, objects, discriminator = cluster
+    api, objects, environment = cluster
 
     monkeypatch.setenv(VARIABLE, "lifecycle-secret")
-    await apply(api, objects, discriminator)
+    await apply(api, objects, environment)
     assert await live_password(api) == "lifecycle-secret"
 
     # Edit a non-secret field, and drop the variable -- the steady state.
@@ -284,7 +284,7 @@ async def test_other_fields_reconcile_while_the_credential_is_left_alone(
         {**o, "stringData": {**o["stringData"], "username": "oauth2"}} if o["kind"] == "Secret" else o for o in objects
     ]
     monkeypatch.delenv(VARIABLE, raising=False)
-    actions = await apply(api, edited, discriminator)
+    actions = await apply(api, edited, environment)
 
     assert [a.verb for a in actions] == ["skip"]
     secret = await build_object(dict(SECRET), api)
@@ -315,10 +315,10 @@ async def test_prune_does_not_delete_a_seed_it_could_not_produce(
     current-apply-only scan would skip Secrets entirely once the only Secret
     left the apply set, and the test would pass without exercising anything.
     """
-    api, objects, discriminator = cluster
+    api, objects, environment = cluster
 
     monkeypatch.setenv(VARIABLE, "unrecoverable")
-    await apply(api, objects, discriminator)
+    await apply(api, objects, environment)
     assert await live_password(api) == "unrecoverable"
 
     # Delete the key from the live object. `_with_live_values` now has
@@ -336,7 +336,7 @@ async def test_prune_does_not_delete_a_seed_it_could_not_produce(
     await apply_and_prune(
         plan.objects,
         api=api,
-        discriminator=discriminator,
+        environment=environment,
         prune=True,
         prune_kinds={"Secret"},
         protect=plan.protected,

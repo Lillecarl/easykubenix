@@ -976,7 +976,7 @@ in
                 # Named fields, not the whole `declared` submodule. This is
                 # serialized to JSON for `ekn` (see eval.py's
                 # `_GitOpsTargetRef` and `_unpack_gitops_target`, which read
-                # exactly these three), and the submodule also carries
+                # exactly these two), and the submodule also carries
                 # `modules` and `instance` -- module functions and an entire
                 # evaluated option tree. Passing it whole would try to
                 # serialize those.
@@ -986,7 +986,7 @@ in
                 # in both the committed manifests and the apply. Their values
                 # may be functions too.
                 target = {
-                  inherit (declared) path discriminator fieldManager;
+                  inherit (declared) path fieldManager;
                 };
                 # Only the nested instance's half is stamped here.
                 # `objectsByTarget` comes from `allGenerated`, where

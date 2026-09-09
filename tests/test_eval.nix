@@ -5,11 +5,9 @@ let
     inherit pkgs;
     modules = [
       ({ config, ... }: {
-        # `ekn.discriminator` has no default, and a GitOps target derives
-        # its own prune scope from it -- so a fixture with targets has to
-        # say one. These keep the old default's value, which is what the
-        # derived names below are asserted against.
-        ekn.discriminator = "easykubenix";
+        # `ekn.environment` has no default, so a fixture that deploys has to
+        # say one.
+        ekn.environment = "easykubenix";
         deployment.deployBranch = "deploy";
         deployment.units.apps.path = "clusters/home/apps";
         kubernetes.objects.default.Deployment.api = {
@@ -239,7 +237,7 @@ let
     inherit pkgs;
     modules = [
       {
-        ekn.discriminator = "easykubenix";
+        ekn.environment = "easykubenix";
         deployment.deployBranch = "deploy";
         deployment.units.apps.path = "clusters/home/apps";
         kubernetes.objects.default.ConfigMap.routed = {
@@ -275,7 +273,7 @@ let
       (
         { ekn, lib, ... }:
         {
-          ekn.discriminator = "easykubenix";
+          ekn.environment = "easykubenix";
           deployment.deployBranch = "deploy";
           deployment.units.apps.path = "clusters/home/apps";
           # A unit renaming the label rather than taking its own name. That
@@ -346,7 +344,7 @@ let
     inherit pkgs;
     modules = [
       {
-        ekn.discriminator = "easykubenix";
+        ekn.environment = "easykubenix";
         deployment.deployBranch = "deploy";
         deployment.units."_apps".path = "clusters/home/apps";
       }
@@ -361,7 +359,7 @@ let
       (
         { lib, ... }:
         {
-          ekn.discriminator = "easykubenix";
+          ekn.environment = "easykubenix";
           deployment.deployBranch = "deploy";
           deployment.units.declined = {
             path = "declined";
@@ -394,9 +392,9 @@ let
       )
     ];
   };
-  # A configuration that names no discriminator at all.
+  # A configuration that names no environment at all.
   #
-  # `ekn.discriminator` has no default on purpose, so this is what a project
+  # `ekn.environment` has no default on purpose, so this is what a project
   # that never thought about the prune scope looks like. It has to render --
   # a manifest is not a deploy -- and it has to fail the moment somebody
   # builds something that applies.
@@ -482,7 +480,7 @@ let
         (
           { ekn, ... }:
           {
-            ekn.discriminator = "easykubenix";
+            ekn.environment = "easykubenix";
             deployment.deployBranch = "deploy";
             deployment.units.apps.path = "clusters/home/apps";
             kubernetes.objects.argocd.Secret.repo-creds = ekn.envSeeded {
@@ -524,7 +522,7 @@ let
     specialArgs.mkThing = name: { kubernetes.objects.default.ConfigMap.${name}.data.made = "yes"; };
     modules = [
       {
-        ekn.discriminator = "easykubenix";
+        ekn.environment = "easykubenix";
         deployment.deployBranch = "deploy";
         deployment.units.bootstrap = {
           path = "bootstrap";
@@ -541,7 +539,7 @@ let
     specialArgs.parent = "shadowed";
     modules = [
       {
-        ekn.discriminator = "easykubenix";
+        ekn.environment = "easykubenix";
         deployment.deployBranch = "deploy";
         deployment.units.bootstrap = {
           path = "bootstrap";
@@ -549,7 +547,7 @@ let
             (
               { parent, ... }:
               {
-                kubernetes.objects.default.ConfigMap.probe.data.parentDiscriminator = parent.ekn.discriminator;
+                kubernetes.objects.default.ConfigMap.probe.data.parentEnvironment = parent.ekn.environment;
               }
             )
           ];
@@ -564,7 +562,7 @@ let
     inherit pkgs;
     modules = [
       {
-        ekn.discriminator = "easykubenix";
+        ekn.environment = "easykubenix";
         gitOps.deployBranch = "deploy";
         gitOps.targets.apps.path = "clusters/home/apps";
         kubernetes.objects.default.ConfigMap.routed = {
@@ -584,7 +582,7 @@ let
     inherit pkgs;
     modules = [
       {
-        ekn.discriminator = "servicesubnet";
+        ekn.environment = "servicesubnet";
         validation.serviceSubnet = "10.99.0.0/16,fd00:99::/112";
         kubernetes.objects.default.ConfigMap.probe.data.key = "value";
       }
@@ -624,7 +622,7 @@ let
       (
         { pkgs, ... }:
         {
-          ekn.discriminator = "transformers";
+          ekn.environment = "transformers";
           importyaml.sample = {
             src = transformerSource pkgs;
             transformers = [
@@ -715,7 +713,7 @@ let
       (
         { pkgs, lib, ... }:
         {
-          ekn.discriminator = "transformers";
+          ekn.environment = "transformers";
           importyaml.marker = {
             src = pkgs.writeText "pod.yaml" ''
               apiVersion: v1
@@ -756,14 +754,14 @@ let
       (
         { pkgs, ... }:
         {
-          ekn.discriminator = "transformers";
+          ekn.environment = "transformers";
           importyaml.sample.src = transformerSource pkgs;
         }
       )
     ];
   };
 
-  easyNoDiscriminator = import ../. {
+  easyNoEnvironment = import ../. {
     inherit pkgs;
     modules = [
       { kubernetes.objects.default.ConfigMap.test.data.key = "hello"; }
@@ -823,8 +821,8 @@ in
       noHardcodedRange = !(pkgs.lib.hasInfix "--service-cluster-ip-range=10.96.0.0/12" script);
     };
 
-  noDiscriminatorRenders = easyNoDiscriminator.config.kubernetes.generated;
-  noDiscriminatorDeployThrows = easyNoDiscriminator.config.kluctl.script;
+  noEnvironmentRenders = easyNoEnvironment.config.kubernetes.generated;
+  noEnvironmentDeployThrows = easyNoEnvironment.config.kluctl.script;
 
   eknRouting = {
     inherit (easy.config.kubernetes) generatedByPath deploymentUnits;
@@ -835,8 +833,8 @@ in
   deploymentUnitMetadataGenerated = easyGitOpsTargetMetadata.config.kubernetes.generated;
   gitOpsSubmodule = {
     inherit (easyGitOpsSubmodule.config.kubernetes) generated deploymentUnits;
-    nestedDiscriminator =
-      easyGitOpsSubmodule.config.deployment.units.bootstrap.instance.config.ekn.discriminator;
+    nestedEnvironment =
+      easyGitOpsSubmodule.config.deployment.units.bootstrap.instance.config.ekn.environment;
   };
   labelsAnnotationsCoercion = easyCoercion.config.kubernetes.generated;
   labelsAnnotationsCoercionDisabled = easyCoercionDisabled.config.kubernetes.generated;

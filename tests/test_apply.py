@@ -55,7 +55,7 @@ class FakeApi:
     ) -> None:
         self.namespaced = namespaced
         # (namespace, kind-as-reported-by-list, name) triples "already on
-        # the cluster" under the discriminator label before this apply.
+        # the cluster" under the environment label before this apply.
         self._listed = listed or []
         # What the API server serves, in the shape `ekn.apply.discover` reads:
         # one entry per (Kind, groupVersion), carrying the plural and whether
@@ -211,7 +211,7 @@ class TestDiscover:
         }
         api = FakeApi(resources=[self.MULTUS])
 
-        await apply_and_prune([spec], api=api, discriminator="full", prune=False)  # type: ignore[arg-type]
+        await apply_and_prune([spec], api=api, environment="full", prune=False)  # type: ignore[arg-type]
 
         assert api.patched == [("kube-system", "NetworkAttachmentDefinition", "dynhetz")]
 
@@ -228,7 +228,7 @@ class TestApplyAndPrune:
         }
         api = FakeApi(listed=[("argocd", "verticalpodautoscaler", "argocd-server")])
 
-        await apply_and_prune([spec], api=api, discriminator="full")  # type: ignore[arg-type]
+        await apply_and_prune([spec], api=api, environment="full")  # type: ignore[arg-type]
 
         assert api.deleted == []
 
@@ -245,7 +245,7 @@ class TestApplyAndPrune:
             ]
         )
 
-        await apply_and_prune([spec], api=api, discriminator="full")  # type: ignore[arg-type]
+        await apply_and_prune([spec], api=api, environment="full")  # type: ignore[arg-type]
 
         assert api.deleted == [("argocd", "verticalpodautoscaler", "long-gone")]
 

@@ -72,8 +72,8 @@ class GitOpsBranches(BaseModel):
 class _GitOpsTargetRef(BaseModel):
     """`deployment.units.<name>` as it reaches Python -- see easykubenix's
     gitops.nix, which narrows the submodule to the fields that survive
-    serialization. Only `path` is read on the render path; `discriminator` and
-    `fieldManager` are read on the apply path (see `_unpack_gitops_target`)."""
+    serialization. Only `path` is read on the render path; `fieldManager` is
+    read on the apply path (see `_unpack_gitops_target`)."""
 
     path: _NonEmptyStr
 
@@ -125,7 +125,7 @@ class SopsAgeIdentity(BaseModel):
 
 class KubeApplyConfigResult(BaseModel):
     objects: list[dict[str, Any]]
-    discriminator: str
+    environment: str
     field_manager: str
     resource_priority: dict[str, int]
     sops_age_identities: list[SopsAgeIdentity]
@@ -151,7 +151,7 @@ class _ValidationInfo(BaseModel):
 
 class _ApplyInfo(BaseModel):
     resource_priority: dict[str, int] = Field(alias="resourcePriority")
-    discriminator: str
+    environment: str
 
 
 class _InternalInfo(BaseModel):
@@ -569,11 +569,10 @@ async def evaluate_gitops_manifests(
 def _unpack_gitops_target(
     gitops_targets: JsonValue,
     target: str,
-) -> tuple[list[dict[str, Any]], list[JsonValue], str, str]:
-    """Pull one `kubernetes.deploymentUnits` entry apart into the four things
+) -> tuple[list[dict[str, Any]], list[JsonValue], str]:
+    """Pull one `kubernetes.deploymentUnits` entry apart into the three things
     a `--target` apply needs: its objects (with `.ekn` routing metadata
-    stripped), its raw-file paths, its own discriminator, and the field
-    manager to apply as.
+    stripped), its raw-file paths, and the field manager to apply as.
 
     Split out of `evaluate_kubeapply_config` purely to keep that function
     under the complexity limit -- every branch here is a shape guard over a
@@ -607,15 +606,11 @@ def _unpack_gitops_target(
     resolved_target = resolved.get("target")
     if not isinstance(resolved_target, dict):
         raise TypeError(f"gitops target {target!r} has no resolved target config")
-    discriminator = resolved_target.get("discriminator")
-    if not isinstance(discriminator, str):
-        raise TypeError(f"gitops target {target!r} has no discriminator")
-
     field_manager = resolved_target.get("fieldManager")
     if not isinstance(field_manager, str):
         raise TypeError(f"gitops target {target!r} has no fieldManager")
 
-    return objects, raw_file_paths, discriminator, field_manager
+    return objects, raw_file_paths, field_manager
 
 
 async def evaluate_kubeapply_config(
@@ -626,7 +621,7 @@ async def evaluate_kubeapply_config(
     target: str | None,
 ) -> KubeApplyConfigResult:
     """Resolve the object list `ekn kubeapply` should apply, plus the
-    discriminator/`ekn.resourcePriority` `apply_and_prune` needs
+    `ekn.environment`/`ekn.resourcePriority` `apply_and_prune` needs
     and `kubernetes.sopsAgeIdentities` (SOPS age decrypt identities some
     consumer needs bootstrapped as a Secret -- see `ekn.sops.ensure_age_identities`).
 
@@ -635,11 +630,10 @@ async def evaluate_kubeapply_config(
     `kubernetes.generated` instead -- never both, so this only ever forces
     the one field it actually needs.
 
-    The discriminator follows the same split, because it is the prune scope
-    and the prune scope has to match the apply scope: a `--target` apply uses
-    that target's own `gitOps.targets.<name>.discriminator`, so pruning it
-    cannot reach objects another target applied. Only the whole-`generated`
-    apply uses the instance-wide `ekn.discriminator`.
+    `ekn.environment` does not follow that split: both scopes are the same
+    environment. What separates them is the `ekn.dev/deployment-unit` label
+    easykubenix renders onto a unit's objects, which the caller turns into a
+    prune selector -- see `apply.prune_selector`.
     """
     async with (
         _session() as session,
@@ -650,8 +644,10 @@ async def evaluate_kubeapply_config(
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
 
+        environment = await proxy.attr("ekn").attr("environment").to_python()
+
         if target:
-            objects, raw_file_paths, discriminator, field_manager = _unpack_gitops_target(
+            objects, raw_file_paths, field_manager = _unpack_gitops_target(
                 await proxy.attr("kubernetes").attr("deploymentUnits").to_python(),
                 target,
             )
@@ -666,7 +662,6 @@ async def evaluate_kubeapply_config(
             raw_file_paths = [
                 entry["path"] for entry in raw_files if isinstance(entry, dict) and isinstance(entry.get("path"), str)
             ]
-            discriminator = await proxy.attr("ekn").attr("discriminator").to_python()
             # Only a GitOps target can name a field manager. A whole-`generated`
             # apply has no successor to hand ownership to -- it *is* the steady
             # state, and it runs again, so keeping conflict detection is right.
@@ -686,7 +681,7 @@ async def evaluate_kubeapply_config(
         return KubeApplyConfigResult.model_validate(
             {
                 "objects": objects,
-                "discriminator": discriminator,
+                "environment": environment,
                 "field_manager": field_manager,
                 "resource_priority": resource_priority,
                 "sops_age_identities": sops_age_identities,
@@ -807,12 +802,12 @@ async def _validation_config(proxy: Any) -> ValidationResult:
         debug = await v.attr("debug").to_python()
         k8s_version = await proxy.attr("kubernetes").attr("package").attr("version").to_python()
 
-        # ekn.resourcePriority/discriminator are plain data (no build), used by
+        # ekn.resourcePriority/environment are plain data (no build), used by
         # Validate.run()'s kr8s-based apply_and_prune -- see apply.py. They used
         # to live under `kluctl.*` and be handed to `kluctl deploy`; nothing
         # about them was ever kluctl-specific.
         resource_priority = await proxy.attr("ekn").attr("resourcePriority").to_python()
-        discriminator = await proxy.attr("ekn").attr("discriminator").to_python()
+        environment = await proxy.attr("ekn").attr("environment").to_python()
 
         # Cheap -- just {kind, namespace, name} triples, not full objects (see
         # kubernetes.nix's novalidateKeys) -- lets Validate.run() skip applying
@@ -845,7 +840,7 @@ async def _validation_config(proxy: Any) -> ValidationResult:
                 },
                 "ekn": {
                     "resourcePriority": resource_priority,
-                    "discriminator": discriminator,
+                    "environment": environment,
                 },
                 "internal": {"manifestJSONFile": {"outPath": manifest_out}},
                 "novalidateKeys": novalidate_keys,

@@ -76,15 +76,53 @@ let
     };
 in
 {
+  imports = [
+    (lib.mkRemovedOptionModule [ "ekn" "discriminator" ] ''
+      `ekn.discriminator' is now `ekn.environment', and the label it stamps
+      is now `ekn.dev/environment'. Rename the definition; the value can stay
+      the same.
+
+      The prune scope is now two labels, not one. `ekn' stamps
+      `ekn.dev/environment' at apply time, and every deployment unit renders
+      `ekn.dev/deployment-unit'. A whole-instance prune selects objects
+      carrying this environment and *no* unit label; `--target <name>' selects
+      this environment and that unit. So a per-unit discriminator is gone
+      too -- `deployment.units.<name>.discriminator' no longer exists, and a
+      nested instance inherits `ekn.environment' from its parent.
+
+      **A project that already deployed has live objects wearing the old
+      label.** `--prune' finds objects by label alone, so nothing recognises
+      them any more: they are orphaned, not deleted, and nothing reports it.
+      Relabel them once before the next prune:
+
+        kubectl get <kinds> -A -l ekn.dev/discriminator=<value> -o name \
+          | xargs kubectl label ekn.dev/environment=<value>
+    '')
+  ];
+
   options.ekn = {
-    discriminator = lib.mkOption {
+    environment = lib.mkOption {
       type = lib.types.str;
       description = ''
-        Value of the `ekn.dev/discriminator` label stamped on every object
-        `ekn` applies, and the selector it lists objects back by when
-        pruning. It is therefore the *prune scope*: `ekn kubeapply --prune`
-        deletes every object carrying this label that the current apply did
-        not produce.
+        Value of the `ekn.dev/environment` label stamped on every object
+        `ekn` applies, and half of the selector it lists objects back by
+        when pruning.
+
+        The other half is `ekn.dev/deployment-unit`, which every deployment
+        unit renders onto its own objects. Together they give two prune
+        scopes:
+
+        - `ekn kubeapply --prune` deletes objects carrying this environment
+          and *no* unit label, which the current apply did not produce.
+        - `ekn kubeapply --target <name> --prune` deletes objects carrying
+          this environment and that unit's label, which the current apply
+          did not produce.
+
+        The environment label is stamped by `ekn` at apply time rather than
+        rendered. That is what confines pruning to objects `ekn` itself
+        applied: an object a GitOps engine synced from the committed YAML
+        never carries it, so `ekn` and that engine cannot end up deleting
+        each other's work.
 
         Required, with no default, and that is deliberate.
 
@@ -101,20 +139,12 @@ in
         manifest never reads this, so a configuration that only builds
         `manifestJSONFile` does not have to answer.
 
-        **Choosing a value for a project that already deployed is not
+        **Changing the value of a project that already deployed is not
         free.** Live objects carry the label they were applied with, and
         `--prune` finds objects by that label alone. Pick a different word
         and the next prune no longer recognises anything the previous one
         would have: those objects are not deleted, they are orphaned, and
-        nothing reports it. A project answering this option for the first
-        time after upgrading past the removed default must therefore repeat
-        the value it was deploying under, which was `easykubenix`. Check the
-        derived per-target names too -- `deployment.units.<name>.discriminator`
-        is this value, a hyphen, and the target name, so it has to keep
-        matching what is on the cluster.
-
-        Per-GitOps-target applies get their own derived value -- see
-        `deployment.units.<name>.discriminator`.
+        nothing reports it.
       '';
       example = "acme-production";
     };

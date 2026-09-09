@@ -17,7 +17,7 @@ import ../. {
       {
         # Required, and this value is the prune scope for the throwaway
         # cluster the test boots. Nothing else deploys under it.
-        ekn.discriminator = "seed-integration";
+        ekn.environment = "seed-integration";
 
         kubernetes.objects.default.Secret.repo-creds = ekn.envSeeded {
           metadata.labels."argocd.argoproj.io/secret-type" = "repository";

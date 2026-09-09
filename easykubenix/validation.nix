@@ -189,7 +189,7 @@ in
             # barrier ordering, CRD-establish waits and SOPS handling are all
             # ekn's, and they are what runs against a real cluster.
             ${lib.getExe' eknPackage "ekn"} _applyManifest ${config.internal.manifestJSONFile} \
-              --discriminator ${config.ekn.discriminator} \
+              --environment ${config.ekn.environment} \
               --resource-priority-file ${resourcePriorityFile} \
               --novalidate-keys-file ${novalidateKeysFile} || begin
               echo "ekn apply failed"

@@ -15,10 +15,11 @@
   config = {
     clusterRepoURL = "https://github.com/example/cluster.git";
 
-    # Required, and no default. It is the prune scope, and it also names each
-    # deployment unit: `deployment.units.<name>.discriminator` is
-    # "${ekn.discriminator}-${name}".
-    ekn.discriminator = "bootstrap-example";
+    # Required, and no default. `ekn` stamps it as the `ekn.dev/environment`
+    # label on every object it applies, and that label is half the prune
+    # scope. The other half is `ekn.dev/deployment-unit`, which each
+    # deployment unit renders onto its own objects.
+    ekn.environment = "bootstrap-example";
 
     deployment = {
       enable = true;

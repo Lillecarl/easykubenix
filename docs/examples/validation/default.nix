@@ -10,7 +10,7 @@ let
       {
         # Required, and no default. `validationScript` applies through the
         # same path as `ekn kubeapply`, which prunes by this label.
-        ekn.discriminator = "validation-example";
+        ekn.environment = "validation-example";
 
         kubernetes.apiMappings = {
           Alertmanager = "monitoring.coreos.com/v1";

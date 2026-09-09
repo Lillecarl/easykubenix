@@ -14,7 +14,9 @@ missing the controllers:
     workload       the Deployment reaches Ready, so a kubelet answered
     idempotent     a second apply of the same generation changes nothing
     prune          the next generation deletes exactly what it dropped,
-                   and nothing wearing another discriminator
+                   and nothing in another environment
+    prune scope    a whole-instance prune leaves a deployment unit's objects
+                   alone, and a unit's own prune leaves the instance's alone
     prune gap      the documented limitation, written down as it behaves
 
 Everything runs inside the guest.  It sees the host /nix/store over hostfs,
@@ -31,7 +33,8 @@ from uml_runner.cluster import bring_up, get_json, kubectl, wait_for_pods
 # Deployment to be admitted, on a control plane that is a userspace process.
 APPLY_TIMEOUT = 15 * 60
 
-LABEL = "ekn.dev/discriminator"
+ENV_LABEL = "ekn.dev/environment"
+UNIT_LABEL = "ekn.dev/deployment-unit"
 
 # The kinds each generation puts on the cluster, by the name kubectl knows
 # them as.  `widget-parts` is the plural of the custom kind; asking for it by
@@ -39,7 +42,19 @@ LABEL = "ekn.dev/discriminator"
 RESOURCES = ("namespaces", "configmaps", "crds", "deployments", "widget-parts")
 
 
-async def apply(cp, settings, generation, discriminator):
+def selector(environment, unit=None):
+    """The label selector one apply owns.  Mirrors `apply.prune_selector`.
+
+    Written out again here rather than imported, deliberately.  A test that
+    asks the code under test what it prunes by cannot catch that answer being
+    wrong; this one asks the API server the same question independently.
+    """
+    if unit is None:
+        return f"{ENV_LABEL}={environment},!{UNIT_LABEL}"
+    return f"{ENV_LABEL}={environment},{UNIT_LABEL}={unit}"
+
+
+async def apply(cp, settings, generation, environment, unit=None):
     """Run one `ekn _applyManifest` in the guest, and return its output.
 
     The output is printed whether the apply passes or fails.  `ekn` logs a
@@ -47,12 +62,15 @@ async def apply(cp, settings, generation, discriminator):
     what the apply did -- an hour-long gate whose build log says only
     "passed" answers nothing when somebody asks it later.
     """
-    print(f"[kubeapply] applying {generation} as {discriminator}", flush=True)
+    scope = environment if unit is None else f"{environment}/{unit}"
+    print(f"[kubeapply] applying {generation} as {scope}", flush=True)
     command = (
         f"{settings['ekn']} _applyManifest {settings['manifests'][generation]}"
-        f" --discriminator {discriminator}"
+        f" --environment {environment}"
         f" --resource-priority-file {settings['resourcePriority']}"
     )
+    if unit is not None:
+        command += f" --unit {unit}"
     rc, out = await cp.execute(command, timeout=APPLY_TIMEOUT)
     if rc != 0:
         raise MachineError(f"[cp] {generation} did not apply (exit {rc}):\n{out}")
@@ -60,8 +78,8 @@ async def apply(cp, settings, generation, discriminator):
     return out
 
 
-async def inventory(cp, discriminator):
-    """Everything on the cluster wearing *discriminator*.
+async def inventory(cp, environment, unit=None):
+    """Everything on the cluster inside one prune scope.
 
     Maps ``(kind, namespace, name)`` to the object's resourceVersion, over
     every kind any generation here applies.  The label selector is the same
@@ -71,7 +89,7 @@ async def inventory(cp, discriminator):
     for resource in RESOURCES:
         data = await get_json(
             cp,
-            f"get {resource} --all-namespaces --selector {LABEL}={discriminator}",
+            f"get {resource} --all-namespaces --selector '{selector(environment, unit)}'",
         )
         for item in data["items"]:
             metadata = item["metadata"]
@@ -94,23 +112,23 @@ async def check_first_apply(cp, settings):
 
     Reading the CR back is the point.  An apply that exits 0 says the API
     server accepted a PATCH; it does not say the object is there, that the
-    discriminator label reached it, or that its own kind is being served
+    environment label reached it, or that its own kind is being served
     under the plural its CRD declares.
     """
-    await apply(cp, settings, "gen1", settings["discriminator"])
+    await apply(cp, settings, "gen1", settings["environment"])
 
     namespace = settings["namespace"]
     alpha = await get_json(cp, f"get widget-parts alpha --namespace {namespace}")
     expect("the custom resource's spec", alpha["spec"], {"size": 1})
     expect(
-        "the discriminator label on the custom resource",
-        alpha["metadata"]["labels"].get(LABEL),
-        settings["discriminator"],
+        "the environment label on the custom resource",
+        alpha["metadata"]["labels"].get(ENV_LABEL),
+        settings["environment"],
     )
 
     expect(
         "what gen1 put on the cluster",
-        keys(await inventory(cp, settings["discriminator"])),
+        keys(await inventory(cp, settings["environment"])),
         keys(
             {
                 ("Namespace", "none", namespace),
@@ -131,21 +149,82 @@ async def check_workload(cp, settings):
     print("[kubeapply] the workload is Ready", flush=True)
 
 
-async def check_other_discriminator(cp, settings):
+async def check_other_environment(cp, settings):
     """A second easykubenix instance, in a namespace of its own.
 
     It shares the custom kind with the generations above, and every prune
     after this has to leave it alone.  The label is the prune scope, and a
     prune that scanned by kind alone would take this out.
     """
-    await apply(cp, settings, "other", settings["otherDiscriminator"])
+    await apply(cp, settings, "other", settings["otherEnvironment"])
     expect(
-        "what the other discriminator owns",
-        keys(await inventory(cp, settings["otherDiscriminator"])),
+        "what the other environment owns",
+        keys(await inventory(cp, settings["otherEnvironment"])),
         keys(
             {
                 ("Namespace", "none", settings["otherNamespace"]),
                 ("WidgetPart", settings["otherNamespace"], "gamma"),
+            }
+        ),
+    )
+
+
+async def check_unit_apply(cp, settings):
+    """A deployment unit of the *same* environment, in the same namespace.
+
+    The unit label is rendered into the manifest, so `ekn` never writes it --
+    it only reads it back to scope a prune.  This asserts both halves of that
+    separation: the unit's objects answer the unit's selector, and they do not
+    answer the whole-instance one, which excludes anything carrying the label.
+    """
+    namespace = settings["namespace"]
+    environment, unit = settings["environment"], settings["unit"]
+    await apply(cp, settings, "unit", environment, unit)
+
+    expect(
+        "what the unit owns",
+        keys(await inventory(cp, environment, unit)),
+        keys(
+            {
+                ("ConfigMap", namespace, "bootstrap"),
+                ("ConfigMap", namespace, "bootstrap-extra"),
+            }
+        ),
+    )
+
+    instance = keys(await inventory(cp, environment))
+    for name in (f"ConfigMap/{namespace}/bootstrap", f"ConfigMap/{namespace}/bootstrap-extra"):
+        if name in instance:
+            raise MachineError(f"{name} answers the whole-instance selector, which excludes unit objects")
+
+
+async def check_unit_prune(cp, settings):
+    """A unit's own prune deletes inside its scope and nowhere else.
+
+    `unitReduced` drops `bootstrap-extra`, so this proves the unit scope is
+    live rather than merely narrow -- a selector that matched nothing would
+    pass the "leaves the instance alone" half on its own.
+    """
+    namespace = settings["namespace"]
+    environment, unit = settings["environment"], settings["unit"]
+    await apply(cp, settings, "unitReduced", environment, unit)
+
+    expect(
+        "what survives the unit's own prune",
+        keys(await inventory(cp, environment, unit)),
+        keys({("ConfigMap", namespace, "bootstrap")}),
+    )
+
+    expect(
+        "the instance after the unit's prune",
+        keys(await inventory(cp, environment)),
+        keys(
+            {
+                ("Namespace", "none", namespace),
+                ("ConfigMap", namespace, "settings"),
+                ("CustomResourceDefinition", "none", "widget-parts.ekn.example.com"),
+                ("Deployment", namespace, "probe"),
+                ("WidgetPart", namespace, "alpha"),
             }
         ),
     )
@@ -171,9 +250,9 @@ async def check_idempotent(cp, settings):
     def only_inert(inventoried):
         return {key: value for key, value in inventoried.items() if key[0] in inert}
 
-    before = only_inert(await inventory(cp, settings["discriminator"]))
-    await apply(cp, settings, "gen1", settings["discriminator"])
-    after = only_inert(await inventory(cp, settings["discriminator"]))
+    before = only_inert(await inventory(cp, settings["environment"]))
+    await apply(cp, settings, "gen1", settings["environment"])
+    after = only_inert(await inventory(cp, settings["environment"]))
 
     expect("a second apply of gen1 rewrote objects", after, before)
     print(f"[kubeapply] {len(before)} objects unchanged by a second apply", flush=True)
@@ -188,11 +267,11 @@ async def check_prune(cp, settings):
     that path broken.
     """
     namespace = settings["namespace"]
-    await apply(cp, settings, "gen2", settings["discriminator"])
+    await apply(cp, settings, "gen2", settings["environment"])
 
     expect(
         "what survives gen2",
-        keys(await inventory(cp, settings["discriminator"])),
+        keys(await inventory(cp, settings["environment"])),
         keys(
             {
                 ("Namespace", "none", namespace),
@@ -205,12 +284,28 @@ async def check_prune(cp, settings):
     )
 
     expect(
-        "the other discriminator after a prune",
-        keys(await inventory(cp, settings["otherDiscriminator"])),
+        "the other environment after a prune",
+        keys(await inventory(cp, settings["otherEnvironment"])),
         keys(
             {
                 ("Namespace", "none", settings["otherNamespace"]),
                 ("WidgetPart", settings["otherNamespace"], "gamma"),
+            }
+        ),
+    )
+
+    # The load-bearing half of the whole-instance selector.  gen2 shares this
+    # environment and this namespace with the unit, and applies neither of the
+    # unit's ConfigMaps -- so without the `!ekn.dev/deployment-unit` clause it
+    # would list them, find them absent from its desired set, and delete them.
+    # On a real cluster that is ArgoCD and the CNI.
+    expect(
+        "the deployment unit after a whole-instance prune",
+        keys(await inventory(cp, settings["environment"], settings["unit"])),
+        keys(
+            {
+                ("ConfigMap", namespace, "bootstrap"),
+                ("ConfigMap", namespace, "bootstrap-extra"),
             }
         ),
     )
@@ -230,12 +325,12 @@ async def check_prune_gap(cp, settings):
     delete the test.
     """
     namespace = settings["namespace"]
-    await apply(cp, settings, "gen3", settings["discriminator"])
+    await apply(cp, settings, "gen3", settings["environment"])
 
     expect(
         "what survives gen3 -- see this test's docstring, which explains why"
         " the wanted list below still holds a WidgetPart",
-        keys(await inventory(cp, settings["discriminator"])),
+        keys(await inventory(cp, settings["environment"])),
         keys(
             {
                 ("Namespace", "none", namespace),
@@ -254,7 +349,7 @@ async def check_prune_gap(cp, settings):
 async def test(vms):
     settings = vms.settings
     print(
-        f"[kubeapply] kubernetes {settings['kubernetesVersion']}, discriminator {settings['discriminator']}",
+        f"[kubeapply] kubernetes {settings['kubernetesVersion']}, environment {settings['environment']}",
         flush=True,
     )
 
@@ -262,9 +357,11 @@ async def test(vms):
 
     await check_first_apply(cp, settings)
     await check_workload(cp, settings)
-    await check_other_discriminator(cp, settings)
+    await check_other_environment(cp, settings)
+    await check_unit_apply(cp, settings)
     await check_idempotent(cp, settings)
     await check_prune(cp, settings)
+    await check_unit_prune(cp, settings)
     await check_prune_gap(cp, settings)
 
     print(

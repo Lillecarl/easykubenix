@@ -106,17 +106,28 @@ See the demo for examples
 
 `ekn kubeapply` server-side-applies the generated objects and can prune what a
 previous apply left behind. It stamps every object it applies with an
-`ekn.dev/discriminator` label, then lists objects back by that label and deletes
+`ekn.dev/environment` label, then lists objects back by label and deletes
 the ones the current apply no longer produces — `kubectl apply --prune -l` with
 the ordering and SOPS handling filled in.
 
-The label value comes from `ekn.discriminator`, or from
-`deployment.units.<name>.discriminator` for a `--target` apply, so pruning one
-unit can never reach another's objects.
+Two labels decide the scope, not one:
 
-`ekn` stamps that label at apply time, so only the objects `ekn` itself applies
-carry it. On a GitOps cluster that is the minority: nearly everything reaches
-the API server through ArgoCD, which applies the committed YAML.
+| apply | prune selector |
+| --- | --- |
+| `ekn kubeapply --prune` | `ekn.dev/environment=E,!ekn.dev/deployment-unit` |
+| `ekn kubeapply --target X --prune` | `ekn.dev/environment=E,ekn.dev/deployment-unit=X` |
+
+`E` is `ekn.environment`. The not-exists clause is what keeps the two apart. A
+deployment unit's objects never reach `kubernetes.generated` — a bootstrap unit
+renders a whole nested instance, and only `--target <name>` applies it — so
+without that clause a whole-instance prune would find them, see them absent
+from its own desired set, and delete them.
+
+`ekn` stamps the environment label at apply time, so only the objects `ekn`
+itself applies carry it. On a GitOps cluster that is the minority: nearly
+everything reaches the API server through ArgoCD, which applies the committed
+YAML. That is deliberate — it is what stops `ekn` and the engine pruning each
+other's work.
 
 So a unit records itself in the manifest instead. Every object in
 `deployment.units.<name>` renders with an `ekn.dev/deployment-unit` label
@@ -174,10 +185,11 @@ have a different lifecycle from everything else afterwards.
 The nested instance is a complete configuration, not a cut-down one, so it can
 render a Helm chart like any other. It gets its parent's evaluated config as the
 `parent` module argument — a root Application has to name the branch it syncs —
-and its `ekn.discriminator` defaults to the unit's, so the prune scope agrees
-with what the apply uses. Read the parent's *inputs* through `parent`
-(`deployment.deployBranch`, `ekn.discriminator`); reading its rendered outputs closes
-a loop back through the nested instance and recurses.
+and its `ekn.environment` defaults to the parent's, because both applies stamp
+that label and the unit label is what separates the scopes. Read the parent's
+*inputs* through `parent` (`deployment.deployBranch`, `ekn.environment`);
+reading its rendered outputs closes a loop back through the nested instance and
+recurses.
 
 ### Handing a bootstrap unit over
 
@@ -230,7 +242,8 @@ still generate a minimal kluctl project and deployment script. It predates
 `ekn kubeapply`, which now covers the same ground natively. See
 [issue #2](https://github.com/Lillecarl/easykubenix/issues/2); `kluctl.*`
 options still work, and `kluctl.discriminator`/`kluctl.resourcePriority` have
-moved to `ekn.*` with warnings pointing at the new paths.
+moved to `ekn.environment`/`ekn.resourcePriority` with warnings pointing at the
+new paths.
 
 [Documentation](https://lillecarl.github.io/easykubenix/)
 

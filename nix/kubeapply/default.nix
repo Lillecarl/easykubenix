@@ -55,6 +55,17 @@ let
     builtins.toJSON evals.gen1.config.ekn.resourcePriority
   );
 
+  # The `unit` set has no objects of its own: they all live in a deployment
+  # unit, so `kubernetes.generated` is empty and `manifestJSONFile` with it.
+  # Read them where `ekn kubeapply --target` reads them, which is also the
+  # only place the `ekn.dev/deployment-unit` label is stamped.
+  unitManifestFiles = lib.mapAttrs (
+    name: _module:
+    pkgs.writeText "${name}-manifest.json" (
+      builtins.toJSON evals.${name}.config.kubernetes.deploymentUnits.bootstrap.objects
+    )
+  ) (lib.getAttrs [ "unit" "unitReduced" ] manifests.modules);
+
   # A single control plane. `bring_up` unTaints a one-node cluster, because
   # there is nowhere else to put a Pod.
   #
@@ -83,13 +94,16 @@ uml.mkTest {
   settings = {
     ekn = lib.getExe' evals.gen1.passthru.ekn "ekn";
     resourcePriority = "${resourcePriorityFile}";
-    manifests = lib.mapAttrs (_name: eval: "${eval.manifestJSONFile}") evals;
+    manifests =
+      (lib.mapAttrs (_name: eval: "${eval.manifestJSONFile}") evals)
+      // (lib.mapAttrs (_name: file: "${file}") unitManifestFiles);
 
     inherit (manifests)
       namespace
       otherNamespace
-      discriminator
-      otherDiscriminator
+      environment
+      otherEnvironment
+      unit
       ;
 
     inherit (images) workloadImage;
