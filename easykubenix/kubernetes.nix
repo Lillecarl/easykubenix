@@ -249,17 +249,29 @@ let
   # --prune`; a whole-instance `--prune` skips it, by selecting on the
   # label's *absence*. A label that flips depending on which apply ran last
   # makes that scope flip too.
+  # A name no unit of *this* instance declares is left alone rather than
+  # rejected, and that is not laziness about typos.
+  #
+  # A nested instance's routing is ignored on purpose -- see
+  # `deployment.units.<name>.modules` in gitops.nix. `ekn.deploymentUnit`
+  # selects between one instance's units, and a nested instance's units are a
+  # different set, so the parent takes every object the nested instance
+  # renders whatever it routes to. Throwing here would force a nested
+  # instance to declare a unit purely so that a name it does not use resolves.
+  #
+  # The nested instance's objects still get the label. The parent stamps them,
+  # through `deploymentUnits`, with the parent unit they actually belong to.
+  #
+  # A typo in *this* instance still fails: `deploymentUnits` groups by the
+  # same attribute and throws there, naming the object's unit and the declared
+  # set.
   stampRouted =
     object:
     let
       unit = object.ekn.deploymentUnit or null;
-      declared =
-        config.deployment.units.${unit} or (throw ''
-          ekn.deploymentUnit references unknown deployment unit "${unit}".
-          Declared units: ${lib.concatStringsSep ", " (lib.attrNames config.deployment.units)}
-        '');
+      declared = config.deployment.units.${unit} or null;
     in
-    if unit == null then object else stampTargetMetadata declared object;
+    if unit == null || declared == null then object else stampTargetMetadata declared object;
 
   allGenerated = map stampRouted (generatedWithEkn ++ checkedCrds);
 

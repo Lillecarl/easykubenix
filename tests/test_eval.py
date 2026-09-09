@@ -743,6 +743,33 @@ class TestGitOpsTargetMetadata:
         # A unit that renamed the value is stamped with the renamed one.
         assert by_name["renamed-unit"]["metadata"]["labels"]["ekn.dev/deployment-unit"] == "renamed-scope"
 
+    async def test_a_nested_instance_may_route_to_a_name_it_does_not_declare(self) -> None:
+        """`deployment.units.<name>.modules` documents that its routing is ignored.
+
+        Unit names belong to one instance. A nested instance's units are a
+        different set, so the parent takes every object it renders whatever
+        that object routes to -- and a bootstrap instance routing to the
+        parent's unit name is the shape people write. Rejecting it would force
+        a nested instance to declare a unit purely so a name it never uses
+        resolves.
+        """
+        result = await evaluate_file(NIX_TEST_FILE, "nestedRoutingIgnored")
+        assert isinstance(result, dict)
+
+        # The nested instance's own render leaves the object alone: its
+        # `bootstrap` names nothing here.
+        nested = result["nestedGenerated"]
+        assert [obj["metadata"]["name"] for obj in nested] == ["root"]
+        assert "labels" not in nested[0]["metadata"]
+
+        # The parent stamps it, with the unit it actually belongs to. That is
+        # where the label has to come from, and it still does.
+        objects = result["deploymentUnits"]["bootstrap"]["objects"]
+        assert objects[0]["metadata"]["labels"] == {
+            "app.kubernetes.io/instance": "argocd",
+            "ekn.dev/deployment-unit": "bootstrap",
+        }
+
     async def test_dependencies_resolve_to_a_transitive_closure(self) -> None:
         """Every unit whose objects go into one `--target` apply.
 

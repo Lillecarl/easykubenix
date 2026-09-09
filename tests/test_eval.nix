@@ -370,6 +370,32 @@ let
     ];
   };
 
+  # A nested instance routing to a unit name only the parent declares. That is
+  # the documented shape -- `deployment.units.<name>.modules` says a nested
+  # instance's routing is ignored, because unit names belong to one instance
+  # and a nested instance's are a different set. Forcing it must not throw.
+  easyNestedRoutingIgnored = import ../. {
+    inherit pkgs;
+    modules = [
+      {
+        ekn.environment = "easykubenix";
+        deployment.deployBranch = "deploy";
+        deployment.units.bootstrap = {
+          path = "bootstrap";
+          labels."app.kubernetes.io/instance" = "argocd";
+          modules = [
+            {
+              kubernetes.objects.default.ConfigMap.root = {
+                ekn.deploymentUnit = "bootstrap";
+                data.k = "v";
+              };
+            }
+          ];
+        };
+      }
+    ];
+  };
+
   # Unit dependencies, with the two shapes that make a closure a closure:
   # `bootstrap` reaches `certs` only through `secrets`, and `secrets` and
   # `argocd` both reach `certs`, which must still appear once.
@@ -920,6 +946,12 @@ in
   # the error without eagerly evaluating it above.
   badUnitNameThrows = easyBadUnitName.config.kubernetes.generated;
   declinedUnitLabelThrows = easyDeclinedUnitLabel.config.kubernetes.generated;
+
+  nestedRoutingIgnored = {
+    inherit (easyNestedRoutingIgnored.config.kubernetes) deploymentUnits;
+    nestedGenerated =
+      easyNestedRoutingIgnored.config.deployment.units.bootstrap.instance.config.kubernetes.generated;
+  };
 
   unitDependencies = pkgs.lib.mapAttrs (
     _name: entry: entry.dependencies
