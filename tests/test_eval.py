@@ -923,6 +923,63 @@ class TestGitOpsTargetSubmoduleEndToEnd:
         raw = next(obj for obj in cfg.objects if obj["metadata"]["name"] == "raw")
         assert "labels" not in raw["metadata"]
 
+    @staticmethod
+    def _dependency_probe(tmp_path: Path) -> Path:
+        probe = tmp_path / "dependencies.nix"
+        probe.write_text(f"""
+            import {PROJECT_ROOT} {{
+              modules = [{{
+                ekn.environment = "easykubenix";
+                deployment.deployBranch = "deploy";
+                deployment.units.secrets = {{
+                  path = "secrets";
+                  modules = [{{
+                    kubernetes.objects.argocd.Secret.repo.stringData.url = "x";
+                  }}];
+                }};
+                deployment.units.bootstrap = {{
+                  path = "bootstrap";
+                  fieldManager = "argocd-controller";
+                  dependencies = [ "secrets" ];
+                  modules = [{{
+                    kubernetes.objects.argocd.ConfigMap.root.data.key = "value";
+                  }}];
+                }};
+              }}];
+            }}
+        """)
+        return probe
+
+    async def test_a_target_apply_brings_its_dependencies_along(self, tmp_path: Path) -> None:
+        """`--target bootstrap` applies the secrets unit too, as its own group.
+
+        Grouped rather than concatenated because `fieldManager` is per unit.
+        Applying the secrets unit as `argocd-controller` would put two
+        managers on the same fields the moment anyone runs
+        `ekn kubeapply --target secrets`.
+        """
+        cfg = await evaluate_kubeapply_config(self._dependency_probe(tmp_path), None, None, None, "bootstrap")
+
+        # The dependency first, the named unit last.
+        assert [group.unit for group in cfg.groups] == ["secrets", "bootstrap"]
+        assert [group.field_manager for group in cfg.groups] == ["ekn", "argocd-controller"]
+        assert [[obj["metadata"]["name"] for obj in group.objects] for group in cfg.groups] == [["repo"], ["root"]]
+
+        # Each unit's objects carry their own unit label, so each keeps its
+        # own prune scope no matter which apply brought them.
+        by_name = {obj["metadata"]["name"]: obj for obj in cfg.objects}
+        assert by_name["repo"]["metadata"]["labels"]["ekn.dev/deployment-unit"] == "secrets"
+        assert by_name["root"]["metadata"]["labels"]["ekn.dev/deployment-unit"] == "bootstrap"
+
+        # `field_manager` still answers for the unit the user named.
+        assert cfg.field_manager == "argocd-controller"
+
+    async def test_a_whole_instance_apply_is_one_group(self, tmp_path: Path) -> None:
+        cfg = await evaluate_kubeapply_config(self._probe(tmp_path), None, None, None, None)
+
+        assert [group.unit for group in cfg.groups] == [None]
+        assert cfg.groups[0].field_manager == DEFAULT_FIELD_MANAGER
+
     async def test_field_manager_defaults_without_a_target(self, tmp_path: Path) -> None:
         # No `--target`: the objects come from `kubernetes.generated`, which
         # belongs to no target and so has nobody to name a manager.

@@ -24,7 +24,9 @@ from ekn._cli import Command, build_parser, complete, dispatch, opt, pos
 from ekn.apply import apply_and_prune
 from ekn.clusterdiff import cluster_diff
 from ekn.eval import (
+    ApplyGroup,
     GitOpsManifestsResult,
+    KubeApplyConfigResult,
     evaluate_cache_config,
     evaluate_file,
     evaluate_flake,
@@ -637,6 +639,54 @@ class Rollback(AttrCommand):
         await try_jj_status(".")
 
 
+async def _apply_groups(
+    cfg: KubeApplyConfigResult,
+    *,
+    api: kr8s.asyncio.Api,
+    target: str | None,
+    prune: bool,
+) -> None:
+    """Decrypt and seed-resolve every group, then apply them in order.
+
+    Two passes, deliberately. A missing seed variable has to abort the whole
+    run rather than leave a cluster half bootstrapped, and with `--target`
+    pulling a dependency's objects in, "half" now means a dependency applied
+    and the unit that needs it not. A seed already in the cluster with its
+    variable unset is applied with the value the cluster already holds, so its
+    other fields still reconcile -- see `seeds.resolve`.
+
+    Split out of `KubeApply.run` to keep that method under the complexity
+    limit.
+    """
+    prepared: list[tuple[ApplyGroup, seeds.SeedPlan]] = []
+    try:
+        for group in cfg.groups:
+            decrypted = [await maybe_decrypt(obj) for obj in group.objects]
+            prepared.append((group, await seeds.resolve(decrypted, api=api)))
+    except seeds.MissingVariablesError as exc:
+        raise SystemExit(str(exc)) from exc
+    for _group, plan in prepared:
+        seeds.report(plan.actions)
+
+    for group, plan in prepared:
+        await apply_and_prune(
+            plan.objects,
+            api=api,
+            environment=cfg.environment,
+            unit=group.unit,
+            field_manager=group.field_manager,
+            resource_priority=cfg.resource_priority,
+            # Only the unit the user named. A dependency's objects are
+            # applied, not pruned: a `--prune` that deletes in a scope nobody
+            # asked about is a surprise, and `ekn kubeapply --target
+            # <dependency> --prune` is right there when you want it.
+            prune=prune and group.unit == target,
+            # A seed whose variable is unset is not ours to delete. See
+            # `SeedPlan.protected`.
+            protect=plan.protected,
+        )
+
+
 class KubeApply(AttrCommand):
     """Apply Kubernetes objects directly against the current kubeconfig
     context: server-side apply in barrier order, with optional pruning.
@@ -690,30 +740,8 @@ class KubeApply(AttrCommand):
         api = await kr8s.asyncio.api()
         if cfg.sops_age_identities:
             await ensure_age_identities(cfg.sops_age_identities, api=api)
-        objects = [await maybe_decrypt(obj) for obj in cfg.objects]
-        # Resolve seeded credentials before anything is applied, so a missing
-        # variable aborts the whole run rather than leaving a cluster half
-        # bootstrapped. A seed already in the cluster with its variable unset
-        # is applied with the value the cluster already holds, so its other
-        # fields still reconcile -- see `seeds.resolve`.
         try:
-            plan = await seeds.resolve(objects, api=api)
-        except seeds.MissingVariablesError as exc:
-            raise SystemExit(str(exc)) from exc
-        seeds.report(plan.actions)
-        try:
-            await apply_and_prune(
-                plan.objects,
-                api=api,
-                environment=cfg.environment,
-                unit=self.target,
-                field_manager=cfg.field_manager,
-                resource_priority=cfg.resource_priority,
-                prune=self.prune,
-                # A seed whose variable is unset is not ours to delete. See
-                # `SeedPlan.protected`.
-                protect=plan.protected,
-            )
+            await _apply_groups(cfg, api=api, target=self.target, prune=self.prune)
         except kr8s.ServerError as exc:
             _report_server_error("apply", exc)
 

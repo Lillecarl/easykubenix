@@ -191,6 +191,29 @@ that label and the unit label is what separates the scopes. Read the parent's
 reading its rendered outputs closes a loop back through the nested instance and
 recurses.
 
+### Unit dependencies
+
+A unit can name other units it needs on the cluster:
+
+```nix
+deployment.units.bootstrap.dependencies = [ "bootstrap-secrets" ];
+```
+
+`ekn kubeapply --target bootstrap` then applies `bootstrap-secrets`' objects
+too, transitively, each unit as its own group with its own `fieldManager`. The
+point is the other direction: re-seeding the credentials is
+`ekn kubeapply --target bootstrap-secrets` on its own, rather than a full
+bootstrap apply — which is what you do only after breaking a cluster badly
+enough that ArgoCD or the CNI is gone.
+
+`--prune` still covers only the unit you named. Each unit keeps its own prune
+scope, because `ekn.dev/deployment-unit` is rendered per unit, so bringing a
+dependency along never widens what gets deleted.
+
+A dependency cycle is an error, and so is a name no `deployment.units` entry
+declares. `ekn commit` ignores dependencies entirely: they are about what has
+to be on the cluster, not about where a manifest lives.
+
 ### Handing a bootstrap unit over
 
 Bootstrapping is only half the job: the same objects usually have to become

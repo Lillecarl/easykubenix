@@ -123,12 +123,43 @@ class SopsAgeIdentity(BaseModel):
     sops_files: list[_NonEmptyStr] = Field(default_factory=list, alias="sopsFiles")
 
 
-class KubeApplyConfigResult(BaseModel):
-    objects: list[dict[str, Any]]
-    environment: str
+class ApplyGroup(BaseModel):
+    """One deployment unit's complete object set, and how to apply it.
+
+    A `--target X` apply is a list of these: every unit X depends on, deepest
+    first, and X itself last. A whole-instance apply is a single group with no
+    unit.
+
+    Grouped rather than one flat list because `fieldManager` is per unit. A
+    bootstrap unit hands its objects to the controller that takes them over,
+    and applying a dependency's objects under *that* manager would put two
+    managers on the same fields the moment anyone applies the dependency on
+    its own.
+    """
+
+    unit: str | None
     field_manager: str
+    objects: list[dict[str, Any]]
+
+
+class KubeApplyConfigResult(BaseModel):
+    groups: list[ApplyGroup]
+    environment: str
     resource_priority: dict[str, int]
     sops_age_identities: list[SopsAgeIdentity]
+
+    @property
+    def objects(self) -> list[dict[str, Any]]:
+        """Every object this apply sends, across all groups, in apply order."""
+        return [obj for group in self.groups for obj in group.objects]
+
+    @property
+    def field_manager(self) -> str:
+        """The manager the *named* unit applies as -- the last group's.
+
+        A dependency keeps its own; see `ApplyGroup`.
+        """
+        return self.groups[-1].field_manager
 
 
 class _ValidationPackageInfo(BaseModel):
@@ -569,10 +600,11 @@ async def evaluate_gitops_manifests(
 def _unpack_gitops_target(
     gitops_targets: JsonValue,
     target: str,
-) -> tuple[list[dict[str, Any]], list[tuple[JsonValue, str | None]], str]:
-    """Pull one `kubernetes.deploymentUnits` entry apart into the three things
+) -> tuple[list[dict[str, Any]], list[tuple[JsonValue, str | None]], str, list[str]]:
+    """Pull one `kubernetes.deploymentUnits` entry apart into the four things
     a `--target` apply needs: its objects (with `.ekn` routing metadata
-    stripped), its raw-file paths, and the field manager to apply as.
+    stripped), its raw-file paths, the field manager to apply as, and the
+    units it depends on.
 
     Split out of `evaluate_kubeapply_config` purely to keep that function
     under the complexity limit -- every branch here is a shape guard over a
@@ -610,9 +642,18 @@ def _unpack_gitops_target(
     if not isinstance(field_manager, str):
         raise TypeError(f"gitops target {target!r} has no fieldManager")
 
+    dependencies = resolved.get("dependencies") or []
+    if not isinstance(dependencies, list):
+        raise TypeError(f"gitops target {target!r} dependencies must be a list")
+
     # Every raw file in a unit's entry belongs to that unit, by construction:
     # `kubernetes.deploymentUnits` groups them by their own `deploymentUnit`.
-    return objects, [(path, target) for path in raw_file_paths], field_manager
+    return (
+        objects,
+        [(path, target) for path in raw_file_paths],
+        field_manager,
+        [name for name in dependencies if isinstance(name, str)],
+    )
 
 
 def _raw_manifest_in_unit(path: str, unit: str | None) -> dict[str, Any]:
@@ -648,6 +689,28 @@ def _raw_manifest_in_unit(path: str, unit: str | None) -> dict[str, Any]:
     return {**manifest, "metadata": metadata}
 
 
+def _load_raw_manifests(paths: list[tuple[str, str | None]]) -> list[dict[str, Any]]:
+    """Read `kubernetes.rawFiles` entries here, in Python.
+
+    Not by having Nix `builtins.readFile` + `fromJSON`/eval them, which is
+    exactly the round-trip `kubernetes.rawFiles` exists to avoid (see its
+    description in easykubenix's kubernetes.nix). Once parsed, a
+    raw-file-sourced manifest applies through
+    `apply_and_prune`/`maybe_decrypt` identically to any other object.
+    """
+    return [_raw_manifest_in_unit(path, unit) for path, unit in paths if isinstance(path, str)]
+
+
+def _unit_group(units: JsonValue, name: str) -> dict[str, Any]:
+    """One deployment unit as an `ApplyGroup`'s fields."""
+    objects, raw_file_paths, field_manager, _ = _unpack_gitops_target(units, name)
+    return {
+        "unit": name,
+        "field_manager": field_manager,
+        "objects": [*objects, *_load_raw_manifests([(str(p), u) for p, u in raw_file_paths])],
+    }
+
+
 async def evaluate_kubeapply_config(
     file: str | PathLike[str] | None,
     flake_uri: str | None,
@@ -661,9 +724,10 @@ async def evaluate_kubeapply_config(
     consumer needs bootstrapped as a Secret -- see `ekn.sops.ensure_age_identities`).
 
     `target` narrows to one `kubernetes.deploymentUnits` entry's objects,
-    `.ekn` routing metadata stripped; omitted, to_python's the full
-    `kubernetes.generated` instead -- never both, so this only ever forces
-    the one field it actually needs.
+    `.ekn` routing metadata stripped, preceded by one group per unit that
+    entry depends on; omitted, to_python's the full `kubernetes.generated`
+    instead as a single group -- never both, so this only ever forces the one
+    field it actually needs.
 
     `ekn.environment` does not follow that split: both scopes are the same
     environment. What separates them is the `ekn.dev/deployment-unit` label
@@ -682,50 +746,45 @@ async def evaluate_kubeapply_config(
         environment = await proxy.attr("ekn").attr("environment").to_python()
 
         if target:
-            objects, raw_file_paths, field_manager = _unpack_gitops_target(
-                await proxy.attr("kubernetes").attr("deploymentUnits").to_python(),
-                target,
-            )
+            units = await proxy.attr("kubernetes").attr("deploymentUnits").to_python()
+            _, _, _, dependencies = _unpack_gitops_target(units, target)
+            # The dependency closure first, deepest first, then the named
+            # unit. Each keeps its own `fieldManager`; see `ApplyGroup`.
+            groups = [_unit_group(units, name) for name in [*dependencies, target]]
         else:
             generated = await proxy.attr("kubernetes").attr("generated").to_python()
             if not isinstance(generated, list):
                 raise ValueError("kubernetes.generated did not evaluate to a list")
-            objects = generated
             raw_files = await proxy.attr("kubernetes").attr("rawFiles").to_python()
             if not isinstance(raw_files, list):
                 raise ValueError("kubernetes.rawFiles did not evaluate to a list")
-            raw_file_paths = []
+            raw_file_paths: list[tuple[str, str | None]] = []
             for entry in raw_files:
-                if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                if not isinstance(entry, dict):
+                    continue
+                entry_path = entry.get("path")
+                if not isinstance(entry_path, str):
                     continue
                 entry_unit = entry.get("deploymentUnit")
-                raw_file_paths.append((entry["path"], entry_unit if isinstance(entry_unit, str) else None))
-            # Only a GitOps target can name a field manager. A whole-`generated`
-            # apply has no successor to hand ownership to -- it *is* the steady
-            # state, and it runs again, so keeping conflict detection is right.
-            field_manager = DEFAULT_FIELD_MANAGER
-
-        # Read here, in Python -- not by having Nix `builtins.readFile` +
-        # `fromJSON`/eval it, which is exactly the round-trip
-        # `kubernetes.rawFiles` exists to avoid (see its description in
-        # easykubenix's kubernetes.nix). Appended to `objects`: once
-        # parsed, a raw-file-sourced manifest applies through
-        # apply_and_prune/maybe_decrypt identically to any other object.
-        objects = [
-            *objects,
-            *(_raw_manifest_in_unit(path, raw_unit) for path, raw_unit in raw_file_paths if isinstance(path, str)),
-        ]
-
-        resource_priority = await proxy.attr("ekn").attr("resourcePriority").to_python()
-        sops_age_identities = await proxy.attr("kubernetes").attr("sopsAgeIdentities").to_python()
+                raw_file_paths.append((entry_path, entry_unit if isinstance(entry_unit, str) else None))
+            groups = [
+                {
+                    "unit": None,
+                    # Only a deployment unit can name a field manager. A
+                    # whole-`generated` apply has no successor to hand
+                    # ownership to -- it *is* the steady state, and it runs
+                    # again, so keeping conflict detection is right.
+                    "field_manager": DEFAULT_FIELD_MANAGER,
+                    "objects": [*generated, *_load_raw_manifests(raw_file_paths)],
+                }
+            ]
 
         return KubeApplyConfigResult.model_validate(
             {
-                "objects": objects,
+                "groups": groups,
                 "environment": environment,
-                "field_manager": field_manager,
-                "resource_priority": resource_priority,
-                "sops_age_identities": sops_age_identities,
+                "resource_priority": await proxy.attr("ekn").attr("resourcePriority").to_python(),
+                "sops_age_identities": await proxy.attr("kubernetes").attr("sopsAgeIdentities").to_python(),
             }
         )
 
