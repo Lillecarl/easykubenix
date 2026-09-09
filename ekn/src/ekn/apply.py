@@ -277,6 +277,7 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     crd_establish_timeout: int = 60,
     prune: bool = True,
     prune_kinds: set[str] | None = None,
+    protect: set[tuple[str, str, str]] | None = None,
 ) -> None:
     """Apply `objects` in barrier order, then (if `prune`) prune anything
     previously applied under the same discriminator that this run no longer
@@ -297,12 +298,27 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     passes it yet; `None` (the default) preserves today's current-apply-only
     scanning exactly.
 
+    `protect` names `(namespace, kind, name)` identities that pruning must
+    never delete, even though this apply did not produce them. Absence from
+    the desired set normally means "removed from the configuration"; for
+    these it means "this run could not safely produce it", which is not the
+    same thing and must not be answered with a delete.
+
+    The case it exists for is a seeded credential. `seeds.resolve` leaves an
+    object out of the apply set when the live value cannot be read back --
+    a non-UTF-8 value, or the key already gone -- because there is nothing to
+    write back and applying the rendered object would overwrite the
+    credential with the literal `$ekn:env:VARNAME`. Without this, the very
+    next `--prune` deletes a credential nobody can recreate: the variable was
+    exported once, at bootstrap, and is long gone from the environment.
+
     `prune=False` (the default for `ekn kubeapply` against a real cluster,
     e.g. a narrow `--target` slice) avoids pruning objects that are simply
     outside the current apply's scope -- the same "two controllers fighting
     over pruning" concern kluctl.nix's `excludeGitopsTargets` documents.
     """
     resource_priority = resource_priority or {}
+    protected = protect or set()
     desired_keys: set[tuple[str, str, str]] = set()
     kinds: set[str] = set()
     # The class each kind was applied through, kept for the prune scan. See
@@ -336,7 +352,33 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     if not prune:
         return
 
-    scan_kinds = kinds | (prune_kinds or set())
+    await _prune(
+        api=api,
+        discriminator=discriminator,
+        discriminator_label=discriminator_label,
+        scan_kinds=kinds | (prune_kinds or set()),
+        classes=classes,
+        desired_keys=desired_keys,
+        protected=protected,
+    )
+
+
+async def _prune(  # noqa: PLR0913 -- one caller, and every argument is state that caller built
+    *,
+    api: Api,
+    discriminator: str,
+    discriminator_label: str,
+    scan_kinds: set[str],
+    classes: dict[str, type[APIObject]],
+    desired_keys: set[tuple[str, str, str]],
+    protected: set[tuple[str, str, str]],
+) -> None:
+    """Delete objects carrying this run's discriminator that it did not produce.
+
+    Split out of `apply_and_prune` to keep that function under the complexity
+    limit rather than growing its `noqa`. The apply half and the prune half
+    share only the four values passed here.
+    """
     _log.info("pruning", kinds=len(scan_kinds), discriminator=discriminator)
     for kind in scan_kinds:
         # The class, when this apply built one. `async_get` takes either, and
@@ -372,6 +414,11 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
             # listed object's mangled one -- otherwise every CRD-based
             # object's key mismatches and everything gets "pruned".
             key = (obj.namespace or "none", kind, obj.name)
+            if key in protected:
+                # Absent from `desired_keys` and still not ours to delete.
+                # See `protect` on `apply_and_prune`.
+                _log.info("keeping protected object", kind=kind, namespace=obj.namespace, name=obj.name)
+                continue
             if key not in desired_keys:
                 _log.info("pruning", kind=kind, namespace=obj.namespace, name=obj.name)
                 await obj.delete()

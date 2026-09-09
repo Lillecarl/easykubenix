@@ -271,6 +271,29 @@ class SeedPlan(NamedTuple):
     objects: list[Manifest]
     actions: list[SeedAction]
 
+    @property
+    def protected(self) -> set[tuple[str, str, str]]:
+        """Identities pruning must not delete, because this run could not produce them.
+
+        Every seeded object whose variables are not all set. Absence from the
+        apply set normally means "removed from the configuration"; for these it
+        means "there was nothing safe to write", and a delete is the wrong
+        answer to that.
+
+        Deliberately wider than the objects `resolve` actually dropped. A
+        credential is exported once, at bootstrap, and gone from the
+        environment ever after -- so the steady state is precisely the state in
+        which nobody can recreate what a prune removes. The cost of protecting
+        one object too many is that a genuinely deleted seed lingers until
+        someone exports its variable again; the cost of protecting one too few
+        is an unrecoverable credential.
+        """
+        return {
+            (action.namespace, action.kind, action.name)
+            for action in self.actions
+            if not all(os.environ.get(variable) for variable in action.variables)
+        }
+
 
 async def resolve(objects: Iterable[Manifest], *, api: Api) -> SeedPlan:
     """Decide what to do with every seeded object, before anything applies.

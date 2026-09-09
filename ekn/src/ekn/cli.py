@@ -694,8 +694,8 @@ class KubeApply(AttrCommand):
         # Resolve seeded credentials before anything is applied, so a missing
         # variable aborts the whole run rather than leaving a cluster half
         # bootstrapped. A seed already in the cluster with its variable unset
-        # is dropped from `objects` here, not applied unchanged -- see
-        # `seeds.resolve`.
+        # is applied with the value the cluster already holds, so its other
+        # fields still reconcile -- see `seeds.resolve`.
         try:
             plan = await seeds.resolve(objects, api=api)
         except seeds.MissingVariablesError as exc:
@@ -709,6 +709,9 @@ class KubeApply(AttrCommand):
                 field_manager=cfg.field_manager,
                 resource_priority=cfg.resource_priority,
                 prune=self.prune,
+                # A seed whose variable is unset is not ours to delete. See
+                # `SeedPlan.protected`.
+                protect=plan.protected,
             )
         except kr8s.ServerError as exc:
             _report_server_error("apply", exc)

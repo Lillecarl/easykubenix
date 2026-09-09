@@ -6,12 +6,13 @@ cannot answer, and one of them is the whole design:
 
 **Server-side apply deletes fields the applying manager previously owned and
 then omits.** `ekn` applies with `force=true` under its own field manager, so
-"leave this seed alone" has to mean dropping the object from the apply set.
-Implemented as "apply the rendered object unchanged" it would look correct
-in every unit test and would overwrite the live credential with the literal
-`$ekn:env:VARNAME` on the second apply. Only a real API server has the
-field-management machinery that makes that true, so only a real API server
-can catch it.
+"leave this seed alone" cannot mean applying the rendered object -- that
+overwrites the live credential with the literal `$ekn:env:VARNAME` on the
+second apply -- and cannot mean omitting the field either, which deletes it.
+It means writing the value the cluster already holds back into the field, so
+every other field of the object still reconciles. Both wrong versions look
+correct in a unit test. Only a real API server has the field-management
+machinery that makes them wrong, so only a real API server can catch them.
 
 The walk is deliberately one ordered test rather than four independent ones.
 The cases are a lifecycle -- create, then leave alone, then rotate -- and the
@@ -291,3 +292,57 @@ async def test_other_fields_reconcile_while_the_credential_is_left_alone(
     stored = {key: base64.b64decode(value).decode() for key, value in (dict(secret.raw).get("data") or {}).items()}
     assert stored["username"] == "oauth2", "an unrelated field change did not reconcile"
     assert stored["password"] == "lifecycle-secret", "the credential was not left alone"
+
+
+async def test_prune_does_not_delete_a_seed_it_could_not_produce(
+    cluster: tuple[Any, list[dict[str, Any]], str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one branch that still drops a seeded object from the apply set.
+
+    `resolve` normally writes the live credential back, so a skipped seed is
+    in the desired set and prune leaves it alone. It cannot do that when the
+    live value will not read back -- a non-UTF-8 value, or the key already
+    gone. The object then leaves the apply set entirely.
+
+    Absence from the desired set otherwise means "removed from the
+    configuration", and prune answers that with a delete. Here it means "this
+    run had nothing safe to write", and a delete destroys a credential nobody
+    can recreate: the variable was exported once, at bootstrap, and is long
+    gone from the environment.
+
+    `prune_kinds` forces the Secret scan. Without it the documented
+    current-apply-only scan would skip Secrets entirely once the only Secret
+    left the apply set, and the test would pass without exercising anything.
+    """
+    api, objects, discriminator = cluster
+
+    monkeypatch.setenv(VARIABLE, "unrecoverable")
+    await apply(api, objects, discriminator)
+    assert await live_password(api) == "unrecoverable"
+
+    # Delete the key from the live object. `_with_live_values` now has
+    # nothing to read back, which is what drops the object from the plan.
+    secret = await build_object(dict(SECRET), api)
+    await secret.async_refresh()
+    await secret.async_patch({"data": {"password": None}})
+    assert await live_password(api) is None
+
+    monkeypatch.delenv(VARIABLE, raising=False)
+    plan = await seeds.resolve(objects, api=api)
+    names = [o["metadata"]["name"] for o in plan.objects]
+    assert "repo-creds" not in names, "fixture no longer exercises the drop branch"
+
+    await apply_and_prune(
+        plan.objects,
+        api=api,
+        discriminator=discriminator,
+        prune=True,
+        prune_kinds={"Secret"},
+        protect=plan.protected,
+    )
+
+    # Still there. Without `protect` this delete is what takes the credential.
+    survivor = await build_object(dict(SECRET), api)
+    await survivor.async_refresh()
+    assert survivor.name == "repo-creds"
