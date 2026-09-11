@@ -888,6 +888,7 @@ let
             "IPv4"
             "IPv6"
           ];
+          kubernetes.clusterInfo.serviceCidr.ipv6 = "fd00:96::/112";
           kubernetes.objects.default.Service.dual.spec.ipFamilyPolicy = "RequireDualStack";
         }
       )
@@ -1028,6 +1029,76 @@ in
   # validation harness's service CIDR follows the same declaration.
   dualStackClusterRenders = easyDualStackCluster.config.kubernetes.generated;
   dualStackClusterServiceSubnet = easyDualStackCluster.config.validation.serviceSubnet;
+
+  # A pinned cluster IP inside the declared range renders; one outside is
+  # refused at evaluation, which is where the API server denies it at
+  # admission ("provided IP is not in the valid range").
+  pinnedIPv4InsideCidrRenders =
+    (import ../. {
+      inherit pkgs;
+      modules = [
+        (
+          { ... }:
+          {
+            ekn.environment = "easykubenix";
+            kubernetes.objects.default.Service.dns.spec.clusterIP = "10.96.0.10";
+          }
+        )
+      ];
+    }).config.kubernetes.generated;
+
+  pinnedIPv4OutsideCidrThrows =
+    (import ../. {
+      inherit pkgs;
+      modules = [
+        (
+          { ... }:
+          {
+            ekn.environment = "easykubenix";
+            # Inside podSubnet's 10.97.0.0/16, outside serviceCidr's
+            # 10.96.0.0/16 -- the near-miss a wrong range produces.
+            kubernetes.objects.default.Service.dns.spec.clusterIP = "10.97.0.10";
+          }
+        )
+      ];
+    }).config.kubernetes.generated;
+
+  # A headless Service pins nothing and is not checked.
+  headlessServiceRenders =
+    (import ../. {
+      inherit pkgs;
+      modules = [
+        (
+          { ... }:
+          {
+            ekn.environment = "easykubenix";
+            kubernetes.objects.default.Service.headless.spec = {
+              clusterIP = "None";
+              clusterIPs = [ "None" ];
+            };
+          }
+        )
+      ];
+    }).config.kubernetes.generated;
+
+  # Declaring a family without its CIDR leaves the harness no range to serve
+  # it from; the two options must agree.
+  dualFamiliesWithoutIPv6CidrThrows =
+    (import ../. {
+      inherit pkgs;
+      modules = [
+        (
+          { ... }:
+          {
+            ekn.environment = "easykubenix";
+            kubernetes.clusterInfo.ipFamilies = [
+              "IPv4"
+              "IPv6"
+            ];
+          }
+        )
+      ];
+    }).config.kubernetes.generated;
 
   # A duplicate family says nothing about the stack and would make every
   # consumer of the list guess.

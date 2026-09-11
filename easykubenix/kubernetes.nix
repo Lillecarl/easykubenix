@@ -345,6 +345,67 @@ let
         "IPv6"
         "IPv4"
       ];
+  clusterServiceCidr4 = config.kubernetes.clusterInfo.serviceCidr.ipv4;
+  clusterServiceCidr6 = config.kubernetes.clusterInfo.serviceCidr.ipv6;
+
+  # Is a dotted quad inside `cidr` (`a.b.c.d/prefix`)? Compare the leading
+  # `prefix` bits. Nix has no exponent operator and `/` on two integers
+  # floors, and the values stay below 2^32, so nothing is lost.
+  ipv4WithinCidr =
+    ip: cidr:
+    let
+      octetsOf = s: map lib.toInt (lib.splitString "." s);
+      asInt = o: lib.foldl' (acc: n: acc * 256 + n) 0 o;
+      parts = lib.splitString "/" cidr;
+      prefix = lib.min 32 (lib.toInt (lib.last parts));
+      divisor = lib.foldl' (acc: _: acc * 2) 1 (lib.range 1 (32 - prefix));
+    in
+    asInt (octetsOf ip) / divisor == asInt (octetsOf (lib.head parts)) / divisor;
+
+  # Pinned Service cluster IPs the declared IPv4 service CIDR cannot serve.
+  # The API server rejects an out-of-range `spec.clusterIP` at admission
+  # ("provided IP is not in the valid range"), and a pin is literal bytes in
+  # the manifest, so the check runs here. `None` (headless) allocates
+  # nothing and is skipped, as is an address this cannot parse -- the API
+  # server rejects those on its own terms. IPv6 pins are deliberately
+  # unchecked here: the validation harness runs the declared CIDR, so
+  # admission itself denies a wrong one.
+  pinnedServiceIPsOutsideCidr = lib.concatLists (
+    lib.mapAttrsToList (
+      namespace: kinds:
+      lib.concatLists (
+        lib.mapAttrsToList (
+          kind: objects:
+          lib.concatLists (
+            lib.mapAttrsToList (
+              name: object:
+              lib.optionals (kind == "Service") (
+                let
+                  spec = object.spec or { };
+                  pinned = lib.filter (ip: ip != "None" && builtins.match "([0-9]{1,3}\.){3}[0-9]{1,3}" ip != null) (
+                    lib.toList (
+                      if spec ? clusterIPs then
+                        spec.clusterIPs
+                      else if spec ? clusterIP && spec.clusterIP != "None" then
+                        spec.clusterIP
+                      else
+                        [ ]
+                    )
+                  );
+                in
+                lib.optionals (clusterServiceCidr4 != null) (
+                  map (ip: "${namespace}/Service/${name} pins spec clusterIP ${ip}") (
+                    lib.filter (ip: !(ipv4WithinCidr ip clusterServiceCidr4)) pinned
+                  )
+                )
+              )
+            ) objects
+          )
+        ) kinds
+      )
+    ) cfg.objects
+  );
+
   deniedServiceFamilies = lib.concatLists (
     lib.mapAttrsToList (
       namespace: kinds:
@@ -415,6 +476,31 @@ in
         moves that denial to evaluation time with the Service named, and
         picks `validation.serviceSubnet` to match. The default is the
         single-stack IPv4 cluster that `10.96.0.0/16` serves.
+      '';
+    };
+
+    # The CIDR the API server's service range covers: what a Service may pin
+    # `spec.clusterIP` out of, and what everything that statically names a
+    # service address (CoreDNS' DNS service IP, network policies naming the
+    # range) has to agree with. One field per family, held consistent with
+    # `ipFamilies` by assertion -- the two describe the same range.
+    clusterInfo.serviceCidr.ipv4 = lib.mkOption {
+      type = lib.types.nullOr (lib.types.strMatching "([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}");
+      default = "10.96.0.0/16";
+      description = ''
+        The cluster's IPv4 service CIDR. The default is the range the
+        single-stack IPv4 default of `ipFamilies` describes. Set it to
+        `null` only together with dropping `IPv4` from `ipFamilies`.
+      '';
+    };
+
+    clusterInfo.serviceCidr.ipv6 = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        The cluster's IPv6 service CIDR; `null` -- the default -- on an
+        IPv4-only cluster. Set it together with adding `IPv6` to
+        `ipFamilies`.
       '';
     };
 
@@ -996,6 +1082,39 @@ in
         does not describe the real cluster and the whole IP stack -- Services
         and the validation harness's service CIDR alike -- is built on the
         wrong families.
+      '';
+    }
+    {
+      assertion =
+        (lib.elem "IPv4" clusterIPFamilies) == (clusterServiceCidr4 != null)
+        && (lib.elem "IPv6" clusterIPFamilies) == (clusterServiceCidr6 != null);
+      message = ''
+        `kubernetes.clusterInfo.ipFamilies' and
+        `kubernetes.clusterInfo.serviceCidr' describe different stacks. The
+        families are [ ${lib.concatStringsSep " " clusterIPFamilies} ], the
+        CIDRs are IPv4 = ${if clusterServiceCidr4 != null then clusterServiceCidr4 else "unset"}, IPv6 = ${
+          if clusterServiceCidr6 != null then clusterServiceCidr6 else "unset"
+        }.
+
+        Both describe the cluster's one service range, so they must agree:
+        one field per family in both, or neither. A family without its CIDR
+        leaves the validation harness no range to serve it from; a CIDR
+        without its family claims a range the stack does not advertise.
+      '';
+    }
+    {
+      assertion = pinnedServiceIPsOutsideCidr == [ ];
+      message = ''
+        The declared IPv4 service CIDR -- ${toString clusterServiceCidr4} --
+        cannot serve these pinned cluster IPs, and the API server would deny
+        them at admission ("provided IP is not in the valid range"):
+
+        ${lib.concatMapStringsSep "\n" (entry: "  ${entry}") pinnedServiceIPsOutsideCidr}
+
+        Either the pin is wrong for this cluster, or
+        `kubernetes.clusterInfo.serviceCidr.ipv4' does not describe the real
+        cluster. Headless Services (`None') allocate nothing and are not
+        checked; addresses this cannot parse are the API server's to refuse.
       '';
     }
   ];

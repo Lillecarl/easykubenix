@@ -1122,6 +1122,25 @@ class TestAssertionsAndWarnings:
         with pytest.raises(nanopynix.NixError, match="lists a family twice"):
             await evaluate_file(NIX_TEST_FILE, "duplicateIPFamilyThrows")
 
+    async def test_a_pinned_cluster_ip_outside_the_cidr_is_rejected(self) -> None:
+        # The admission denial this pre-flights is "provided IP is not in the
+        # valid range"; 10.97.x is podSubnet's near-miss for serviceCidr's
+        # 10.96.0.0/16.
+        with pytest.raises(
+            nanopynix.NixError, match=r"default/Service/dns pins spec clusterIP 10\.97\.0\.10"
+        ):
+            await evaluate_file(NIX_TEST_FILE, "pinnedIPv4OutsideCidrThrows")
+
+    async def test_a_pinned_cluster_ip_inside_the_cidr_renders(self) -> None:
+        assert len(await evaluate_file(NIX_TEST_FILE, "pinnedIPv4InsideCidrRenders")) > 0
+
+    async def test_a_headless_service_pins_nothing_and_is_not_checked(self) -> None:
+        assert len(await evaluate_file(NIX_TEST_FILE, "headlessServiceRenders")) > 0
+
+    async def test_a_family_without_its_cidr_is_rejected(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="describe different stacks"):
+            await evaluate_file(NIX_TEST_FILE, "dualFamiliesWithoutIPv6CidrThrows")
+
 
 class TestClusterInfo:
     """`kubernetes.clusterInfo.ipFamilies` says what the API server's service
