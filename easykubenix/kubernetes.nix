@@ -324,6 +324,55 @@ let
       )
     ) cfg.objects
   );
+
+  # What the declared cluster stack cannot serve, per Service.
+  #
+  # The API server admits a Service's `spec.ipFamilies`/`spec.ipFamilyPolicy`
+  # only against the families its service CIDR actually carries; a mismatch
+  # is an instant denial. Read from `cfg.objects` rather than from
+  # `generated`: an assertion that reads a checked output closes a loop
+  # through `checked` above, and evaluation hits infinite recursion instead
+  # of printing the message. `PreferDualStack` is deliberately unchecked --
+  # it is best-effort and the API server never denies it for stack reasons.
+  clusterIPFamilies = config.kubernetes.clusterInfo.ipFamilies;
+  clusterIsDualStack =
+    clusterIPFamilies == [
+      "IPv4"
+      "IPv6"
+    ]
+    ||
+      clusterIPFamilies == [
+        "IPv6"
+        "IPv4"
+      ];
+  deniedServiceFamilies = lib.concatLists (
+    lib.mapAttrsToList (
+      namespace: kinds:
+      lib.concatLists (
+        lib.mapAttrsToList (
+          kind: objects:
+          lib.concatLists (
+            lib.mapAttrsToList (
+              name: object:
+              lib.optionals (kind == "Service") (
+                let
+                  families = object.spec.ipFamilies or [ ];
+                  policy = object.spec.ipFamilyPolicy or null;
+                  denied = lib.subtractLists clusterIPFamilies families;
+                in
+                lib.optional (
+                  denied != [ ]
+                ) "${namespace}/Service/${name} declares spec.ipFamilies [ ${lib.concatStringsSep " " denied} ]"
+                ++ lib.optional (
+                  policy == "RequireDualStack" && !clusterIsDualStack
+                ) "${namespace}/Service/${name} declares spec.ipFamilyPolicy RequireDualStack"
+              )
+            ) objects
+          )
+        ) kinds
+      )
+    ) cfg.objects
+  );
 in
 {
   imports = [
@@ -341,6 +390,33 @@ in
   ];
   options.kubernetes = {
     package = lib.mkPackageOption pkgs "kubernetes" { };
+
+    # `clusterInfo' is the namespace for facts about the target cluster that
+    # the API server would instantly deny a manifest against. Deliberately
+    # minimal for now: the IP stack alone. Declared flat, like `ekn.*' and
+    # `validation.*' -- one typed, documented option per fact -- rather than
+    # a submodule holding a record nobody reads as a value.
+    clusterInfo.ipFamilies = lib.mkOption {
+      type = lib.types.nonEmptyListOf (
+        lib.types.enum [
+          "IPv4"
+          "IPv6"
+        ]
+      );
+      default = [
+        "IPv4"
+      ];
+      description = ''
+        IP families the cluster's service CIDR serves -- what a Service's
+        `spec.ipFamilies` and `spec.ipFamilyPolicy` must fit for admission
+        (the API server's `--service-cluster-ip-range`). One entry is a
+        single-stack cluster, both is DualStack. A Service the stack cannot
+        serve is denied outright at admission; declaring the real stack here
+        moves that denial to evaluation time with the Service named, and
+        picks `validation.serviceSubnet` to match. The default is the
+        single-stack IPv4 cluster that `10.96.0.0/16` serves.
+      '';
+    };
 
     templates = lib.mkOption {
       type = lib.types.attrsOf (lib.types.functionTo ekn.lib.kubeValueType);
@@ -897,6 +973,29 @@ in
         The assertion is deliberately blunt there rather than carved out: it
         cannot tell from here whether a given target is ever committed, and
         a wrong guess writes a credential to git.
+      '';
+    }
+    {
+      assertion = lib.length (lib.unique clusterIPFamilies) == lib.length clusterIPFamilies;
+      message = ''
+        `kubernetes.clusterInfo.ipFamilies' lists a family twice: ${lib.concatStringsSep " " clusterIPFamilies}. One entry per family; both means DualStack.
+      '';
+    }
+    {
+      assertion = deniedServiceFamilies == [ ];
+      message = ''
+        The declared cluster stack cannot serve these Services, and the API
+        server would deny them at admission. The cluster's service CIDR
+        provides [ ${lib.concatStringsSep " " clusterIPFamilies} ] --
+        `kubernetes.clusterInfo.ipFamilies'.
+
+        ${lib.concatMapStringsSep "\n" (entry: "  ${entry}") deniedServiceFamilies}
+
+        Either the Service is wrong for this cluster (drop the family, or the
+        `RequireDualStack' policy), or `kubernetes.clusterInfo.ipFamilies'
+        does not describe the real cluster and the whole IP stack -- Services
+        and the validation harness's service CIDR alike -- is built on the
+        wrong families.
       '';
     }
   ];

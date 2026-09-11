@@ -1103,6 +1103,42 @@ class TestAssertionsAndWarnings:
         with pytest.raises(nanopynix.NixError, match="deliberate nested failure"):
             await evaluate_file(probe, "kubernetes.deploymentUnits")
 
+    async def test_a_service_asking_for_an_undeclared_family_is_rejected(self) -> None:
+        # The API server admits a Service's families against the families its
+        # service CIDR carries and nothing else; the eval-time refusal names
+        # the Service instead of leaving the denial to admission.
+        with pytest.raises(
+            nanopynix.NixError, match=r"default/Service/v6 declares spec\.ipFamilies \[ IPv6 \]"
+        ):
+            await evaluate_file(NIX_TEST_FILE, "iPv6ServiceOnIPv4ClusterThrows")
+
+    async def test_require_dual_stack_on_a_single_stack_cluster_is_rejected(self) -> None:
+        with pytest.raises(
+            nanopynix.NixError, match=r"default/Service/dual declares spec\.ipFamilyPolicy RequireDualStack"
+        ):
+            await evaluate_file(NIX_TEST_FILE, "dualStackServiceOnSingleStackThrows")
+
+    async def test_a_duplicate_ip_family_is_rejected(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="lists a family twice"):
+            await evaluate_file(NIX_TEST_FILE, "duplicateIPFamilyThrows")
+
+
+class TestClusterInfo:
+    """`kubernetes.clusterInfo.ipFamilies` says what the API server's service
+    CIDR serves. It decides Service admission and, through it, what the
+    validation harness puts in `--service-cluster-ip-range`.
+    """
+
+    async def test_it_defaults_to_a_single_stack_ipv4_cluster(self) -> None:
+        assert await evaluate_file(NIX_TEST_FILE, "clusterInfoIPFamilies") == ["IPv4"]
+        assert await evaluate_file(NIX_TEST_FILE, "clusterInfoServiceSubnet") == "10.96.0.0/16"
+
+    async def test_a_dual_stack_cluster_serves_its_services_and_the_harness(self) -> None:
+        assert len(await evaluate_file(NIX_TEST_FILE, "dualStackClusterRenders")) > 0
+        assert (
+            await evaluate_file(NIX_TEST_FILE, "dualStackClusterServiceSubnet") == "10.96.0.0/16,fd00:96::/112"
+        )
+
 
 class TestValidationConfig:
     async def test_validation_config_builds(self) -> None:

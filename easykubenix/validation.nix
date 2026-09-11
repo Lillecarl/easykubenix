@@ -34,12 +34,18 @@ in
     };
     serviceSubnet = lib.mkOption {
       type = lib.types.str;
-      # Comma-separated IPv4+IPv6 CIDRs -- kube-apiserver only allows
-      # RequireDualStack Services when --service-cluster-ip-range lists both
-      # families, so a single-family default here would fail validation for
-      # any manifest containing a dual-stack Service (e.g. via a Kyverno
-      # mutate policy that sets ipFamilyPolicy=RequireDualStack cluster-wide)
-      # even though the real target cluster supports it fine.
+      # Comma-separated CIDRs, one per family the service CIDR serves --
+      # kube-apiserver only accepts `RequireDualStack' Services when
+      # `--service-cluster-ip-range` lists both. The default derives from
+      # `kubernetes.clusterInfo.ipFamilies`, so the harness's CIDR and the
+      # manifests it validates read the same declaration of the cluster's
+      # stack; a Service the cluster cannot serve is an eval-time error
+      # (kubernetes.nix's Service assertions), not a harness surprise. Before
+      # that option existed the default here was unconditionally dual-stack,
+      # because a single-family default failed validation for any manifest
+      # containing a dual-stack Service (e.g. via a Kyverno mutate policy that
+      # sets ipFamilyPolicy=RequireDualStack cluster-wide) even though the
+      # real target cluster supported it fine.
       #
       # This reaches the API server two ways, and for a while it only reached
       # one. `kubeadmConfig.networking.serviceSubnet` below decides the
@@ -52,7 +58,16 @@ in
       # The literal was also wrong on its own terms. `10.96.0.0/12` reaches
       # 10.111.255.255 and so swallows `podSubnet`'s own default of
       # 10.97.0.0/16. The `/16` here does not.
-      default = "10.96.0.0/16,fd00:96::/112";
+      default =
+        let
+          families = config.kubernetes.clusterInfo.ipFamilies;
+        in
+        if !(lib.elem "IPv4" families) then
+          "fd00:96::/112"
+        else if lib.elem "IPv6" families then
+          "10.96.0.0/16,fd00:96::/112"
+        else
+          "10.96.0.0/16";
     };
     script = lib.mkOption {
       type = lib.types.package;

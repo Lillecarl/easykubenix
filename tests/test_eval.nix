@@ -866,6 +866,33 @@ let
       { kubernetes.objects.default.ConfigMap.test.data.key = "hello"; }
     ];
   };
+
+  # `kubernetes.clusterInfo.ipFamilies`: the IP stack the API server admits a
+  # Service against. The default is a single-stack IPv4 cluster, and
+  # `validation.serviceSubnet` follows the declaration.
+  easyClusterInfo = import ../. {
+    inherit pkgs;
+    modules = [ ];
+  };
+
+  # The dual-stack cluster, declared once: the Service renders, and the
+  # validation harness's service CIDR follows the same declaration.
+  easyDualStackCluster = import ../. {
+    inherit pkgs;
+    modules = [
+      (
+        { ... }:
+        {
+          ekn.environment = "easykubenix";
+          kubernetes.clusterInfo.ipFamilies = [
+            "IPv4"
+            "IPv6"
+          ];
+          kubernetes.objects.default.Service.dual.spec.ipFamilyPolicy = "RequireDualStack";
+        }
+      )
+    ];
+  };
 in
 {
   # Only that it evaluates. The notice itself is `lib.warn` on
@@ -961,4 +988,63 @@ in
   unknownUnitDependencyThrows = easyUnknownUnitDependency.config.kubernetes.deploymentUnits;
   crdMarkerThrows = easyCrdMarkerThrows;
   crdIfExistsMarkerThrows = easyCrdIfExistsMarkerThrows;
+
+  clusterInfoIPFamilies = easyClusterInfo.config.kubernetes.clusterInfo.ipFamilies;
+  clusterInfoServiceSubnet = easyClusterInfo.config.validation.serviceSubnet;
+
+  # A Service the declared stack cannot serve must be refused at evaluation,
+  # naming the Service -- not left for the API server to deny at admission.
+  dualStackServiceOnSingleStackThrows =
+    (import ../. {
+      inherit pkgs;
+      modules = [
+        (
+          { ... }:
+          {
+            ekn.environment = "easykubenix";
+            kubernetes.objects.default.Service.dual.spec.ipFamilyPolicy = "RequireDualStack";
+          }
+        )
+      ];
+    }).config.kubernetes.generated;
+
+  iPv6ServiceOnIPv4ClusterThrows =
+    (import ../. {
+      inherit pkgs;
+      modules = [
+        (
+          { ... }:
+          {
+            ekn.environment = "easykubenix";
+            kubernetes.objects.default.Service.v6.spec.ipFamilies = [
+              "IPv6"
+            ];
+          }
+        )
+      ];
+    }).config.kubernetes.generated;
+
+  # The dual-stack cluster, declared once: the Service renders, and the
+  # validation harness's service CIDR follows the same declaration.
+  dualStackClusterRenders = easyDualStackCluster.config.kubernetes.generated;
+  dualStackClusterServiceSubnet = easyDualStackCluster.config.validation.serviceSubnet;
+
+  # A duplicate family says nothing about the stack and would make every
+  # consumer of the list guess.
+  duplicateIPFamilyThrows =
+    (import ../. {
+      inherit pkgs;
+      modules = [
+        (
+          { ... }:
+          {
+            ekn.environment = "easykubenix";
+            kubernetes.clusterInfo.ipFamilies = [
+              "IPv4"
+              "IPv4"
+            ];
+          }
+        )
+      ];
+    }).config.kubernetes.generated;
 }
