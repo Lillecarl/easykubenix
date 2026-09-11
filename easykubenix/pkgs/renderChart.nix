@@ -1,3 +1,7 @@
+# Render a chart and return its objects, split into CRDs and everything
+# else. Objects come back exactly as Helm emitted them: routing
+# (`ekn.deploymentUnit`) and annotation stamping are the caller's business,
+# via the transformers seam on `helm.releases`/`importYaml`.
 {
   runCommand,
   lib,
@@ -14,10 +18,6 @@
   kubeVersion ? null,
   noHooks ? false,
   apiVersions ? null,
-  syncWave ? "0",
-  # Name of the `gitOps.targets.<name>` to route these resources through
-  # (see kubernetes.nix's ekn.deploymentUnit); null leaves them unrouted.
-  deploymentUnit ? null,
   # The `ekn` CLI package, used only by the no-primop fallback below to
   # convert this chart's rendered YAML. Not needed when evaluating through
   # `ekn` itself, hence the null default.
@@ -115,13 +115,6 @@ let
       in
       builtins.fromJSON (builtins.readFile resourcesJson);
   rendered = lib.filter (object: object != null) parsed;
-  tagged = map (
-    object:
-    lib.recursiveUpdate object {
-      metadata.annotations."argocd.argoproj.io/sync-wave" = syncWave;
-      ekn.deploymentUnit = deploymentUnit;
-    }
-  ) rendered;
   # CustomResourceDefinitions carry enormous OpenAPI schemas. Forcing them
   # through kubernetes.resources' per-object submodule (settingsFormat.type's
   # recursive value-checking) costs measurably more eval time (see
@@ -130,11 +123,11 @@ let
   isCRD = object: object.kind == "CustomResourceDefinition";
 in
 {
-  crds = if crdsBypassTyping then lib.filter isCRD tagged else [ ];
+  crds = if crdsBypassTyping then lib.filter isCRD rendered else [ ];
   resources = lib.foldl' (
     acc: object:
     lib.recursiveUpdate acc {
       ${object.metadata.namespace or "none"}.${object.kind}.${object.metadata.name} = object;
     }
-  ) { } (if crdsBypassTyping then lib.filter (object: !isCRD object) tagged else tagged);
+  ) { } (if crdsBypassTyping then lib.filter (object: !isCRD object) rendered else rendered);
 }
