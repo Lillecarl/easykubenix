@@ -61,7 +61,27 @@ in
   };
   config.validation =
     let
-      cfgFile = pkgs.writeText "ClusterConfiguration.json" (builtins.toJSON cfg.kubeadmConfig);
+      # Two documents in one file, the way kubeadm splits them by kind. The
+      # InitConfiguration pins the API server's advertise address, which
+      # kubeadm would otherwise default from the default route -- and a build
+      # sandbox has no default route (loopback-only network namespace), so
+      # kubeadm falls back to 0.0.0.0 and refuses its own fallback. The
+      # address must NOT be loopback either: for a loopback advertise address
+      # kubeadm demands a *global unicast* IP on the lo interface, which a
+      # sandbox namespace cannot have. Nothing binds it -- it exists only as
+      # a certificate SAN; the apiserver binds 127.0.0.1 below and clients
+      # reach it through controlPlaneEndpoint, which is 127.0.0.1 too. The
+      # value is RFC 5737 documentation space, reserved and unroutable.
+      cfgFile = pkgs.writeText "kubeadm-config.yaml" (
+        builtins.concatStringsSep "\n---\n" [
+          (builtins.toJSON {
+            apiVersion = cfg.kubeadmConfig.apiVersion;
+            kind = "InitConfiguration";
+            localAPIEndpoint.advertiseAddress = "192.0.2.10";
+          })
+          (builtins.toJSON cfg.kubeadmConfig)
+        ]
+      );
     in
     {
       # Set kubeadmConfig sane defaults
@@ -133,8 +153,12 @@ in
             $command ${debugpipe} &
             set ETCD_PID $last_pid
 
+            # Times of 30, not 10: the whole gate runs inside a Nix build
+            # sandbox (checks.nix's validation-e2e), where a loaded CI runner
+            # boots the apiserver slower than an interactive `nix run` does.
+            # Budget is 30 seconds of 0-1s jitter, not 10.
             retry \
-              --times=10 \
+              --times=30 \
               --delay=0 \
               --jitter=1 \
               -- \
@@ -156,6 +180,7 @@ in
               --etcd-servers=https://127.0.0.1:$ETCD_CLIENT_PORT \
               --service-cluster-ip-range=${cfg.serviceSubnet} \
               --bind-address=$BIND_ADDRESS \
+              --advertise-address=$BIND_ADDRESS \
               --secure-port=$KUBERNETES_PORT \
               --allow-privileged=true \
               --client-ca-file=$CERT_DIR/ca.crt \
@@ -171,7 +196,7 @@ in
             set APISERVER_PID $last_pid
 
             retry \
-              --times=10 \
+              --times=30 \
               --delay=0 \
               --jitter=1 \
               -- \

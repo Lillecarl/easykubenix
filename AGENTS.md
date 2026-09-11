@@ -6,18 +6,21 @@
 - `direnv exec . ruff format --check`
 - `direnv exec . nixfmt $(jj file list | grep '\.nix$')`
 - `nix build --file ./checks.nix all` — the doc-example gates plus this
-  repository's own (`ekn-sandbox`, `nixfmt`), the same thing CI builds. Nothing
+  repository's own (`ekn-sandbox`, `nixfmt`, `validation-e2e`,
+  `bootstrap-validation-e2e`), the same thing CI builds. Nothing
   in this repository is gated behind a flake command; `nix build --file`,
   `nix run --file` and `nix-shell --run` must always work.
-- `nix run --file ./nix packages.validationScript` — the validation gate.
-  Deliberately outside `checks.all` because it boots a real etcd and
-  kube-apiserver, so it is run rather than built. `checks.nix` exposes only
-  `checks`, so this one needs `./nix` rather than `./checks.nix`.
-- `nix run --file ./nix packages.bootstrapValidationScript` — the same harness
+- `nix build --file ./checks.nix validation-e2e` — the validation gate: a
+  real etcd and kube-apiserver on 127.0.0.1, applying the full manifest set,
+  inside the Nix build sandbox (issue #16). In `checks.all`; it costs ~10s.
+  `nix run --file ./nix packages.validationScript` reaches the same harness
+  for a debug run — set `validation.debug = true` in the module to see the
+  control plane's output.
+- `nix build --file ./checks.nix bootstrap-validation-e2e` — the same harness
   over `docs/examples/bootstrap`'s nested instance (ArgoCD's CRDs, then the
   `Application` that needs them). A separate script because
   `kubernetes.generated` excludes a GitOps target's submodule objects by
-  design, so the gate above can never cover them.
+  design, so the gate above can never cover them. Also in `checks.all`.
 - `nix build --file ./checks.nix kubeapply` — the apply gate. It boots a
   single-node kubeadm cluster under User-Mode Linux and runs
   `ekn _applyManifest` inside it, so it answers what the two gates above

@@ -114,6 +114,46 @@ let
   # `ekn.apply`.
   kubeapply = import ./kubeapply { inherit pkgs lib sources; };
 
+  # The full validation harness -- real etcd and kube-apiserver on 127.0.0.1,
+  # applying the whole manifest set through `ekn _applyManifest`, then
+  # kubeconform over it -- as a sandboxed derivation rather than a `nix run`.
+  # Issue #16 holds the evidence that a sandbox permits everything this needs:
+  # every tool is already a store-path input of the script, nothing re-enters
+  # Nix, all writes land in `$TMPDIR`, and a sandboxed build binds loopback
+  # TCP above port 1024 (a `runCommand` completed a full client/server round
+  # trip on a fixed port there). Outbound network stays blocked, which the
+  # harness never touches -- every endpoint is 127.0.0.1. What the sandbox
+  # did break was kubeadm's and kube-apiserver's default route lookups, fixed
+  # in validation.nix; see there.
+  #
+  # `HOME` points inside the build tree so fish has a writable state
+  # directory -- the builder's default (`/homeless-shelter`) is read-only,
+  # and fish prints three alarming-but-harmless `error:` blocks without it.
+  # Measured cost: ~10s per build, so `all` carries it.
+  validation-e2e =
+    pkgs.runCommand "easykubenix-check-validation-e2e"
+      {
+        HOME = "/build/home";
+      }
+      ''
+        ${examples.packages.validationScript}/bin/kubeval
+        touch "$out"
+      '';
+
+  # The bootstrap example's own instance over the same harness -- ArgoCD's
+  # CRDs and the Application that needs them. `kubernetes.generated` excludes
+  # a deployment unit's objects by design, so `validation-e2e` can never
+  # cover them; this is their gate.
+  bootstrap-validation-e2e =
+    pkgs.runCommand "easykubenix-check-bootstrap-validation-e2e"
+      {
+        HOME = "/build/home";
+      }
+      ''
+        ${examples.packages.bootstrapValidationScript}/bin/kubeval
+        touch "$out"
+      '';
+
   # Every `.nix` file in the repository, and nothing else. The filter names
   # what to *drop* rather than what to keep, so a directory added later is
   # covered without anyone remembering to list it -- a formatting gate that
@@ -154,6 +194,8 @@ in
     ekn-completions
     kubeapply
     nixfmt
+    validation-e2e
+    bootstrap-validation-e2e
     ;
   inherit (examples) packages;
 
@@ -167,6 +209,8 @@ in
       ekn-completions
       kubeapply
       nixfmt
+      validation-e2e
+      bootstrap-validation-e2e
       ;
     # `all` is what CI builds, so a gate that is not in it is a gate that does
     # not run. ../docs/examples/default.nix builds its own `all` over the
@@ -177,6 +221,8 @@ in
         ekn-sandbox
         ekn-completions
         nixfmt
+        validation-e2e
+        bootstrap-validation-e2e
       ];
     } "printf '%s\\n' $checks > $out";
   };
