@@ -12,6 +12,7 @@ from ekn.eval import TofuUnit
 from ekn.tofu import (
     TofuError,
     config_json,
+    dependents,
     file_groups,
     kubeconfig_from_output,
     prepare,
@@ -250,3 +251,29 @@ class TestCommandLine:
         command = parse(["kubeapply", "--kubeconfig-from-tofu", "infra:kubeconfig", "-f", "."])
         assert command.kubeconfig_from_tofu == "infra:kubeconfig"
         assert parse(["kubeapply", "-f", "."]).kubeconfig_from_tofu is None
+
+
+class TestDependents:
+    """The reverse of what `apply` walks, and the direction `destroy` needs."""
+
+    @staticmethod
+    def _chain(tmp_path: pathlib.Path) -> list[TofuUnit]:
+        """network <- cluster <- ingress, each closure already transitive as
+        easykubenix resolves it."""
+        units = [_unit(tmp_path, name, "/nonexistent", {}) for name in ("network", "cluster", "ingress")]
+        return [
+            units[0],
+            units[1].model_copy(update={"dependencies": ["network"]}),
+            units[2].model_copy(update={"dependencies": ["network", "cluster"]}),
+        ]
+
+    def test_a_leaf_has_no_dependents(self, tmp_path: pathlib.Path) -> None:
+        assert dependents(self._chain(tmp_path), "ingress") == []
+
+    def test_a_base_unit_names_everything_that_needs_it(self, tmp_path: pathlib.Path) -> None:
+        """Destroying `network` would leave both of these pointing at nothing,
+        which is what the refusal exists to prevent."""
+        assert dependents(self._chain(tmp_path), "network") == ["cluster", "ingress"]
+
+    def test_a_middle_unit_names_only_what_is_above_it(self, tmp_path: pathlib.Path) -> None:
+        assert dependents(self._chain(tmp_path), "cluster") == ["ingress"]

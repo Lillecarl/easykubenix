@@ -63,6 +63,7 @@ from ekn.gitops import (
 from ekn.sops import ensure_age_identities, maybe_decrypt
 from ekn.tofu import (
     TofuError,
+    dependents as tofu_dependents,
     file_groups as tofu_file_groups,
     kubeconfig_from_output as tofu_kubeconfig,
     run_chain,
@@ -894,9 +895,19 @@ class TofuApply(_TofuCommand):
 class TofuDestroy(_TofuCommand):
     """Destroy what this unit's OpenTofu configuration created.
 
-    Only the named unit. A dependency is something this unit needed built
-    first, so destroying it here would take out whatever else depends on it --
-    destroy each one on its own, in the order you choose.
+    Only the named unit, never its dependencies: a dependency is something
+    this unit needed built first, so destroying it from here would take out
+    whatever else still needs it.
+
+    For the same reason this refuses when another unit depends on the *named*
+    one, and says which. `apply` cannot run against a half-built dependency
+    because it walks the closure first; without this, `destroy` had no
+    equivalent protection in the other direction, and destroying something
+    still in use either failed confusingly inside the provider or succeeded
+    and left a dependent pointing at nothing.
+
+    So a teardown is still one command per unit, but the tool answers the
+    ordering rather than leaving you to derive it.
     """
 
     cli_name = "destroy"
@@ -907,11 +918,35 @@ class TofuDestroy(_TofuCommand):
     )
 
     async def run(self) -> None:
-        units = await self._units()
+        # Every unit, not this one's chain: the question here is who depends on
+        # the named unit, and that cannot be answered from its own closure.
+        uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
+        try:
+            every = await evaluate_tofu_units(self.file, uri, customer, self.attr)
+        except NixError as exc:
+            _report_nix_error(exc)
+        except ValidationError as exc:
+            _report_validation_error("tofu units", exc)
+
+        named = next((unit for unit in every if unit.name == self.target), None)
+        if named is None:
+            known = ", ".join(sorted(unit.name for unit in every)) or "none"
+            _log.error(f'no deployment unit named "{self.target}" with class "tf". Declared: {known}')
+            raise SystemExit(1)
+
+        blocking = tofu_dependents(every, self.target)
+        if blocking:
+            verb = "depends" if len(blocking) == 1 else "depend"
+            _log.error(
+                f"{', '.join(blocking)} {verb} on {self.target}; destroy {'that' if len(blocking) == 1 else 'those'} first.\n"
+                "This command never cascades -- destroying a dependency from here would take out "
+                "whatever still needs it, which is why it refuses instead of deciding for you."
+            )
+            raise SystemExit(1)
+
         args = ["destroy", *(["-auto-approve"] if self.auto_approve else [])]
         try:
-            # The named unit alone, which is the last link of the chain.
-            await run_chain(units[-1:], args)
+            await run_chain([named], args)
         except TofuError as exc:
             _log.error(str(exc))
             raise SystemExit(1) from exc

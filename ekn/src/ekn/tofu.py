@@ -149,9 +149,9 @@ async def output(unit: TofuUnit, name: str, root: Path | None = None) -> str:
 def config_json(unit: TofuUnit) -> str:
     """*unit*'s rendered `config.tf.json`, read from the store.
 
-    What `ekn commit` writes to the branch. Read rather than re-serialised, so
-    the committed bytes are the store's bytes -- `tofu.nix` pretty-prints
-    through `jq --sort-keys` precisely so this file reads as a diff.
+    What `ekn commit` writes to the branch. Read rather than re-serialised, so the committed bytes are the store's
+    bytes -- `tofu.nix` pretty-prints through `jq --sort-keys` precisely so
+    this file reads as a diff.
     """
     return (SyncPath(unit.config_file) / "config.tf.json").read_text()
 
@@ -188,6 +188,21 @@ async def kubeconfig_from_output(
             await Path(path).unlink()
 
 
+def dependents(units: Sequence[TofuUnit], name: str) -> list[str]:
+    """Every unit whose dependency closure holds *name*, in declaration order.
+
+    The reverse of what `apply` walks, and the direction `destroy` needs.
+    `apply` cannot run against a half-built dependency because it builds the
+    closure first; `destroy` has no such protection of its own -- destroying a
+    unit something else still needs either fails confusingly inside the
+    provider or succeeds and leaves the dependent pointing at nothing.
+
+    Each unit's `dependencies` is already transitive (easykubenix resolves the
+    closure), so a plain membership test answers this without walking again.
+    """
+    return [unit.name for unit in units if name in unit.dependencies]
+
+
 def file_groups(units: dict[str, TofuUnit]) -> list[tuple[str, str]]:
     """Each `tf` unit's rendered configuration as a `(path, content)` pair,
     for `ekn commit` to write to the deploy branch.
@@ -215,6 +230,7 @@ __all__ = [
     "WORK_ROOT",
     "TofuError",
     "config_json",
+    "dependents",
     "file_groups",
     "kubeconfig_from_output",
     "output",
