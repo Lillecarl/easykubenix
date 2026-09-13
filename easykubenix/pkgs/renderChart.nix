@@ -17,6 +17,12 @@
   values ? { },
   kubeVersion ? null,
   noHooks ? false,
+  # API versions to claim the target cluster has, for a chart gating templates
+  # on `.Capabilities.APIVersions.Has`. There is no cluster here, so without
+  # this the list is empty and every such check answers "absent" -- usually by
+  # emitting nothing at all, which renders and applies and reports healthy. See
+  # `helm.charts.<name>.apiVersions` in helm.nix, which carries the detail,
+  # including that Helm matches these strings literally.
   apiVersions ? null,
   # The `ekn` CLI package, used only by the no-primop fallback below to
   # convert this chart's rendered YAML. Not needed when evaluating through

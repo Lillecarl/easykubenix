@@ -137,11 +137,40 @@ in
 
               apiVersions = mkOption {
                 description = ''
-                  Inform Helm about which API versions are available in the cluster (`--api-versions` option).
-                  This is useful for charts which contain `.Capabilities.APIVersions.Has` checks.
+                  API versions to tell Helm the target cluster has
+                  (`--api-versions`), for a chart that gates templates on
+                  `.Capabilities.APIVersions.Has`.
+
+                  `helm template` normally fills that list from the live
+                  cluster. Rendering here runs against no cluster, so the list
+                  is empty and every such check answers "absent" -- however
+                  many CRDs the real cluster has.
+
+                  The quiet failure is the one to watch for. A chart that calls
+                  `fail` stops the render with a readable message (cilium does
+                  this). A chart that wraps the template in
+                  `if .Capabilities.APIVersions.Has` instead emits nothing: the
+                  render succeeds, the apply succeeds, every Application reports
+                  Healthy, and the object is simply absent. Measured on a real
+                  cluster: ArgoCD gates all seven of its ServiceMonitor
+                  templates this way and offers no override value, so the
+                  component deploying everything else was the one thing nothing
+                  scraped.
+
+                  Helm matches these strings literally, and charts disagree on
+                  which spelling they test -- ArgoCD asks for
+                  `monitoring.coreos.com/v1`, external-secrets for
+                  `monitoring.coreos.com/v1/ServiceMonitor`. One form leaves the
+                  other chart rendering nothing, so pass both.
                 '';
                 type = types.listOf types.str;
                 default = [ ];
+                example = lib.literalExpression ''
+                  [
+                    "monitoring.coreos.com/v1"
+                    "monitoring.coreos.com/v1/ServiceMonitor"
+                  ]
+                '';
               };
             };
           }
