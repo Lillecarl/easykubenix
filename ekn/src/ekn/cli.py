@@ -66,6 +66,7 @@ from ekn.tofu import (
     dependents as tofu_dependents,
     file_groups as tofu_file_groups,
     kubeconfig_from_output as tofu_kubeconfig,
+    orphaned_state as tofu_orphaned_state,
     run_chain,
 )
 from ekn.validation import EphemeralControlPlane, exec_capture, prepare_validation_objects
@@ -838,7 +839,8 @@ class _TofuCommand(AttrCommand):
     async def _units(self) -> list[TofuUnit]:
         uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
         try:
-            return await evaluate_tofu_units(self.file, uri, customer, self.attr, self.target)
+            units = await evaluate_tofu_units(self.file, uri, customer, self.attr, self.target)
+            await self._warn_orphans(uri, customer)
         except NixError as exc:
             _report_nix_error(exc)
         except ValidationError as exc:
@@ -846,6 +848,23 @@ class _TofuCommand(AttrCommand):
         except ValueError as exc:
             _log.error(str(exc))
             raise SystemExit(1) from exc
+        return units
+
+    async def _warn_orphans(self, uri: str | None, customer: str | None) -> None:
+        """Say when state exists for a unit the evaluation no longer declares.
+
+        A `tf` unit deleted from the Nix configuration leaves its real
+        infrastructure running with nothing able to name it -- see
+        `tofu.orphaned_state`. Every `ekn tofu` run is a cheap place to notice.
+        """
+        every = await evaluate_tofu_units(self.file, uri, customer, self.attr)
+        orphans = await tofu_orphaned_state(every)
+        if orphans:
+            _log.warning(
+                f"state exists for {', '.join(orphans)}, which no tf unit declares any more.\n"
+                "Deleting a unit does not destroy what it built. Restore the unit, "
+                "`ekn tofu destroy --target <name>`, then delete it."
+            )
 
     async def run(self) -> None:
         units = await self._units()

@@ -301,7 +301,18 @@ branch, so rolling infrastructure back means rolling the source back.
 
 `ekn tofu` keeps a working directory per unit under `.ekn/tofu/<name>`, holding
 `.terraform/` and, for a local backend, live state. Add `.ekn/` to your
-`.gitignore`.
+`.gitignore`. Every run prints where state actually lives, because easykubenix
+has no default backend — a unit that declares none gets a local file, and
+nothing else would say so.
+
+**Destroy a `tf` unit's infrastructure before deleting the unit, never after.**
+Deleting a Kubernetes unit is safe: prune selects by label, so dropping the
+module deletes its objects. A `tf` unit is the opposite — nothing evaluates it
+any more, so `ekn tofu destroy --target <name>` cannot even name it, and its
+real infrastructure keeps running and costing money. `ekn tofu` warns when it
+finds local state for a unit the evaluation no longer declares; a remote
+backend's keys it cannot see, which is why the ordering is a rule and not only
+a check.
 
 OpenTofu reads `${...}` inside any JSON string as an expression, so two helpers
 say which you meant:

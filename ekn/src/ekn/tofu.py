@@ -234,6 +234,32 @@ async def kubeconfig_from_output(
             await Path(path).unlink()
 
 
+async def orphaned_state(units: Sequence[TofuUnit], root: Path | None = None) -> list[str]:
+    """Working directories under *root* with no unit in the evaluation, newest
+    first by name.
+
+    The asymmetry this covers is the one real cost of having no ownership
+    record of our own. On the Kubernetes side a unit deleted from the Nix
+    configuration is safe: prune selects by label, so dropping the module
+    deletes its objects. Delete a `tf` unit and the opposite happens -- nothing
+    evaluates it any more, so `ekn tofu destroy --target <it>` can no longer
+    even name it, and its real infrastructure is orphaned with no trace but a
+    directory nobody references. A normal-looking refactor leaks cloud
+    resources.
+
+    Reads the one record that exists rather than inventing a second: state on
+    disk, against the units the evaluation declares. Local working directories
+    only -- a remote backend's keys are not ours to enumerate, which is why the
+    ordering rule is documented as well as checked.
+    """
+    base = root or Path(WORK_ROOT)
+    if not await base.exists():
+        return []
+    declared = {unit.name for unit in units}
+    found = [entry.name async for entry in base.iterdir() if await entry.is_dir()]
+    return sorted(name for name in found if name not in declared)
+
+
 def dependents(units: Sequence[TofuUnit], name: str) -> list[str]:
     """Every unit whose dependency closure holds *name*, in declaration order.
 
@@ -282,6 +308,7 @@ __all__ = [
     "dependents",
     "file_groups",
     "kubeconfig_from_output",
+    "orphaned_state",
     "output",
     "prepare",
     "run_chain",

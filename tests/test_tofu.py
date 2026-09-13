@@ -15,6 +15,7 @@ from ekn.tofu import (
     dependents,
     file_groups,
     kubeconfig_from_output,
+    orphaned_state,
     prepare,
     run_chain,
     state_location,
@@ -340,3 +341,27 @@ class TestStateLocation:
         await (workdir / "config.tf.json").write_text('{"terraform": {"backend": {"s3": {"bucket": "b"}}}}')
 
         assert await state_location(workdir) == "s3 backend"
+
+
+class TestOrphanedState:
+    """A `tf` unit deleted from the Nix config leaves its infrastructure
+    running with nothing able to name it. The Kubernetes half of the same
+    refactor is safe, because prune selects by label."""
+
+    async def test_nothing_is_orphaned_when_every_directory_has_a_unit(self, tmp_path: pathlib.Path) -> None:
+        root = Path(tmp_path / "work")
+        await (root / "infra").mkdir(parents=True)
+        units = [_unit(tmp_path, "infra", "/nonexistent", {})]
+
+        assert await orphaned_state(units, root) == []
+
+    async def test_a_deleted_unit_leaves_its_state_behind(self, tmp_path: pathlib.Path) -> None:
+        root = Path(tmp_path / "work")
+        await (root / "infra").mkdir(parents=True)
+        await (root / "dns").mkdir()
+
+        assert await orphaned_state([_unit(tmp_path, "infra", "/nonexistent", {})], root) == ["dns"]
+
+    async def test_no_root_yet_is_not_an_orphan(self, tmp_path: pathlib.Path) -> None:
+        """Nothing has run here, so there is nothing to have leaked."""
+        assert await orphaned_state([], Path(tmp_path / "never-created")) == []
