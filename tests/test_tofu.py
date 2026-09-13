@@ -69,6 +69,7 @@ def _unit(tmp_path: pathlib.Path, name: str, tofu: str, config: dict[str, object
     store.mkdir()
     (store / "config.tf.json").write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
     (store / "config.tf.json").chmod(0o444)
+    (store / "providers.json").write_text("[]\n")
     return TofuUnit.model_validate(
         {
             "name": name,
@@ -180,7 +181,12 @@ def test_file_groups_writes_one_config_per_unit_at_its_own_path(tmp_path: pathli
 
     assert dict(file_groups(units)) == {
         "infra/config.tf.json": '{\n  "resource": {}\n}\n',
+        # The resolved provider versions travel with it: `config.tf.json` shows
+        # only `required_providers` constraints, so a version bump would
+        # otherwise pass through a reviewed diff invisibly.
+        "infra/providers.json": "[]\n",
         "dns/config.tf.json": '{\n  "output": {}\n}\n',
+        "dns/providers.json": "[]\n",
     }
 
 

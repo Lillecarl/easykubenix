@@ -146,10 +146,19 @@ async def output(unit: TofuUnit, name: str, root: Path | None = None) -> str:
     return stdout.decode()
 
 
+#: What `ekn commit` takes from a unit's rendered directory. `config.tf.json`
+#: is the configuration; `providers.json` is the version and store path Nix
+#: resolved each provider to, which is the half `config.tf.json` cannot show --
+#: it records `required_providers` constraints, not what they resolved to. See
+#: `tofu.resolvedProviders` in easykubenix's tofu.nix for why that matters once
+#: `.terraform.lock.hcl` is gone.
+COMMITTED_FILES = ("config.tf.json", "providers.json")
+
+
 def config_json(unit: TofuUnit) -> str:
     """*unit*'s rendered `config.tf.json`, read from the store.
 
-    What `ekn commit` writes to the branch. Read rather than re-serialised, so the committed bytes are the store's
+    Read rather than re-serialised, so the committed bytes are the store's
     bytes -- `tofu.nix` pretty-prints through `jq --sort-keys` precisely so
     this file reads as a diff.
     """
@@ -207,8 +216,9 @@ def file_groups(units: dict[str, TofuUnit]) -> list[tuple[str, str]]:
     """Each `tf` unit's rendered configuration as a `(path, content)` pair,
     for `ekn commit` to write to the deploy branch.
 
-    One file per unit, at that unit's own `path`, the same routing the
-    Kubernetes side uses. Two units sharing a path is an error rather than a
+    Two files per unit, at that unit's own `path`, the same routing the
+    Kubernetes side uses -- the configuration, and the provider versions Nix
+    resolved (see `COMMITTED_FILES`). Two units sharing a path is an error rather than a
     merge: `config.tf.json` is one OpenTofu configuration with one state
     behind it, so the two would silently overwrite each other -- unlike two
     Kubernetes units sharing a path, whose objects are distinct files.
@@ -219,14 +229,16 @@ def file_groups(units: dict[str, TofuUnit]) -> list[tuple[str, str]]:
     """
     files: dict[str, str] = {}
     for name, unit in units.items():
-        path = str(PurePosixPath(unit.target.path) / "config.tf.json")
-        if path in files:
-            raise TofuError(f'two tf units render to {path}; unit "{name}" is the second')
-        files[path] = config_json(unit)
+        for filename in COMMITTED_FILES:
+            path = str(PurePosixPath(unit.target.path) / filename)
+            if path in files:
+                raise TofuError(f'two tf units render to {path}; unit "{name}" is the second')
+            files[path] = (SyncPath(unit.config_file) / filename).read_text()
     return list(files.items())
 
 
 __all__ = [
+    "COMMITTED_FILES",
     "WORK_ROOT",
     "TofuError",
     "config_json",

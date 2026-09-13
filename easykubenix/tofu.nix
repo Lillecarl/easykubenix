@@ -183,19 +183,45 @@ in
       '';
     };
 
+    resolvedProviders = lib.mkOption {
+      type = lib.types.anything;
+      readOnly = true;
+      description = ''
+        Every provider `tofu.providers` selected, with the version and store
+        path Nix resolved it to.
+
+        This exists because `.terraform.lock.hcl` does not. The lock's hashes
+        verify a property the store already guarantees, so dropping it loses
+        no integrity -- but it did carry one thing worth keeping: notice that
+        a provider moved. `config.tf.json` records only the
+        `required_providers` *constraints*, so a 5.31 to 5.40 bump can pass
+        through a reviewed diff invisibly, the whole change being a store path
+        nobody wrote down.
+
+        Rendered beside `config.tf.json` as `providers.json` and committed
+        with it, so the bump shows up in review rather than at apply time.
+      '';
+    };
+
     configFile = lib.mkOption {
       type = lib.types.package;
       readOnly = true;
       description = ''
-        A directory holding `config.tf.json`. A directory and not a file,
-        because `tofu` takes a working directory rather than a config path,
-        and because a later change may add more files beside it.
+        A directory holding `config.tf.json` and `providers.json`. A directory
+        and not a file, because `tofu` takes a working directory rather than a
+        config path.
       '';
     };
   };
 
   config.tofu = {
     wrappedPackage = cfg.package.withPlugins cfg.providers;
+
+    resolvedProviders = map (plugin: {
+      inherit (plugin) version;
+      name = plugin.pname or plugin.name;
+      path = "${plugin}";
+    }) (cfg.providers cfg.package.plugins);
 
     generated = checked (
       lib.filterAttrs (_: value: value != { } && value != [ ]) (dropNulls {
@@ -230,12 +256,14 @@ in
         {
           nativeBuildInputs = [ pkgs.jq ];
           value = cfg.generated;
+          providers = cfg.resolvedProviders;
           __structuredAttrs = true;
           preferLocalBuild = true;
         }
         ''
           mkdir -p "$out"
           jq --sort-keys .value "$NIX_ATTRS_JSON_FILE" > "$out/config.tf.json"
+          jq --sort-keys .providers "$NIX_ATTRS_JSON_FILE" > "$out/providers.json"
         '';
   };
 }

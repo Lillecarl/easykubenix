@@ -75,6 +75,20 @@ pkgs.runCommand "easykubenix-check-tofu-render"
     ${pkgs.jq}/bin/jq -S . config.tf.json > got.json
     diff -u want.json got.json
 
+    # The resolved provider, recorded beside the configuration. This is what
+    # replaces `.terraform.lock.hcl`: `config.tf.json` carries only the
+    # `required_providers` constraint, so without this file a version bump is
+    # a reviewed diff with nothing in it. The version is read back rather than
+    # pinned to a literal, because it moves with the nixpkgs pin -- what is
+    # gated is that the file exists, names the provider, and agrees with the
+    # store path `tofu` was actually given.
+    ${pkgs.jq}/bin/jq -e '
+      length == 1
+      and .[0].name == "terraform-provider-random"
+      and (.[0].version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
+      and (.[0].path | startswith("/nix/store/"))
+    ' ${unit.configFile}/providers.json > /dev/null
+
     ${unit.tofu} init -input=false
     ${unit.tofu} validate
 
