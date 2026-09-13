@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path as SyncPath
 from typing import TYPE_CHECKING
 
 import pytest
 from anyio import Path
 
 from ekn.eval import TofuUnit
-from ekn.tofu import TofuError, config_json, file_groups, prepare, run_chain
+from ekn.tofu import (
+    TofuError,
+    config_json,
+    file_groups,
+    kubeconfig_from_output,
+    prepare,
+    run_chain,
+)
 
 if TYPE_CHECKING:
     import pathlib
@@ -17,6 +25,26 @@ if TYPE_CHECKING:
 #: real `init` through this too.
 _RECORDER = """#!/bin/sh
 printf '%s %s\\n' "$(basename "$(pwd)")" "$*" >> "$TOFU_LOG"
+exit 0
+"""
+
+#: Succeeds for `init` and prints a kubeconfig for `output`, so the bridge can
+#: be tested without OpenTofu or a cloud behind it.
+_OUTPUTS = """#!/bin/sh
+printf '%s %s\\n' "$(basename "$(pwd)")" "$*" >> "$TOFU_LOG"
+case "$1" in
+  output) printf 'apiVersion: v1\\n' ;;
+esac
+exit 0
+"""
+
+#: `init` succeeds, `output` does not -- the shape a missing output has, since
+#: a fake that fails at `init` never reaches the call under test.
+_OUTPUT_FAILS = """#!/bin/sh
+printf '%s %s\\n' "$(basename "$(pwd)")" "$*" >> "$TOFU_LOG"
+case "$1" in
+  output) exit 1 ;;
+esac
 exit 0
 """
 
@@ -164,3 +192,30 @@ def test_file_groups_refuses_two_units_at_one_path(tmp_path: pathlib.Path) -> No
 
     with pytest.raises(TofuError, match="two tf units render to"):
         file_groups({"infra": first, "dns": second})
+
+
+async def test_kubeconfig_from_output_is_private_and_temporary(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kubeconfig is a credential, so the file it lands in must not be
+    readable by everyone on the machine, and must not outlive the command."""
+    monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
+    tofu = _fake_tofu(tmp_path, "tofu", _OUTPUTS)
+    unit = _unit(tmp_path, "infra", tofu, {})
+
+    async with kubeconfig_from_output(unit, "kubeconfig", Path(tmp_path / "work")) as path:
+        assert SyncPath(path).read_text() == "apiVersion: v1\n"
+        assert SyncPath(path).stat().st_mode & 0o077 == 0
+
+    assert not SyncPath(path).exists()
+
+
+async def test_kubeconfig_from_output_reports_a_missing_output(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
+    unit = _unit(tmp_path, "infra", _fake_tofu(tmp_path, "tofu", _OUTPUT_FAILS), {})
+
+    with pytest.raises(TofuError, match="tofu output -raw kubeconfig"):
+        async with kubeconfig_from_output(unit, "kubeconfig", Path(tmp_path / "work")):
+            pass

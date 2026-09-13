@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import sys
@@ -60,7 +61,12 @@ from ekn.gitops import (
     flatten_manifests,
 )
 from ekn.sops import ensure_age_identities, maybe_decrypt
-from ekn.tofu import TofuError, file_groups as tofu_file_groups, run_chain
+from ekn.tofu import (
+    TofuError,
+    file_groups as tofu_file_groups,
+    kubeconfig_from_output as tofu_kubeconfig,
+    run_chain,
+)
 from ekn.validation import EphemeralControlPlane, exec_capture, prepare_validation_objects
 
 if TYPE_CHECKING:
@@ -733,6 +739,43 @@ class KubeApply(AttrCommand):
         None,
         help="Prompt for confirmation unless the current kubectl context ends with this name.",
     )
+    kubeconfig_from_tofu: str | None = opt(
+        None,
+        help="Take the kubeconfig from a tf unit's OpenTofu output, as UNIT:OUTPUT. "
+        "For a cluster a tf unit built, which the ambient kubeconfig does not know about yet.",
+    )
+
+    async def _kubeconfig(
+        self,
+        stack: contextlib.AsyncExitStack,
+        uri: str | None,
+        customer: str | None,
+    ) -> str | None:
+        """The kubeconfig this apply uses, or None for the ambient one.
+
+        With `--kubeconfig-from-tofu UNIT:OUTPUT`, the credential comes out of
+        a `tf` unit's OpenTofu output and lands in a temporary file *stack*
+        removes afterwards. That is the whole tofu-to-Kubernetes bridge: a `tf`
+        unit builds the cluster, a Kubernetes unit has to reach it, and the two
+        cannot be one apply -- so the credential travels at apply time and
+        never through Nix.
+        """
+        if self.kubeconfig_from_tofu is None:
+            return None
+        unit_name, _, output_name = self.kubeconfig_from_tofu.partition(":")
+        if not unit_name or not output_name:
+            _log.error("--kubeconfig-from-tofu takes UNIT:OUTPUT")
+            raise SystemExit(1)
+        try:
+            units = await evaluate_tofu_units(self.file, uri, customer, self.attr, unit_name)
+            return await stack.enter_async_context(tofu_kubeconfig(units[-1], output_name))
+        except NixError as exc:
+            _report_nix_error(exc)
+        except ValidationError as exc:
+            _report_validation_error("tofu units", exc)
+        except (TofuError, ValueError) as exc:
+            _log.error(str(exc))
+            raise SystemExit(1) from exc
 
     async def run(self) -> None:
         if self.confirm_context is not None:
@@ -751,13 +794,19 @@ class KubeApply(AttrCommand):
             _report_nix_error(exc)
         except ValidationError as exc:
             _report_validation_error("kubeapply config", exc)
-        api = await kr8s.asyncio.api()
-        if cfg.sops_age_identities:
-            await ensure_age_identities(cfg.sops_age_identities, api=api)
-        try:
-            await _apply_groups(cfg, api=api, target=self.target, prune=self.prune)
-        except kr8s.ServerError as exc:
-            _report_server_error("apply", exc)
+
+        # `AsyncExitStack` rather than two code paths: the kubeconfig is a
+        # temporary file that must outlive the apply and not outlive the
+        # command, and without one the whole body would be written twice.
+        async with contextlib.AsyncExitStack() as stack:
+            kubeconfig = await self._kubeconfig(stack, uri, customer)
+            api = await kr8s.asyncio.api(kubeconfig=kubeconfig)
+            if cfg.sops_age_identities:
+                await ensure_age_identities(cfg.sops_age_identities, api=api)
+            try:
+                await _apply_groups(cfg, api=api, target=self.target, prune=self.prune)
+            except kr8s.ServerError as exc:
+                _report_server_error("apply", exc)
 
 
 class _TofuCommand(AttrCommand):

@@ -29,7 +29,11 @@ command.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 import shutil
+import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path as SyncPath, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -37,7 +41,7 @@ import structlog
 from anyio import Path
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncGenerator, Sequence
 
     from ekn.eval import TofuUnit
 
@@ -148,6 +152,38 @@ def config_json(unit: TofuUnit) -> str:
     return (SyncPath(unit.config_file) / "config.tf.json").read_text()
 
 
+@asynccontextmanager
+async def kubeconfig_from_output(
+    unit: TofuUnit,
+    output_name: str,
+    root: Path | None = None,
+) -> AsyncGenerator[str]:
+    """*unit*'s named output, written to a temporary kubeconfig, yielded as a
+    path.
+
+    This is the whole of the tofu-to-Kubernetes bridge. A `tf` unit builds the
+    cluster and a Kubernetes unit has to reach it, and the two cannot be one
+    apply -- so the credential travels here, at apply time, and never through
+    Nix. Evaluation would otherwise depend on what a previous apply did.
+
+    Mode 0600 before anything is written to it, and deleted on the way out. A
+    kubeconfig is a credential, and a default-mode temporary file in a shared
+    `/tmp` is readable by every other user on the machine.
+    """
+    content = await output(unit, output_name, root)
+    handle, path = tempfile.mkstemp(prefix="ekn-kubeconfig-", suffix=".yaml")
+    try:
+        with os.fdopen(handle, "w") as stream:
+            stream.write(content)
+        _log.info(f"{unit.name}: kubeconfig from output {output_name}")
+        yield path
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            # Expected: the caller has no reason to remove it, but a crash
+            # between mkstemp and here would leave nothing to unlink.
+            await Path(path).unlink()
+
+
 def file_groups(units: dict[str, TofuUnit]) -> list[tuple[str, str]]:
     """Each `tf` unit's rendered configuration as a `(path, content)` pair,
     for `ekn commit` to write to the deploy branch.
@@ -176,6 +212,7 @@ __all__ = [
     "TofuError",
     "config_json",
     "file_groups",
+    "kubeconfig_from_output",
     "output",
     "prepare",
     "run_chain",
