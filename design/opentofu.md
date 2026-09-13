@@ -4,9 +4,8 @@ A deployment unit can hold OpenTofu configuration instead of Kubernetes
 objects. The two kinds are told apart by the module system's class —
 `class = "tf"` against `class = "kubernetes"`.
 
-Status: the Nix half is built and gated by
-`nix build --file ./checks.nix tofu-render`. The four design decisions below
-are all answered. What remains is `ekn` — see the touch points at the end.
+Status: built, on both sides. The four design decisions below are answered and
+implemented. `nix build --file ./checks.nix tofu-render` is the gate.
 
 ## What the class does, and what it does not do
 
@@ -234,22 +233,25 @@ Done, in the Nix half:
    `tofu validate` in the build sandbox, where there is no network to fall
    back on.
 
-Remaining, in `ekn`:
+Done, in `ekn`:
 
-5. `ekn tofu {plan,apply,destroy} --target X` — decision 1. Reads
-   `deployment.tofuUnits`, realises each unit's `configFile` and `tofu`, and
-   runs the dependency closure deepest first, each as its own invocation.
-   The store path is read-only, so `config.tf.json` is copied into a per-unit
-   working directory; `tofu init` writes `.terraform/` and a lock file beside
-   it.
+5. `ekn tofu {plan,apply,destroy} --target X` — decision 1. `evaluate_tofu_units`
+   reads `deployment.tofuUnits` and realises each unit's `configFile` and
+   `tofu`; `ekn/tofu.py` copies the configuration out of the read-only store
+   into a per-unit working directory, drops the stale `.terraform.lock.hcl`,
+   and runs the closure deepest first.
 6. `ekn commit` writes each `tf` unit's `config.tf.json` to its `path` —
-   decision 4. `gitops.file_groups` currently raises when
-   `kubernetes.deploymentUnits` is empty, which a `tf`-only instance would
-   hit.
-7. `ekn kubeapply --kubeconfig-from-tofu <unit>:<output>` — decision 2. Runs
-   `tofu output -raw` on the named unit and points `KUBECONFIG` at the
-   result, which is how a Kubernetes unit reaches a cluster its `tf`
-   dependency just built.
+   decision 4. `gitops.file_groups` no longer raises on an empty
+   `kubernetes.deploymentUnits`, and the "nothing to commit" check moved to
+   where both halves are known.
+7. `ekn kubeapply --kubeconfig-from-tofu <unit>:<output>` — decision 2. The
+   output lands in a 0600 temporary file, passed straight to `kr8s`, removed
+   when the command ends.
 
 Items 1 through 4 needed no change to the `ekn` CLI or to the JSON schema it
 validates, which is why they went first.
+
+`kubernetes.deploymentUnits` is untouched by all of this. A `tf` unit lives in
+`deployment.tofuUnits` and validates through its own `TofuUnit` model, so every
+consumer that reads `.objects` off a Kubernetes unit still reads exactly what
+it did before.

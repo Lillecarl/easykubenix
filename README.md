@@ -258,6 +258,74 @@ Target metadata wins over what the object already carries. Helm charts routinely
 set `app.kubernetes.io/instance` to their release name, which is exactly the key
 a GitOps engine may be reading to decide ownership.
 
+### OpenTofu units
+
+A deployment unit can hold OpenTofu configuration instead of Kubernetes
+objects:
+
+```nix
+deployment.units.infra = {
+  class = "tf";
+  path = "infra";
+  modules = [ ./infra/cluster.nix ];
+};
+```
+
+Its modules declare `tofu.{terraform,provider,resource,data,output,...}` rather
+than `kubernetes.*`, and render to one `config.tf.json`. The module system
+enforces the split: a nested `tf` instance is evaluated with `class = "tf"`, so
+a Kubernetes module imported into it fails at the import naming both classes,
+rather than failing once per option.
+
+Providers are pinned by Nix, not by a lockfile:
+
+```nix
+tofu.providers = plugins: [ plugins.hashicorp_random ];
+```
+
+`tofu init` then resolves them from the store and needs no network.
+
+`ekn tofu {plan,apply,destroy} --target infra` runs it. A separate verb from
+`ekn kubeapply` on purpose — OpenTofu carries a backend, a lock and a
+plan/apply split, and `--prune` means nothing to it. A unit's `dependencies`
+run first, deepest first, each as its own `tofu` invocation: OpenTofu has no
+`ekn.resourcePriority` equivalent, so there is no single plan to merge them
+into. For the same reason a dependency may not cross classes, and an assertion
+says so.
+
+`ekn commit` writes each unit's `config.tf.json` beside the rendered
+manifests, so an infrastructure change is reviewable as a diff. Committing it
+does not make anything apply it — `ekn rollback` restores the file with the
+rest of the tree, but `ekn tofu` reads the Nix evaluation rather than the
+branch, so rolling infrastructure back means rolling the source back.
+
+`ekn tofu` keeps a working directory per unit under `.ekn/tofu/<name>`, holding
+`.terraform/` and, for a local backend, live state. Add `.ekn/` to your
+`.gitignore`.
+
+OpenTofu reads `${...}` inside any JSON string as an expression, so two helpers
+say which you meant:
+
+```nix
+tofu.output.name.value = ekn.lib.tf.ref "random_pet.cluster.id";
+stringData.script = ekn.lib.tf.escape someShellScript;
+```
+
+Without `escape`, a string holding `${` fails inside `tofu` with a message
+about an unknown variable, naming neither the option nor the Nix string behind
+it.
+
+An output never reaches Nix — evaluation would then depend on what a previous
+apply did. It travels at apply time instead, which is what connects a `tf` unit
+that builds a cluster to the Kubernetes unit that has to reach it:
+
+```console
+$ ekn tofu apply --target infra
+$ ekn kubeapply --target apps --kubeconfig-from-tofu infra:kubeconfig
+```
+
+See `design/opentofu.md`.
+
 ### Kluctl integration (deprecated)
 
 `kluctl` is a CLI and GitOps tool that deploys manifests, and easykubenix can
