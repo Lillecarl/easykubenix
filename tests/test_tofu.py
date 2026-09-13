@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from anyio import Path
 
+from ekn.cli import parse
 from ekn.eval import TofuUnit
 from ekn.tofu import (
     TofuError,
@@ -219,3 +220,33 @@ async def test_kubeconfig_from_output_reports_a_missing_output(
     with pytest.raises(TofuError, match="tofu output -raw kubeconfig"):
         async with kubeconfig_from_output(unit, "kubeconfig", Path(tmp_path / "work")):
             pass
+
+
+class TestCommandLine:
+    """The `ekn tofu` surface, through the real parser rather than a double --
+    so a change to a declaration is a change these see."""
+
+    def test_each_subcommand_dispatches_to_its_own_class(self) -> None:
+        assert type(parse(["tofu", "plan", "--target", "infra", "-f", "."])).__name__ == "TofuPlan"
+        assert type(parse(["tofu", "apply", "--target", "infra", "-f", "."])).__name__ == "TofuApply"
+        assert type(parse(["tofu", "destroy", "--target", "infra", "-f", "."])).__name__ == "TofuDestroy"
+
+    def test_plan_never_takes_auto_approve(self) -> None:
+        """`plan` changes nothing, so a confirmation flag on it would be a lie
+        -- and a caller who typed it would believe an apply had been approved."""
+        with pytest.raises(SystemExit):
+            parse(["tofu", "plan", "--target", "infra", "--auto-approve", "-f", "."])
+
+    def test_apply_prompts_unless_auto_approve_is_given(self) -> None:
+        """Nothing sets `TF_IN_AUTOMATION`, so tofu asks as usual by default."""
+        assert parse(["tofu", "apply", "--target", "infra", "-f", "."]).auto_approve is False
+        assert parse(["tofu", "apply", "--target", "infra", "--auto-approve", "-f", "."]).auto_approve is True
+
+    def test_a_target_is_required(self) -> None:
+        with pytest.raises(SystemExit):
+            parse(["tofu", "apply", "-f", "."])
+
+    def test_kubeapply_takes_a_tofu_kubeconfig(self) -> None:
+        command = parse(["kubeapply", "--kubeconfig-from-tofu", "infra:kubeconfig", "-f", "."])
+        assert command.kubeconfig_from_tofu == "infra:kubeconfig"
+        assert parse(["kubeapply", "-f", "."]).kubeconfig_from_tofu is None

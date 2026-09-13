@@ -819,7 +819,14 @@ class _TofuCommand(AttrCommand):
     """The shared half of every `ekn tofu` subcommand: name a unit, resolve
     its chain, run one `tofu` command over each link."""
 
+    # `required`, and not merely un-defaulted. Every option in this framework
+    # is declared with `argparse.SUPPRESS` and filled from its declaration
+    # afterwards, so an option with no default silently becomes `None` rather
+    # than being refused -- and `None` is what `evaluate_tofu_units` reads as
+    # "every tf unit". Without this, `ekn tofu apply` with no `--target`
+    # applies the whole instance.
     target: str = opt(
+        required=True,
         help='The `class = "tf"` deployment unit to act on. Its dependencies run first, deepest first.',
     )
 
