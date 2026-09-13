@@ -17,6 +17,7 @@ from ekn.tofu import (
     kubeconfig_from_output,
     prepare,
     run_chain,
+    state_location,
 )
 
 if TYPE_CHECKING:
@@ -283,3 +284,59 @@ class TestDependents:
 
     def test_a_middle_unit_names_only_what_is_above_it(self, tmp_path: pathlib.Path) -> None:
         assert dependents(self._chain(tmp_path), "cluster") == ["ingress"]
+
+
+async def test_prepare_skips_init_when_nothing_changed(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--kubeconfig-from-tofu` calls `prepare` only to read one output, and
+    re-initialising there is a provider download and a backend round trip for a
+    question already answered."""
+    monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
+    unit = _unit(tmp_path, "infra", _fake_tofu(tmp_path, "tofu", _RECORDER), {})
+    root = Path(tmp_path / "work")
+
+    workdir = await prepare(unit, root)
+    # The fake writes no `.terraform/`; a real `tofu init` does.
+    await (workdir / ".terraform").mkdir()
+    await prepare(unit, root)
+
+    assert (tmp_path / "calls").read_text() == "infra init -input=false\n"
+
+
+async def test_prepare_re_inits_when_the_config_changed(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `.terraform/` alone is not enough -- the configuration is what decides
+    whether the initialised directory still matches."""
+    monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
+    unit = _unit(tmp_path, "infra", _fake_tofu(tmp_path, "tofu", _RECORDER), {})
+    root = Path(tmp_path / "work")
+
+    workdir = await prepare(unit, root)
+    await (workdir / ".terraform").mkdir()
+    await (workdir / "config.tf.json").write_text('{"resource": {}}')
+    await prepare(unit, root)
+
+    assert (tmp_path / "calls").read_text().count("init") == 2
+
+
+class TestStateLocation:
+    """Reported on every run, because easykubenix asserts nothing about a
+    backend and a unit that forgot one gets silent local state."""
+
+    async def test_a_missing_backend_says_local_and_not_committed(self, tmp_path: pathlib.Path) -> None:
+        workdir = Path(tmp_path)
+        await (workdir / "config.tf.json").write_text("{}")
+
+        assert await state_location(workdir) == f"{workdir}/terraform.tfstate (local, not committed)"
+
+    async def test_an_explicit_local_backend_says_the_same(self, tmp_path: pathlib.Path) -> None:
+        workdir = Path(tmp_path)
+        await (workdir / "config.tf.json").write_text('{"terraform": {"backend": {"local": {}}}}')
+
+        assert "local, not committed" in await state_location(workdir)
+
+    async def test_a_remote_backend_is_named(self, tmp_path: pathlib.Path) -> None:
+        workdir = Path(tmp_path)
+        await (workdir / "config.tf.json").write_text('{"terraform": {"backend": {"s3": {"bucket": "b"}}}}')
+
+        assert await state_location(workdir) == "s3 backend"

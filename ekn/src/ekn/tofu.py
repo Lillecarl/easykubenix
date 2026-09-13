@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import shutil
 import tempfile
@@ -72,6 +73,29 @@ async def _run(unit: TofuUnit, workdir: Path, args: Sequence[str]) -> None:
         raise TofuError(f"{unit.name}: tofu {' '.join(args)} exited {code}")
 
 
+async def state_location(workdir: Path) -> str:
+    """Where the state for the configuration in *workdir* actually lives, as
+    one readable line.
+
+    Reported on every run, and the reason is a footgun rather than a nicety.
+    easykubenix has no default backend and asserts nothing about one, which is
+    right -- a fixture unit legitimately wants local state, and a mandatory
+    backend would force a fake block into every test to satisfy a rule about
+    production. But a unit that simply forgot one gets a silent local state
+    file, and nothing else would ever say so.
+
+    Apply-time truth rather than an evaluation-time guess: this reads the
+    rendered configuration, so it is right about what `tofu` will do.
+    """
+    config = json.loads(await (workdir / "config.tf.json").read_text())
+    backend = config.get("terraform", {}).get("backend")
+    if isinstance(backend, dict) and backend:
+        kind = next(iter(backend))
+        if kind != "local":
+            return f"{kind} backend"
+    return f"{workdir}/terraform.tfstate (local, not committed)"
+
+
 async def prepare(unit: TofuUnit, root: Path | None = None) -> Path:
     """Lay out *unit*'s working directory and initialise it.
 
@@ -83,7 +107,19 @@ async def prepare(unit: TofuUnit, root: Path | None = None) -> Path:
     await workdir.mkdir(parents=True, exist_ok=True)
 
     source = Path(unit.config_file) / "config.tf.json"
-    await asyncio.to_thread(shutil.copyfile, str(source), str(workdir / "config.tf.json"))
+    target = workdir / "config.tf.json"
+
+    # An `init` that would change nothing is skipped. `ekn kubeapply
+    # --kubeconfig-from-tofu` calls `prepare` only to read one output, and
+    # re-initialising there means a provider download and a backend round trip
+    # for a question already answered. Unchanged means both: the configuration
+    # byte-identical to the store's, and a `.terraform/` already there.
+    unchanged = await target.exists() and await target.read_bytes() == await source.read_bytes()
+    if unchanged and await (workdir / ".terraform").exists():
+        _log.info(f"{unit.name}: state at {await state_location(workdir)}")
+        return workdir
+
+    await asyncio.to_thread(shutil.copyfile, str(source), str(target))
     # `copyfile` copies contents and not permission bits, so the store's 0444
     # does not come along: the destination lands at 0666 before the umask, and
     # on a machine with a loose umask that is a world-writable file. Measured,
@@ -99,6 +135,7 @@ async def prepare(unit: TofuUnit, root: Path | None = None) -> Path:
         await lock.unlink()
 
     await _run(unit, workdir, ["init", "-input=false"])
+    _log.info(f"{unit.name}: state at {await state_location(workdir)}")
     return workdir
 
 
@@ -248,4 +285,5 @@ __all__ = [
     "output",
     "prepare",
     "run_chain",
+    "state_location",
 ]
