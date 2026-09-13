@@ -60,7 +60,7 @@ from ekn.gitops import (
     flatten_manifests,
 )
 from ekn.sops import ensure_age_identities, maybe_decrypt
-from ekn.tofu import TofuError, run_chain
+from ekn.tofu import TofuError, file_groups as tofu_file_groups, run_chain
 from ekn.validation import EphemeralControlPlane, exec_capture, prepare_validation_objects
 
 if TYPE_CHECKING:
@@ -254,9 +254,19 @@ async def _resolve_gitops(
     result = await _evaluate_gitops(file, flake, attr)
     try:
         files = gitops_file_groups(result)
-    except (GitOpsTargetError, TypeError) as exc:
+        # Each `tf` unit's `config.tf.json`, beside the manifests and on the
+        # same branch. Committed so the infrastructure change is reviewable as
+        # a diff, the same way the rendered objects are.
+        files += tofu_file_groups(result.config.git_ops.tofu_units)
+    except (GitOpsTargetError, TofuError, TypeError) as exc:
         _log.error("GitOps routing failed: %s", exc)
         raise SystemExit(1) from exc
+    if not files:
+        # Checked here rather than inside either renderer: a `tf`-only
+        # instance routes no Kubernetes object and still has something to
+        # commit, so neither half can answer this on its own.
+        _log.error("nothing to commit: no routed Kubernetes objects and no tf units")
+        raise SystemExit(1)
     deploy_branch, source_branch = gitops_branches(result)
     return deploy_branch, source_branch, files
 

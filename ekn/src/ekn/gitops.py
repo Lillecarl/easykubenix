@@ -188,9 +188,10 @@ def file_groups(result: GitOpsManifestsResult) -> list[tuple[str, str]]:
     `branches`), so there is nothing left to group by branch here.
     """
     gitops_targets = result.config.kubernetes.gitops_targets
-    if not gitops_targets:
-        raise GitOpsTargetError("no GitOps-routed Kubernetes objects found")
-
+    # An empty set is not an error here any more. A `tf`-only instance routes
+    # no Kubernetes object at all and still has something to commit, so the
+    # "nothing to commit" check belongs where both sources are known -- see
+    # `_resolve_gitops` in cli.py.
     routed = resolved_targets(gitops_targets)
 
     files: dict[str, str] = {}

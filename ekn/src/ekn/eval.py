@@ -94,12 +94,21 @@ class TofuUnit(BaseModel):
 
 
 class GitOpsBranches(BaseModel):
-    """Validated `deployment.deployBranch`/`deployment.sourceBranch` -- `source_branch`
-    null disables the dual-commit source-snapshot feature for this instance,
-    see `cli.py`'s `_gitops_branches`."""
+    """Validated `deployment.*` -- the branch pair, and the `tf` units whose
+    rendered configuration is committed alongside the manifests.
+
+    `source_branch` null disables the dual-commit source-snapshot feature for
+    this instance, see `cli.py`'s `_gitops_branches`.
+
+    `tofu_units` is here rather than beside `kubernetes.deploymentUnits`
+    because that is where Nix puts it, and Nix puts it there because a `tf`
+    unit renders no Kubernetes object. Defaulted, so an instance that declares
+    none validates unchanged.
+    """
 
     deploy_branch: _NonEmptyStr = Field(alias="deployBranch")
     source_branch: _NonEmptyStr | None = Field(default=None, alias="sourceBranch")
+    tofu_units: dict[str, TofuUnit] = Field(default_factory=dict, alias="tofuUnits")
 
 
 class GitOpsTargetEntry(BaseModel):
@@ -606,6 +615,20 @@ async def evaluate_gitops_manifests(
             gitops_targets = await proxy.attr("kubernetes").attr("deploymentUnits").to_python()
             deploy_branch = await gitops_proxy.attr("deployBranch").to_python()
             source_branch = await gitops_proxy.attr("sourceBranch").to_python()
+            tofu_units = await gitops_proxy.attr("tofuUnits").to_python()
+        if not isinstance(tofu_units, dict):
+            raise TypeError("deployment.tofuUnits did not evaluate to an object")
+
+        # `configFile` only, deliberately, and not the wrapped `tofu` beside
+        # it. A commit writes the rendered configuration and never runs
+        # anything, so realising the binary would build OpenTofu and every
+        # pinned provider for nothing. `evaluate_tofu_units` realises both,
+        # because that path does run them.
+        if tofu_units:
+            with timed_stage("gitops: realise(deployment.tofuUnits.*.configFile)"):
+                for name in tofu_units:
+                    await gitops_proxy.attr("tofuUnits").attr(name).attr("configFile").realise_string()
+
         return GitOpsManifestsResult.model_validate(
             {
                 "config": {
@@ -615,6 +638,7 @@ async def evaluate_gitops_manifests(
                     "deployment": {
                         "deployBranch": deploy_branch,
                         "sourceBranch": source_branch,
+                        "tofuUnits": tofu_units,
                     },
                 },
             }

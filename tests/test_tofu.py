@@ -7,7 +7,7 @@ import pytest
 from anyio import Path
 
 from ekn.eval import TofuUnit
-from ekn.tofu import TofuError, config_json, prepare, run_chain
+from ekn.tofu import TofuError, config_json, file_groups, prepare, run_chain
 
 if TYPE_CHECKING:
     import pathlib
@@ -139,3 +139,28 @@ def test_config_json_is_the_stores_own_bytes(tmp_path: pathlib.Path) -> None:
     unit = _unit(tmp_path, "infra", "/nonexistent", {"terraform": {"required_version": ">= 1.6"}})
 
     assert config_json(unit) == '{\n  "terraform": {\n    "required_version": ">= 1.6"\n  }\n}\n'
+
+
+def test_file_groups_writes_one_config_per_unit_at_its_own_path(tmp_path: pathlib.Path) -> None:
+    """What `ekn commit` puts on the deploy branch, beside the manifests."""
+    units = {
+        "infra": _unit(tmp_path, "infra", "/nonexistent", {"resource": {}}),
+        "dns": _unit(tmp_path, "dns", "/nonexistent", {"output": {}}),
+    }
+
+    assert dict(file_groups(units)) == {
+        "infra/config.tf.json": '{\n  "resource": {}\n}\n',
+        "dns/config.tf.json": '{\n  "output": {}\n}\n',
+    }
+
+
+def test_file_groups_refuses_two_units_at_one_path(tmp_path: pathlib.Path) -> None:
+    """Two Kubernetes units may share a path -- their objects are distinct
+    files. Two tf units may not: `config.tf.json` is one configuration with one
+    state behind it, so the second would silently replace the first."""
+    first = _unit(tmp_path, "infra", "/nonexistent", {"resource": {}})
+    second = _unit(tmp_path, "dns", "/nonexistent", {"output": {}})
+    second = second.model_copy(update={"target": first.target})
+
+    with pytest.raises(TofuError, match="two tf units render to"):
+        file_groups({"infra": first, "dns": second})

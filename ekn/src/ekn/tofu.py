@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-from pathlib import Path as SyncPath
+from pathlib import Path as SyncPath, PurePosixPath
 from typing import TYPE_CHECKING
 
 import structlog
@@ -148,10 +148,34 @@ def config_json(unit: TofuUnit) -> str:
     return (SyncPath(unit.config_file) / "config.tf.json").read_text()
 
 
+def file_groups(units: dict[str, TofuUnit]) -> list[tuple[str, str]]:
+    """Each `tf` unit's rendered configuration as a `(path, content)` pair,
+    for `ekn commit` to write to the deploy branch.
+
+    One file per unit, at that unit's own `path`, the same routing the
+    Kubernetes side uses. Two units sharing a path is an error rather than a
+    merge: `config.tf.json` is one OpenTofu configuration with one state
+    behind it, so the two would silently overwrite each other -- unlike two
+    Kubernetes units sharing a path, whose objects are distinct files.
+
+    Committing this is what makes an infrastructure change reviewable. It is
+    also the reason `tofu.nix` pretty-prints the file: `builtins.toJSON` emits
+    one line, and a one-line diff says only that something changed.
+    """
+    files: dict[str, str] = {}
+    for name, unit in units.items():
+        path = str(PurePosixPath(unit.target.path) / "config.tf.json")
+        if path in files:
+            raise TofuError(f'two tf units render to {path}; unit "{name}" is the second')
+        files[path] = config_json(unit)
+    return list(files.items())
+
+
 __all__ = [
     "WORK_ROOT",
     "TofuError",
     "config_json",
+    "file_groups",
     "output",
     "prepare",
     "run_chain",
