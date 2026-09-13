@@ -6,6 +6,8 @@
   ...
 }:
 {
+  _class = "kubernetes";
+
   options.internal = lib.mkOption {
     # `types.anything`'s merge recurses into every nested attrset (including
     # derivations, which are themselves attrsets) to detect mkIf/mkOverride/

@@ -62,6 +62,8 @@ let
   };
 in
 {
+  _class = "kubernetes";
+
   options.importyaml = mkOption {
     description = ''
       Kubernetes manifests imported from YAML.

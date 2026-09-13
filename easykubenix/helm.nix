@@ -13,6 +13,8 @@ let
   globalConfig = config;
 in
 {
+  _class = "kubernetes";
+
   options.helm = {
     package = lib.mkPackageOption pkgs "kubernetes-helm" { };
     releases = mkOption {

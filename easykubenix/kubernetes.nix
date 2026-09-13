@@ -436,6 +436,8 @@ let
   );
 in
 {
+  _class = "kubernetes";
+
   imports = [
     (lib.mkAliasOptionModule [ "kubernetes" "resources" ] [ "kubernetes" "objects" ])
     # `kubernetes.gitOpsTargets` is renamed further down rather than here.

@@ -21,6 +21,8 @@ let
   );
 in
 {
+  _class = "kubernetes";
+
   options.validation = {
     debug = lib.mkEnableOption "validation debugging";
     etcdPackage = lib.mkPackageOption pkgs "etcd" { };

@@ -76,6 +76,8 @@ let
     };
 in
 {
+  _class = "kubernetes";
+
   imports = [
     (lib.mkRemovedOptionModule [ "ekn" "discriminator" ] ''
       `ekn.discriminator' is now `ekn.environment', and the label it stamps

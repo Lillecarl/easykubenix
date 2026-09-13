@@ -5,6 +5,8 @@
   ...
 }:
 {
+  _class = "kubernetes";
+
   # `gitOps.*` was the old name for all of this, and every definition of it
   # keeps working and warns with the new path.
   #

@@ -85,6 +85,8 @@ let
   kluctlGenerated = lib.filter (object: !(isExcludedFromKluctl object)) config.kubernetes.generated;
 in
 {
+  _class = "kubernetes";
+
   # Both options moved out of `kluctl.*` because neither is kluctl's any more:
   # `ekn`'s own `apply_and_prune` reads them (see ekn/src/ekn/apply.py) to
   # order barriers and to scope pruning, and it does so whether or not kluctl

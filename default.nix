@@ -122,6 +122,11 @@ let
 
   # The modules every instance is evaluated with -- the top-level one, and
   # every nested one a GitOps target instantiates through `mkInstance` below.
+  #
+  # Every one of these carries `_class = "kubernetes"` except `assertions.nix`
+  # and `lib.nix`, which declare no Kubernetes option and are left unmarked on
+  # purpose -- an unmarked module imports into an evaluation of any class, so
+  # a second class can reuse them as-is.
   # One list, deliberately: a nested instance is a whole easykubenix
   # configuration rather than a cut-down one, so a bootstrap target can render
   # a Helm chart (which is how you install the GitOps engine it exists to
@@ -182,6 +187,16 @@ let
       specialArgs ? { },
     }:
     lib.evalModules {
+      # A nominal type on the evaluation, checked against each module's own
+      # `_class` as it is imported. It buys one thing: a module written for a
+      # different class fails at the import with a message that names both
+      # classes, instead of failing per option with "does not exist".
+      #
+      # It is a guard and nothing else. It does not select `baseModules` and
+      # it does not reach `config` -- a second class needs its own base list
+      # and its own downstream handling either way.
+      class = "kubernetes";
+
       # The caller's own arguments win over the forwarded ones, so
       # gitops.nix's `parent` cannot be shadowed by a consumer passing a
       # `parent` of its own at the top level.
