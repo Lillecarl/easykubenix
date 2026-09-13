@@ -84,7 +84,11 @@ async def prepare(unit: TofuUnit, root: Path | None = None) -> Path:
 
     source = Path(unit.config_file) / "config.tf.json"
     await asyncio.to_thread(shutil.copyfile, str(source), str(workdir / "config.tf.json"))
-    # Read-only in the store, and a re-copy onto a read-only file fails.
+    # `copyfile` copies contents and not permission bits, so the store's 0444
+    # does not come along: the destination lands at 0666 before the umask, and
+    # on a machine with a loose umask that is a world-writable file. Measured,
+    # not assumed. (`copy2` would carry the 0444 instead, and then a second
+    # `prepare` could not overwrite its own copy.)
     await (workdir / "config.tf.json").chmod(0o644)
 
     # See the module docstring: a lock written against an older nixpkgs pin
