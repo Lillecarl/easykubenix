@@ -335,6 +335,12 @@ $ ekn tofu apply --target infra
 $ ekn kubeapply --target apps --kubeconfig-from-tofu infra:kubeconfig
 ```
 
+`--kubeconfig-from-tofu` is the single-operator and bootstrap path. Reading a
+tofu output means reading that unit's state, so it needs that unit's backend
+and its credentials — it couples deploying an application to owning the
+infrastructure state. Where those are different people, use an ordinary
+kubeconfig and keep the two apart.
+
 See `design/opentofu.md`.
 
 ### Kluctl integration (deprecated)

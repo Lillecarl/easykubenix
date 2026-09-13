@@ -750,7 +750,9 @@ class KubeApply(AttrCommand):
     kubeconfig_from_tofu: str | None = opt(
         None,
         help="Take the kubeconfig from a tf unit's OpenTofu output, as UNIT:OUTPUT. "
-        "For a cluster a tf unit built, which the ambient kubeconfig does not know about yet.",
+        "For a single operator bootstrapping a cluster a tf unit just built. It makes this "
+        "apply depend on infra-state credentials and backend reachability, so a shared "
+        "environment should use an ordinary kubeconfig instead.",
     )
 
     async def _kubeconfig(
@@ -767,6 +769,13 @@ class KubeApply(AttrCommand):
         unit builds the cluster, a Kubernetes unit has to reach it, and the two
         cannot be one apply -- so the credential travels at apply time and
         never through Nix.
+
+        It is the single-operator and bootstrap path, not the production one.
+        Reading a tofu output means reading that unit's state, which means its
+        backend and its credentials -- so this couples deploying an application
+        to owning the infrastructure state. Wherever those are different people,
+        an ordinary kubeconfig is the right answer and this flag is the wrong
+        one.
         """
         if self.kubeconfig_from_tofu is None:
             return None
@@ -781,7 +790,20 @@ class KubeApply(AttrCommand):
             _report_nix_error(exc)
         except ValidationError as exc:
             _report_validation_error("tofu units", exc)
-        except (TofuError, ValueError) as exc:
+        except TofuError as exc:
+            # Its own message, because the raw one reads "tofu output -raw
+            # kubeconfig exited 1" in the middle of a Kubernetes deploy. The
+            # usual cause is the tf unit's backend -- unreachable, or
+            # credentials this operator does not have -- and nothing about
+            # `kubeapply` suggests a backend was involved at all.
+            _log.error(
+                f"{exc}\n"
+                f"Reading output {output_name!r} needs unit {unit_name!r}'s state, so it needs that "
+                "unit's backend and its credentials. Use an ordinary kubeconfig "
+                "(KUBECONFIG, or kubectl's current context) if this apply should not depend on them."
+            )
+            raise SystemExit(1) from exc
+        except ValueError as exc:
             _log.error(str(exc))
             raise SystemExit(1) from exc
 
