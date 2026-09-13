@@ -120,29 +120,46 @@ let
     pytest-agent = [ ];
   };
 
-  # The modules every instance is evaluated with -- the top-level one, and
-  # every nested one a GitOps target instantiates through `mkInstance` below.
-  #
-  # Every one of these carries `_class = "kubernetes"` except `assertions.nix`
-  # and `lib.nix`, which declare no Kubernetes option and are left unmarked on
-  # purpose -- an unmarked module imports into an evaluation of any class, so
-  # a second class can reuse them as-is.
-  # One list, deliberately: a nested instance is a whole easykubenix
-  # configuration rather than a cut-down one, so a bootstrap target can render
-  # a Helm chart (which is how you install the GitOps engine it exists to
-  # bootstrap). Nix's laziness means the modules it never uses cost it nothing.
-  baseModules = [
+  # Modules neither class owns. Both carry no `_class`, which is what lets
+  # them be imported into either evaluation, and neither declares an option
+  # belonging to a domain: `assertions.nix` declares the assertion and warning
+  # lists the module system's own `checkAssertWarn` reads, `lib.nix` declares
+  # a place for a configuration to put its helpers.
+  commonModules = [
     ./easykubenix/assertions.nix
-    ./easykubenix/ekn.nix
-    ./easykubenix/gitops.nix
-    ./easykubenix/helm.nix
-    ./easykubenix/importyaml.nix
-    ./easykubenix/internal.nix
-    ./easykubenix/kluctl.nix
-    ./easykubenix/kubernetes.nix
     ./easykubenix/lib.nix
-    ./easykubenix/validation.nix
   ];
+
+  # The modules an instance is evaluated with, per class. The top-level
+  # instance is always `kubernetes`; a `deployment.units.<name>` picks its own
+  # with that unit's `class`.
+  #
+  # The `kubernetes` list is one list, deliberately: a nested instance is a
+  # whole easykubenix configuration rather than a cut-down one, so a bootstrap
+  # unit can render a Helm chart (which is how you install the GitOps engine it
+  # exists to bootstrap). Nix's laziness means the modules it never uses cost
+  # it nothing.
+  #
+  # `tf` is deliberately short. An OpenTofu configuration has no manifests, no
+  # validation harness and no GitOps routing of its own, so it gets the option
+  # tree and nothing else. Whether a `tf` unit may itself declare units is an
+  # open question -- see design/opentofu.md -- and until it is answered the
+  # answer here is no, which is the reversible direction.
+  baseModules = {
+    kubernetes = commonModules ++ [
+      ./easykubenix/ekn.nix
+      ./easykubenix/gitops.nix
+      ./easykubenix/helm.nix
+      ./easykubenix/importyaml.nix
+      ./easykubenix/internal.nix
+      ./easykubenix/kluctl.nix
+      ./easykubenix/kubernetes.nix
+      ./easykubenix/validation.nix
+    ];
+    tf = commonModules ++ [
+      ./easykubenix/tofu.nix
+    ];
+  };
 
   # Instantiate an easykubenix configuration. Called once below for the
   # top-level instance, and again by gitops.nix for each GitOps target that
@@ -185,17 +202,24 @@ let
     {
       modules ? [ ],
       specialArgs ? { },
+      class ? "kubernetes",
     }:
     lib.evalModules {
-      # A nominal type on the evaluation, checked against each module's own
-      # `_class` as it is imported. It buys one thing: a module written for a
-      # different class fails at the import with a message that names both
-      # classes, instead of failing per option with "does not exist".
+      # Two separate jobs, and the same word for both.
       #
-      # It is a guard and nothing else. It does not select `baseModules` and
-      # it does not reach `config` -- a second class needs its own base list
-      # and its own downstream handling either way.
-      class = "kubernetes";
+      # It picks `baseModules` above, which is the dispatch: a `tf` instance
+      # gets the OpenTofu option tree and no Kubernetes module at all.
+      #
+      # And `lib.evalModules` takes it as a nominal type, checked against each
+      # module's own `_class` as that module is imported. That is a guard, and
+      # it is the half that catches a mistake: a module written for the other
+      # class fails at the import with a message naming both classes, instead
+      # of failing once per option with "does not exist".
+      #
+      # The guard reaches `deployment.units.<name>.modules` too, even though
+      # `types.deferredModule` takes no class of its own -- those modules are
+      # imported here, and the check happens at the import.
+      inherit class;
 
       # The caller's own arguments win over the forwarded ones, so
       # gitops.nix's `parent` cannot be shadowed by a consumer passing a
@@ -206,7 +230,7 @@ let
       // callerSpecialArgs
       // specialArgs;
 
-      modules = [ { _module.args = moduleArgs; } ] ++ baseModules ++ modules;
+      modules = [ { _module.args = moduleArgs; } ] ++ baseModules.${class} ++ modules;
     };
 
   # Bound here rather than inline in `ekn.lib` below, because `importYaml`
@@ -258,6 +282,24 @@ let
         # see `mkInstance` above for what it does and does not share with
         # the instance calling it.
         inherit mkInstance;
+        # The two halves of OpenTofu's interpolation rule, for a `tf`
+        # instance. OpenTofu reads `${...}` inside *any* JSON string as an
+        # expression, so a string means one of two things and Nix cannot tell
+        # which from the string alone.
+        #
+        # `ref` writes one deliberately:
+        #
+        #   bucket = ekn.lib.tf.ref "aws_s3_bucket.state.id";
+        #
+        # `escape` says the opposite -- that a string holding `${` is literal
+        # text. Without it OpenTofu reads the contents as an expression and
+        # fails with a message about an unknown variable, which names neither
+        # the option nor the Nix string that produced it. A shell script or a
+        # Kubernetes downward-API value is the usual victim.
+        tf = {
+          ref = expression: "\${${expression}}";
+          escape = lib.replaceStrings [ "\${" ] [ "$\${" ];
+        };
         # ArgoCD's per-object `argocd.argoproj.io/tracking-id` value, for a
         # `gitOps.targets.<name>.annotations` entry -- the one piece of
         # controller-specific knowledge here, kept as an opt-in helper so

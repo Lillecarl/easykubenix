@@ -325,6 +325,40 @@ let
     ) cfg.objects
   );
 
+  # Objects routed to a unit that holds no Kubernetes configuration.
+  #
+  # Nothing else catches this. `deploymentUnits` resolves the unit fine (it is
+  # declared), `submodulesByTarget` filters it out for its class, and the
+  # result is a `kubernetes.deploymentUnits` entry holding routed objects with
+  # no instance behind them -- which `ekn` would then apply into a unit whose
+  # real content OpenTofu owns.
+  #
+  # Read from `cfg.objects`, for the same reason as `seededGitOpsObjects`
+  # above: an assertion that reads a checked output closes a loop through
+  # `checked` and hits infinite recursion instead of printing the message.
+  misroutedObjects = lib.concatLists (
+    lib.mapAttrsToList (
+      namespace: kinds:
+      lib.concatLists (
+        lib.mapAttrsToList (
+          kind: objects:
+          lib.concatLists (
+            lib.mapAttrsToList (
+              name: object:
+              let
+                unit = object.ekn.deploymentUnit or null;
+                declared = config.deployment.units.${unit} or null;
+              in
+              lib.optional (
+                unit != null && declared != null && declared.class != "kubernetes"
+              ) "${namespace}/${kind}/${name} -> ${unit} (class ${declared.class})"
+            ) objects
+          )
+        ) kinds
+      )
+    ) cfg.objects
+  );
+
   # What the declared cluster stack cannot serve, per Service.
   #
   # The API server admits a Service's `spec.ipFamilies`/`spec.ipFamilyPolicy`
@@ -1064,6 +1098,25 @@ in
       '';
     }
     {
+      assertion = misroutedObjects == [ ];
+      message = ''
+        These objects are routed to a deployment unit that holds no
+        Kubernetes configuration:
+
+        ${lib.concatMapStringsSep "\n" (entry: "  ${entry}") misroutedObjects}
+
+        `ekn.deploymentUnit' selects between this instance's
+        `deployment.units', and only a unit whose `class' is "kubernetes"
+        renders Kubernetes objects. A unit of another class owns a different
+        kind of configuration entirely -- a `tf' unit's resources belong to
+        OpenTofu and its state file -- so there is nowhere in it for an object
+        to go.
+
+        Route the object to a "kubernetes" unit, or set
+        `ekn.deploymentUnit = null' to leave it in `kubernetes.generated'.
+      '';
+    }
+    {
       assertion = lib.length (lib.unique clusterIPFamilies) == lib.length clusterIPFamilies;
       message = ''
         `kubernetes.clusterInfo.ipFamilies' lists a family twice: ${lib.concatStringsSep " " clusterIPFamilies}. One entry per family; both means DualStack.
@@ -1188,8 +1241,13 @@ in
         # Its routing is ignored on purpose. `ekn.deploymentUnit` selects
         # between *this* instance's targets, and a nested instance's targets
         # are a different set entirely, so every object it renders is taken.
+        # `t.class == "kubernetes"` as well as `t.modules != [ ]`. A `tf`
+        # unit's instance declares no `kubernetes` option at all, so reading
+        # `t.instance.config.kubernetes` from one fails with "attribute
+        # 'kubernetes' missing" -- a message that names neither the unit nor
+        # its class.
         submodulesByTarget = lib.mapAttrs (_name: t: t.instance.config.kubernetes) (
-          lib.filterAttrs (_name: t: t.modules != [ ]) config.deployment.units
+          lib.filterAttrs (_name: t: t.class == "kubernetes" && t.modules != [ ]) config.deployment.units
         );
 
         # `submodulesByTarget` too: a bootstrap target commonly has no

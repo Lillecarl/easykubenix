@@ -33,6 +33,32 @@
   options.deployment = {
     enable = lib.mkEnableOption "rendering objects into named deployment units";
 
+    tofuUnits = lib.mkOption {
+      type = lib.types.anything;
+      readOnly = true;
+      description = ''
+        Every `deployment.units.<name>` whose `class` is "tf", with the
+        OpenTofu configuration it rendered and the `tofu` binary that can
+        apply it.
+
+        The parallel to `kubernetes.deploymentUnits`, and deliberately not an
+        entry in it. That attrset is a published schema -- `ekn` validates it
+        with pydantic, and every entry must carry `objects` -- so widening it
+        to hold entries that have none would cost each consumer a branch and
+        buy nothing.
+
+        Under `deployment` rather than `tofu`, because `tofu.*` inside a "tf"
+        instance is that instance's own configuration. These are a
+        Kubernetes instance's *view* of the units below it.
+
+        No `dependencies` here yet. `deployment.units.<name>.dependencies`
+        resolves to one apply plan ordered by `ekn.resourcePriority`, and a
+        "tf" unit cannot be in such a plan -- it is not a set of objects and
+        is not ordered by kind. What a cross-class dependency means is an
+        open question; see `design/opentofu.md`.
+      '';
+    };
+
     deployBranch = lib.mkOption {
       type = lib.types.str;
       description = ''
@@ -81,6 +107,33 @@
           { name, ... }@target:
           {
             options = {
+              class = lib.mkOption {
+                type = lib.types.enum [
+                  "kubernetes"
+                  "tf"
+                ];
+                default = "kubernetes";
+                description = ''
+                  What kind of configuration `modules` is, which decides the
+                  base modules the nested instance is evaluated with and what
+                  this unit produces.
+
+                  `kubernetes` is a whole easykubenix configuration rendering
+                  Kubernetes objects, which is every unit that existed before
+                  this option.
+
+                  `tf` is an OpenTofu configuration rendering
+                  `config.tf.json` -- see `tofu.nix` and
+                  `design/opentofu.md`. It declares no Kubernetes option at
+                  all, so its objects reach neither `kubernetes.generated` nor
+                  `kubernetes.deploymentUnits`, and nothing routed with
+                  `ekn.deploymentUnit` may name it.
+
+                  The module system enforces this rather than trusting it. The
+                  nested evaluation is given this class, and a module carrying
+                  the other one fails at the import naming both.
+                '';
+              };
               path = lib.mkOption {
                 type = lib.types.str;
                 default = "./";
@@ -289,22 +342,36 @@
             # `mkDefault`, so a unit can `mkForce` another string. It cannot
             # decline it: an assertion below requires a plain string here,
             # because this label is the prune scope in both directions.
-            config.labels."ekn.dev/deployment-unit" = lib.mkDefault name;
+            #
+            # A `tf` unit gets none of this. A label is a Kubernetes concept,
+            # it has nothing to stamp, and OpenTofu's state file is already
+            # the authoritative record of what a previous apply produced --
+            # the job the two labels exist to do on a cluster that keeps no
+            # such record.
+            config.labels = lib.optionalAttrs (target.config.class == "kubernetes") {
+              "ekn.dev/deployment-unit" = lib.mkDefault name;
+            };
 
             config.instance = ekn.lib.mkInstance {
-              modules = [
-                # The parent's environment, not a derived one. Both applies
-                # stamp `ekn.dev/environment`, and the unit's own
-                # `ekn.dev/deployment-unit` label is what separates the two
-                # prune scopes -- so the environment has to match, or a
-                # `--target ${name} --prune` would find none of its own
-                # objects. `mkDefault`, so a nested module can still set its
-                # own. `ekn.environment` is required and has no default, so
-                # this is also what saves every nested instance from
-                # declaring it.
-                { ekn.environment = lib.mkDefault config.ekn.environment; }
-              ]
-              ++ target.config.modules;
+              inherit (target.config) class;
+              modules =
+                lib.optional (target.config.class == "kubernetes") (
+                  # The parent's environment, not a derived one. Both applies
+                  # stamp `ekn.dev/environment`, and the unit's own
+                  # `ekn.dev/deployment-unit` label is what separates the two
+                  # prune scopes -- so the environment has to match, or a
+                  # `--target ${name} --prune` would find none of its own
+                  # objects. `mkDefault`, so a nested module can still set its
+                  # own. `ekn.environment` is required and has no default, so
+                  # this is also what saves every nested instance from
+                  # declaring it.
+                  #
+                  # Conditional on the class because `ekn.environment` is not
+                  # declared in a `tf` instance at all, so injecting it there
+                  # is an error before any of the unit's own modules is read.
+                  { ekn.environment = lib.mkDefault config.ekn.environment; }
+                )
+                ++ target.config.modules;
               specialArgs = {
                 # The parent's *evaluated* config. A bootstrap configuration
                 # genuinely needs it -- an ArgoCD root Application has to
@@ -355,6 +422,13 @@
     };
   };
 
+  config.deployment.tofuUnits = lib.mapAttrs (_name: unit: {
+    target = {
+      inherit (unit) path;
+    };
+    inherit (unit.instance.config.tofu) configFile wrappedPackage;
+  }) (lib.filterAttrs (_name: unit: unit.class == "tf") config.deployment.units);
+
   config.assertions =
     let
       # Every unit records its name in `ekn.dev/deployment-unit` (see the
@@ -370,11 +444,16 @@
       # that overrides the value is checked on what it actually sets.
       labelOf = unit: unit.labels."ekn.dev/deployment-unit" or null;
 
+      # Only a `kubernetes` unit carries the label, so only a `kubernetes`
+      # unit is checked for it. A `tf` unit is recorded by OpenTofu's state
+      # file instead, and neither prune selector applies to it.
+      kubernetesUnits = lib.filterAttrs (_name: unit: unit.class == "kubernetes") config.deployment.units;
+
       # A unit that puts no plain string here cannot be selected, and a unit
       # that cannot be selected cannot be pruned -- in either direction. See
       # the assertion message below.
       unlabelled = lib.attrNames (
-        lib.filterAttrs (_name: unit: !(lib.isString (labelOf unit))) config.deployment.units
+        lib.filterAttrs (_name: unit: !(lib.isString (labelOf unit))) kubernetesUnits
       );
 
       offenders = lib.filter (value: value != null) (
@@ -391,7 +470,7 @@
             "${name}: ${value}"
           else
             null
-        ) config.deployment.units
+        ) kubernetesUnits
       );
     in
     [

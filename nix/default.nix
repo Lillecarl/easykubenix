@@ -181,6 +181,11 @@ let
   # carries -- which is the point of running it from a derivation rather than
   # from whatever happens to be on a contributor's PATH. `--check` writes
   # nothing, so the read-only store copy above is all it needs.
+  # A `class = "tf"` deployment unit, rendered and run through `tofu validate`
+  # in the sandbox. In `all`: it builds one small configuration and one
+  # provider, both of which the nixpkgs pin already carries. See ./tofu.
+  tofu-render = pkgs.callPackage ./tofu { inherit sources; };
+
   nixfmt = pkgs.runCommand "easykubenix-check-nixfmt" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
     cd ${nixSources}
     find . -type f -name '*.nix' -print0 | sort -z | xargs -0 nixfmt --check
@@ -194,6 +199,7 @@ in
     ekn-completions
     kubeapply
     nixfmt
+    tofu-render
     validation-e2e
     bootstrap-validation-e2e
     ;
@@ -209,6 +215,7 @@ in
       ekn-completions
       kubeapply
       nixfmt
+      tofu-render
       validation-e2e
       bootstrap-validation-e2e
       ;
@@ -221,6 +228,7 @@ in
         ekn-sandbox
         ekn-completions
         nixfmt
+        tofu-render
         validation-e2e
         bootstrap-validation-e2e
       ];

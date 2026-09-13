@@ -21,6 +21,11 @@
   `Application` that needs them). A separate script because
   `kubernetes.generated` excludes a GitOps target's submodule objects by
   design, so the gate above can never cover them. Also in `checks.all`.
+- `nix build --file ./checks.nix tofu-render` — the OpenTofu gate. Renders a
+  `class = "tf"` deployment unit, diffs `config.tf.json` against a literal,
+  then runs `tofu init` and `tofu validate` over it inside the build sandbox.
+  The sandbox is the point: no network there means `tofu.providers` has to
+  pin the provider through the store. In `checks.all`; see `nix/tofu`.
 - `nix build --file ./checks.nix kubeapply` — the apply gate. It boots a
   single-node kubeadm cluster under User-Mode Linux and runs
   `ekn _applyManifest` inside it, so it answers what the two gates above
