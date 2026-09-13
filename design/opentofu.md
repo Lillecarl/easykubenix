@@ -200,6 +200,46 @@ This is what makes `config.tf.json` pretty-printed rather than the one line
 `builtins.toJSON` produces: a one-line diff of a whole infrastructure change
 says only that it changed.
 
+## What review changed
+
+The five edges a second reader pushed on, and what each one turned into.
+
+**The deleted lock hid a provider bump.** Dropping `.terraform.lock.hcl` costs
+no integrity — its hashes verify what the store already guarantees — but it did
+carry a signal: notice that a provider moved. `config.tf.json` records
+constraints, not resolutions, so a 5.31 to 5.40 bump crossed a reviewed diff
+invisibly. `providers.json` now carries the name, version and store path, and
+is committed beside the configuration. The signal moved from apply time to
+review time, which is strictly better than keeping the lock.
+
+**`destroy` guarded the wrong direction.** `apply` walks the closure deepest
+first, so it cannot run against a half-built dependency. `destroy` had nothing
+equivalent: it refused to cascade, which was right, but let you destroy a unit
+another still needed. It now computes the reverse closure and refuses, naming
+what blocks it — which also answers the ordering a teardown needs, without the
+tool ever cascading.
+
+**A deleted unit leaked money.** This is the one place the labels-versus-state
+asymmetry bites. Delete a Kubernetes unit and prune deletes its objects; delete
+a `tf` unit and nothing can name its infrastructure any more. `ekn tofu` warns
+on local state with no declaring unit, and the ordering rule — destroy before
+delete, never after — is documented, because a remote backend's keys are not
+ours to enumerate.
+
+**No default backend was right; an assertion would not have been.** The gate is
+the proof: `checks.nix` runs `tofu init` in the sandbox, and a mandatory backend
+would force a fake block into every fixture to satisfy a rule about production.
+Every run prints where state actually lives instead — apply-time truth, not an
+evaluation-time guess.
+
+**`--kubeconfig-from-tofu` is the bootstrap path.** There is no cheaper route to
+`tofu output` — it reads state, state needs the backend, `init` is how you get
+one — so the side effect stays. What changed is honesty about the coupling:
+reading that output needs the infra unit's backend and credentials, so wherever
+deploying apps and owning infra state are different people, an ordinary
+kubeconfig is the answer. `init` is now also skipped when it would change
+nothing, which is most of what that path was paying for.
+
 ## Ownership and pruning
 
 No analogue is needed. The two labels (`ekn.dev/environment`,
