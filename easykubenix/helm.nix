@@ -155,7 +155,21 @@ in
                   cluster: ArgoCD gates all seven of its ServiceMonitor
                   templates this way and offers no override value, so the
                   component deploying everything else was the one thing nothing
-                  scraped.
+                  scraped. Six further charts that same repository pins carry
+                  the same gate -- argo-workflows, oauth2-proxy, reloader,
+                  openebs, aws-ebs-csi -- so it is a class rather than one
+                  chart's quirk, and the right place to set this is wherever
+                  every chart is rendered rather than on each one that bites.
+
+                  Nothing downstream can catch it. A render missing a gated
+                  object and a render that correctly had none are byte-identical
+                  -- there is no artefact to compare, no object to be absent
+                  from a diff, nothing for validation to reject. That is why it
+                  has to be answered here, where the question is asked. The
+                  chart is not wrong: its `if` exists so it does not emit a
+                  ServiceMonitor into a cluster that would reject one. It
+                  answered accurately about the cluster `helm template` was
+                  pointed at, which was no cluster.
 
                   Helm matches these strings literally, and charts disagree on
                   which spelling they test -- ArgoCD asks for
