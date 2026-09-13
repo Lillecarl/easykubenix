@@ -224,7 +224,8 @@ asymmetry bites. Delete a Kubernetes unit and prune deletes its objects; delete
 a `tf` unit and nothing can name its infrastructure any more. `ekn tofu` warns
 on local state with no declaring unit, and the ordering rule — destroy before
 delete, never after — is documented, because a remote backend's keys are not
-ours to enumerate.
+ours to enumerate. The scan reports what it checked on a clean run as well, for
+the reason in the next section.
 
 **No default backend was right; an assertion would not have been.** The gate is
 the proof: `checks.nix` runs `tofu init` in the sandbox, and a mandatory backend
@@ -239,6 +240,31 @@ reading that output needs the infra unit's backend and credentials, so wherever
 deploying apps and owning infra state are different people, an ordinary
 kubeconfig is the answer. `init` is now also skipped when it would change
 nothing, which is most of what that path was paying for.
+
+## Silence must not carry a meaning it did not earn
+
+A rule this repository already broke twice while the OpenTofu work was being
+written, both times the same shape, so it is worth stating once rather than
+fixing a third time.
+
+The orphaned-state scan printed nothing when it found nothing. So did a scan
+that could not look — it never sees a remote backend. A reader turns the same
+empty output into "no orphaned state", which is stronger than the tool can
+claim. It now names what it examined on every run, and says what it did not:
+
+```console
+checked 3 local working directories, none orphaned (remote backends not inspected)
+```
+
+The state-location line had it the other way round. It was printed after the
+`init` that a warm run skips, so it disappeared exactly when runs are cheap and
+repeated — which is when somebody is most likely watching. Its absence read as
+"nothing to say" rather than "not reached".
+
+The rule both cases want: **an output whose absence is meaningful must be
+produced on the path where nothing happened, not only where something did.** A
+tool that states what it did not look at is more trustworthy than one that says
+nothing, and far more than one that appears to have looked at everything.
 
 ## Ownership and pruning
 

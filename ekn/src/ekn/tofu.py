@@ -36,7 +36,7 @@ import shutil
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path as SyncPath, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import structlog
 from anyio import Path
@@ -234,9 +234,24 @@ async def kubeconfig_from_output(
             await Path(path).unlink()
 
 
-async def orphaned_state(units: Sequence[TofuUnit], root: Path | None = None) -> list[str]:
-    """Working directories under *root* with no unit in the evaluation, newest
-    first by name.
+class OrphanScan(NamedTuple):
+    """What `orphaned_state` looked at, and what it found.
+
+    The count is not decoration. A scan that finds nothing and a scan that
+    could not look are both an empty list, and a caller printing nothing in
+    either case lets the reader convert silence into "no orphaned state" --
+    a stronger claim than this can make, since it never sees a remote backend.
+    Reporting what was checked keeps the negative result a scoped statement
+    rather than an absence.
+    """
+
+    checked: int
+    orphans: list[str]
+
+
+async def orphaned_state(units: Sequence[TofuUnit], root: Path | None = None) -> OrphanScan:
+    """Working directories under *root* with no unit in the evaluation, sorted
+    by name, and how many were examined.
 
     The asymmetry this covers is the one real cost of having no ownership
     record of our own. On the Kubernetes side a unit deleted from the Nix
@@ -254,10 +269,10 @@ async def orphaned_state(units: Sequence[TofuUnit], root: Path | None = None) ->
     """
     base = root or Path(WORK_ROOT)
     if not await base.exists():
-        return []
+        return OrphanScan(0, [])
     declared = {unit.name for unit in units}
     found = [entry.name async for entry in base.iterdir() if await entry.is_dir()]
-    return sorted(name for name in found if name not in declared)
+    return OrphanScan(len(found), sorted(name for name in found if name not in declared))
 
 
 def dependents(units: Sequence[TofuUnit], name: str) -> list[str]:
@@ -303,6 +318,7 @@ def file_groups(units: dict[str, TofuUnit]) -> list[tuple[str, str]]:
 __all__ = [
     "COMMITTED_FILES",
     "WORK_ROOT",
+    "OrphanScan",
     "TofuError",
     "config_json",
     "dependents",

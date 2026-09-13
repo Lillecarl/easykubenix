@@ -353,15 +353,15 @@ class TestOrphanedState:
         await (root / "infra").mkdir(parents=True)
         units = [_unit(tmp_path, "infra", "/nonexistent", {})]
 
-        assert await orphaned_state(units, root) == []
+        assert await orphaned_state(units, root) == (1, [])
 
     async def test_a_deleted_unit_leaves_its_state_behind(self, tmp_path: pathlib.Path) -> None:
         root = Path(tmp_path / "work")
         await (root / "infra").mkdir(parents=True)
         await (root / "dns").mkdir()
 
-        assert await orphaned_state([_unit(tmp_path, "infra", "/nonexistent", {})], root) == ["dns"]
+        assert await orphaned_state([_unit(tmp_path, "infra", "/nonexistent", {})], root) == (2, ["dns"])
 
     async def test_no_root_yet_is_not_an_orphan(self, tmp_path: pathlib.Path) -> None:
         """Nothing has run here, so there is nothing to have leaked."""
-        assert await orphaned_state([], Path(tmp_path / "never-created")) == []
+        assert await orphaned_state([], Path(tmp_path / "never-created")) == (0, [])

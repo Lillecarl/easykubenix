@@ -880,12 +880,22 @@ class _TofuCommand(AttrCommand):
         `tofu.orphaned_state`. Every `ekn tofu` run is a cheap place to notice.
         """
         every = await evaluate_tofu_units(self.file, uri, customer, self.attr)
-        orphans = await tofu_orphaned_state(every)
-        if orphans:
+        scan = await tofu_orphaned_state(every)
+        if scan.orphans:
             _log.warning(
-                f"state exists for {', '.join(orphans)}, which no tf unit declares any more.\n"
+                f"state exists for {', '.join(scan.orphans)}, which no tf unit declares any more.\n"
                 "Deleting a unit does not destroy what it built. Restore the unit, "
                 "`ekn tofu destroy --target <name>`, then delete it."
+            )
+        else:
+            # Said on a clean run too, and that is the point. Silence here
+            # would read as "no orphaned state", which is more than this can
+            # know: it never sees a remote backend. Naming what was checked
+            # puts the limit where somebody would otherwise infer coverage.
+            _log.info(
+                f"checked {scan.checked} local working "
+                f"{'directory' if scan.checked == 1 else 'directories'}, none orphaned "
+                "(remote backends not inspected)"
             )
 
     async def run(self) -> None:
