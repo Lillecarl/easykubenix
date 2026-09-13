@@ -68,12 +68,15 @@ pkgs.runCommand "easykubenix-check-tofu-render"
 
     cp ${unit.configFile}/config.tf.json .
 
-    # Key order. `builtins.toJSON` alphabetizes, so both sides agree without
-    # either being sorted here -- but only as long as both come from Nix.
-    diff -u "$expectedPath" config.tf.json
+    # Both sides through `jq -S`, so the comparison is of the data and not of
+    # whitespace or key order. `config.tf.json` is already pretty-printed and
+    # sorted (see tofu.nix); `expected` comes straight from `builtins.toJSON`.
+    ${pkgs.jq}/bin/jq -S . "$expectedPath" > want.json
+    ${pkgs.jq}/bin/jq -S . config.tf.json > got.json
+    diff -u want.json got.json
 
-    ${unit.wrappedPackage}/bin/tofu init -input=false
-    ${unit.wrappedPackage}/bin/tofu validate
+    ${unit.tofu} init -input=false
+    ${unit.tofu} validate
 
     touch "$out"
   ''

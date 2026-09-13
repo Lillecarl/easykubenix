@@ -1257,44 +1257,6 @@ in
           lib.attrNames objectsByTarget ++ lib.attrNames rawFilesByTarget ++ lib.attrNames submodulesByTarget
         );
 
-        # Every unit one unit needs on the cluster, transitively, itself
-        # excluded. `ekn kubeapply --target <name>` contributes each of these
-        # units' objects to its apply plan.
-        #
-        # Deepest first, and deduplicated keeping the first occurrence -- so a
-        # unit two dependencies share appears once, ahead of both. Nothing
-        # depends on that order (barriers order the apply by kind), but a
-        # stable list is easier to read in a diff than a stable set.
-        #
-        # `walk` carries the chain it is resolving rather than a visited set.
-        # A set answers "have I seen this" and a chain answers "how did I get
-        # here", and the second is what a cycle error has to print.
-        dependencyClosure =
-          name:
-          let
-            walk =
-              path: current:
-              if lib.elem current path then
-                throw ''
-                  `deployment.units' has a dependency cycle:
-
-                    ${lib.concatStringsSep " -> " (path ++ [ current ])}
-
-                  A unit cannot depend on itself, directly or through another unit.
-                ''
-              else
-                let
-                  declared =
-                    config.deployment.units.${current} or (throw ''
-                      `deployment.units.${lib.last path}.dependencies' names unknown unit "${current}".
-
-                      Declared units: ${lib.concatStringsSep ", " (lib.attrNames config.deployment.units)}
-                    '');
-                in
-                lib.concatMap (walk (path ++ [ current ])) declared.dependencies ++ [ current ];
-          in
-          lib.unique (lib.concatMap (walk [ name ]) (config.deployment.units.${name}.dependencies or [ ]));
-
       in
       checked (
         lib.listToAttrs (
@@ -1332,7 +1294,7 @@ in
                 # the unknown-name check on the side that can name the
                 # option. Derived rather than declared, which is why it sits
                 # here and not in `target`.
-                dependencies = dependencyClosure name;
+                dependencies = declared.dependencyClosure;
                 # Only the nested instance's half is stamped here.
                 # `objectsByTarget` comes from `allGenerated`, where
                 # `stampRouted` already stamped every routed object -- see

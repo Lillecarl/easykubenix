@@ -217,9 +217,25 @@ in
       })
     );
 
-    configFile = pkgs.writeMultipleFiles {
-      name = "tofu-config";
-      files."config.tf.json" = builtins.toJSON cfg.generated;
-    };
+    # Pretty-printed, and that is not cosmetic: `ekn commit` writes this file
+    # to a branch so a person can read the diff. `builtins.toJSON` emits one
+    # line, and a one-line diff of a whole infrastructure change says only that
+    # it changed.
+    #
+    # `jq` rather than a Nix printer, because Nix has none. `--sort-keys` on
+    # top of the alphabetical order `builtins.toJSON` already produces, so the
+    # order is jq's own rule rather than a coincidence of how Nix serializes.
+    configFile =
+      pkgs.runCommand "tofu-config"
+        {
+          nativeBuildInputs = [ pkgs.jq ];
+          value = cfg.generated;
+          __structuredAttrs = true;
+          preferLocalBuild = true;
+        }
+        ''
+          mkdir -p "$out"
+          jq --sort-keys .value "$NIX_ATTRS_JSON_FILE" > "$out/config.tf.json"
+        '';
   };
 }

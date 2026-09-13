@@ -4,6 +4,48 @@
   lib,
   ...
 }:
+let
+  # Every unit one unit needs on the cluster, transitively, itself excluded.
+  #
+  # Deepest first, and deduplicated keeping the first occurrence -- so a unit
+  # two dependencies share appears once, ahead of both. Nothing depends on that
+  # order where objects are merged into one apply (barriers order that by
+  # kind), but `ekn tofu` runs a chain of separate `tofu` invocations and takes
+  # this order literally.
+  #
+  # `walk` carries the chain it is resolving rather than a visited set. A set
+  # answers "have I seen this" and a chain answers "how did I get here", and
+  # the second is what a cycle error has to print.
+  #
+  # Lives here rather than inside `kubernetes.nix`'s `deploymentUnits`, where
+  # it used to: `deployment.tofuUnits` needs the same closure over the same
+  # option, and a `tf` unit never reaches that let-block.
+  dependencyClosure =
+    units: name:
+    let
+      walk =
+        path: current:
+        if lib.elem current path then
+          throw ''
+            `deployment.units' has a dependency cycle:
+
+              ${lib.concatStringsSep " -> " (path ++ [ current ])}
+
+            A unit cannot depend on itself, directly or through another unit.
+          ''
+        else
+          let
+            declared =
+              units.${current} or (throw ''
+                `deployment.units.${lib.last path}.dependencies' names unknown unit "${current}".
+
+                Declared units: ${lib.concatStringsSep ", " (lib.attrNames units)}
+              '');
+          in
+          lib.concatMap (walk (path ++ [ current ])) declared.dependencies ++ [ current ];
+    in
+    lib.unique (lib.concatMap (walk [ name ]) (units.${name}.dependencies or [ ]));
+in
 {
   _class = "kubernetes";
 
@@ -51,11 +93,16 @@
         instance is that instance's own configuration. These are a
         Kubernetes instance's *view* of the units below it.
 
-        No `dependencies` here yet. `deployment.units.<name>.dependencies`
-        resolves to one apply plan ordered by `ekn.resourcePriority`, and a
-        "tf" unit cannot be in such a plan -- it is not a set of objects and
-        is not ordered by kind. What a cross-class dependency means is an
-        open question; see `design/opentofu.md`.
+        `configFile` and `tofu` are store paths, and neither is built at
+        evaluation time -- `ekn tofu` realises both before it runs anything.
+        `dependencies` is the transitive closure, deepest first, and `ekn tofu`
+        takes that order literally: each entry is its own `tofu` invocation,
+        run before this unit's.
+
+        Every dependency of a "tf" unit is itself a "tf" unit. An assertion
+        refuses one that crosses classes, because `dependencies` means "apply
+        this one too, as part of applying me" and the two classes are not
+        applied by the same thing.
       '';
     };
 
@@ -299,6 +346,16 @@
                 '';
                 example = lib.literalExpression "[ ./bootstrap/argocd.nix ]";
               };
+              dependencyClosure = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                internal = true;
+                readOnly = true;
+                description = ''
+                  `dependencies`, transitively, deepest first, with this unit
+                  excluded. Derived; see the `dependencyClosure` binding at the
+                  top of gitops.nix.
+                '';
+              };
               instance = lib.mkOption {
                 type = lib.types.raw;
                 internal = true;
@@ -351,6 +408,8 @@
             config.labels = lib.optionalAttrs (target.config.class == "kubernetes") {
               "ekn.dev/deployment-unit" = lib.mkDefault name;
             };
+
+            config.dependencyClosure = dependencyClosure config.deployment.units name;
 
             config.instance = ekn.lib.mkInstance {
               inherit (target.config) class;
@@ -422,11 +481,21 @@
     };
   };
 
-  config.deployment.tofuUnits = lib.mapAttrs (_name: unit: {
+  config.deployment.tofuUnits = lib.mapAttrs (name: unit: {
     target = {
       inherit (unit) path;
     };
-    inherit (unit.instance.config.tofu) configFile wrappedPackage;
+    # The transitive closure, deepest first, and `ekn tofu` takes the order
+    # literally: each of these is its own `tofu init` and `tofu apply`, run
+    # before this unit's. Every entry is a `tf` unit -- an assertion below
+    # refuses a dependency that crosses classes.
+    dependencies = unit.dependencyClosure;
+    # Store paths, which is all that survives the trip to `ekn`. Neither has
+    # been built at evaluation time; `ekn tofu` realises both before it runs
+    # anything. See `outPath` handling in ekn/src/ekn/eval.py.
+    configFile = "${unit.instance.config.tofu.configFile}";
+    tofu = "${unit.instance.config.tofu.wrappedPackage}/bin/tofu";
+    inherit name;
   }) (lib.filterAttrs (_name: unit: unit.class == "tf") config.deployment.units);
 
   config.assertions =
@@ -448,6 +517,35 @@
       # unit is checked for it. A `tf` unit is recorded by OpenTofu's state
       # file instead, and neither prune selector applies to it.
       kubernetesUnits = lib.filterAttrs (_name: unit: unit.class == "kubernetes") config.deployment.units;
+
+      # A dependency that crosses classes.
+      #
+      # `dependencies` means "apply this one too, as part of applying me", and
+      # the two classes cannot be applied together. A Kubernetes apply merges
+      # every contributing unit's objects into one plan ordered by
+      # `ekn.resourcePriority`; a `tf` unit is not a set of objects and
+      # OpenTofu has no such ordering at all -- it is a separate invocation
+      # with its own dependency graph and its own state.
+      #
+      # So the closure stays within a class, and getting a `tf` unit onto the
+      # cluster before the Kubernetes unit that needs it is two commands.
+      # `ekn kubeapply --kubeconfig-from-tofu` is the bridge between them.
+      crossClassDependencies = lib.concatLists (
+        lib.mapAttrsToList (
+          name: unit:
+          map
+            (
+              dependency:
+              "${name} (${unit.class}) -> ${dependency} (${config.deployment.units.${dependency}.class})"
+            )
+            (
+              lib.filter (
+                dependency:
+                config.deployment.units ? ${dependency} && config.deployment.units.${dependency}.class != unit.class
+              ) unit.dependencies
+            )
+        ) config.deployment.units
+      );
 
       # A unit that puts no plain string here cannot be selected, and a unit
       # that cannot be selected cannot be pruned -- in either direction. See
@@ -474,6 +572,28 @@
       );
     in
     [
+      {
+        assertion = crossClassDependencies == [ ];
+        message = ''
+          These deployment unit dependencies cross a class boundary:
+
+          ${lib.concatMapStringsSep "\n" (entry: "  ${entry}") crossClassDependencies}
+
+          `dependencies' means "apply this unit too, as part of applying me",
+          and the two classes are not applied by the same thing. A Kubernetes
+          apply merges every contributing unit's objects into one plan, ordered
+          by `ekn.resourcePriority'. A `tf' unit holds no objects and OpenTofu
+          has no such ordering -- it is a separate `tofu' invocation, with its
+          own dependency graph and its own state.
+
+          Getting a `tf' unit onto the cluster before the Kubernetes unit that
+          needs it is therefore two commands, not one dependency. Run
+          `ekn tofu apply --target <tf unit>', then
+          `ekn kubeapply --target <kubernetes unit>'. Where the second needs
+          the first's result to reach the cluster at all,
+          `--kubeconfig-from-tofu <unit>:<output>' is the bridge.
+        '';
+      }
       {
         assertion = unlabelled == [ ];
         message = ''
