@@ -60,15 +60,6 @@ class _OutPathInfo(BaseModel):
     out_path: str = Field(alias="outPath")
 
 
-class GitOpsBranches(BaseModel):
-    """Validated `deployment.deployBranch`/`deployment.sourceBranch` -- `source_branch`
-    null disables the dual-commit source-snapshot feature for this instance,
-    see `cli.py`'s `_gitops_branches`."""
-
-    deploy_branch: _NonEmptyStr = Field(alias="deployBranch")
-    source_branch: _NonEmptyStr | None = Field(default=None, alias="sourceBranch")
-
-
 class _GitOpsTargetRef(BaseModel):
     """`deployment.units.<name>` as it reaches Python -- see easykubenix's
     gitops.nix, which narrows the submodule to the fields that survive
@@ -76,6 +67,39 @@ class _GitOpsTargetRef(BaseModel):
     read on the apply path (see `_unpack_gitops_target`)."""
 
     path: _NonEmptyStr
+
+
+class TofuUnit(BaseModel):
+    """Validated `deployment.tofuUnits` entry -- one `class = "tf"` deployment
+    unit, as `ekn.tofu` needs it.
+
+    `config_file` and `tofu` are store paths. Nix produces them without
+    building them, so `evaluate_tofu_units` realises both before anything here
+    is used; a path that has not been realised does not exist on disk.
+
+    Deliberately a separate model from `GitOpsTargetEntry` rather than a wider
+    version of it. That one requires `objects`, and three consumers read
+    `.objects` off it -- widening the Kubernetes schema so half its entries
+    carry none would cost each of them a branch and buy nothing.
+    """
+
+    name: _NonEmptyStr
+    config_file: _NonEmptyStr = Field(alias="configFile")
+    tofu: _NonEmptyStr
+    #: The transitive closure, deepest first, this unit excluded. Every entry
+    #: is itself a `tf` unit; easykubenix asserts that a dependency does not
+    #: cross classes.
+    dependencies: list[_NonEmptyStr] = Field(default_factory=list)
+    target: _GitOpsTargetRef
+
+
+class GitOpsBranches(BaseModel):
+    """Validated `deployment.deployBranch`/`deployment.sourceBranch` -- `source_branch`
+    null disables the dual-commit source-snapshot feature for this instance,
+    see `cli.py`'s `_gitops_branches`."""
+
+    deploy_branch: _NonEmptyStr = Field(alias="deployBranch")
+    source_branch: _NonEmptyStr | None = Field(default=None, alias="sourceBranch")
 
 
 class GitOpsTargetEntry(BaseModel):
@@ -595,6 +619,65 @@ async def evaluate_gitops_manifests(
                 },
             }
         )
+
+
+async def evaluate_tofu_units(
+    file: str | PathLike[str] | None,
+    flake_uri: str | None,
+    customer: str | None,
+    attr_path: str | None,
+    target: str | None = None,
+) -> list[TofuUnit]:
+    """`deployment.tofuUnits`, built and ready to run.
+
+    With *target*, the chain one `ekn tofu` run covers: that unit's dependency
+    closure deepest first, then the unit itself. Without it, every `tf` unit
+    the instance declares, which is what `ekn commit` writes.
+
+    The realisation is the reason this cannot be a plain `to_python`. Nix
+    reports `configFile` and `tofu` as store paths without building either, so
+    without this every caller would get two paths that are not on disk.
+    """
+    async with (
+        _session() as session,
+        session.store() as store,
+        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
+    ):
+        proxy = await _resolve_proxy(eval_, file, flake_uri, customer, attr_path)
+        if await proxy.has_attr("config"):
+            proxy = proxy.attr("config")
+
+        units_proxy = proxy.attr("deployment").attr("tofuUnits")
+        with timed_stage("tofu: to_python(deployment.tofuUnits)"):
+            declared = await units_proxy.to_python()
+        if not isinstance(declared, dict):
+            raise TypeError("deployment.tofuUnits did not evaluate to an object")
+
+        if target is None:
+            wanted = list(declared)
+        else:
+            entry = declared.get(target)
+            if entry is None:
+                known = ", ".join(sorted(declared)) or "none"
+                raise ValueError(f'no deployment unit named "{target}" with class "tf". Declared: {known}')
+            if not isinstance(entry, dict):
+                raise TypeError(f"deployment.tofuUnits.{target} did not evaluate to an object")
+            dependencies = entry.get("dependencies") or []
+            if not isinstance(dependencies, list):
+                raise TypeError(f"deployment.tofuUnits.{target}.dependencies is not a list")
+            wanted = [*(str(name) for name in dependencies), target]
+
+        # One realise per path, and the build happens here rather than at the
+        # first subprocess. A failure to build is a Nix error with a Nix
+        # message; a missing store path at `tofu init` time is a confusing
+        # one.
+        with timed_stage("tofu: realise(configFile, tofu)"):
+            for name in wanted:
+                unit_proxy = units_proxy.attr(name)
+                await unit_proxy.attr("configFile").realise_string()
+                await unit_proxy.attr("tofu").realise_string()
+
+        return [TofuUnit.model_validate(declared[name]) for name in wanted]
 
 
 def _unpack_gitops_target(

@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 from pathlib import Path as _Path
-from typing import TYPE_CHECKING, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, NoReturn, cast
 
 import anyio
 import anyio.to_thread
@@ -34,6 +34,7 @@ from ekn.eval import (
     evaluate_generated_manifests,
     evaluate_gitops_manifests,
     evaluate_kubeapply_config,
+    evaluate_tofu_units,
     evaluate_validation_config,
     evaluate_validation_file,
     evaluate_with_fod_update,
@@ -59,10 +60,13 @@ from ekn.gitops import (
     flatten_manifests,
 )
 from ekn.sops import ensure_age_identities, maybe_decrypt
+from ekn.tofu import TofuError, run_chain
 from ekn.validation import EphemeralControlPlane, exec_capture, prepare_validation_objects
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+    from ekn.eval import TofuUnit
 
 _log = structlog.get_logger()
 
@@ -746,6 +750,115 @@ class KubeApply(AttrCommand):
             _report_server_error("apply", exc)
 
 
+class _TofuCommand(AttrCommand):
+    """The shared half of every `ekn tofu` subcommand: name a unit, resolve
+    its chain, run one `tofu` command over each link."""
+
+    target: str = opt(
+        help='The `class = "tf"` deployment unit to act on. Its dependencies run first, deepest first.',
+    )
+
+    #: What `tofu` is asked to do, and the flags that go with it. A subclass
+    #: sets this and nothing else.
+    tofu_args: ClassVar[tuple[str, ...]] = ()
+
+    async def _units(self) -> list[TofuUnit]:
+        uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
+        try:
+            return await evaluate_tofu_units(self.file, uri, customer, self.attr, self.target)
+        except NixError as exc:
+            _report_nix_error(exc)
+        except ValidationError as exc:
+            _report_validation_error("tofu units", exc)
+        except ValueError as exc:
+            _log.error(str(exc))
+            raise SystemExit(1) from exc
+
+    async def run(self) -> None:
+        units = await self._units()
+        try:
+            await run_chain(units, type(self).tofu_args)
+        except TofuError as exc:
+            _log.error(str(exc))
+            raise SystemExit(1) from exc
+
+
+class TofuPlan(_TofuCommand):
+    """Show what `ekn tofu apply` would change, and change nothing."""
+
+    cli_name = "plan"
+    tofu_args = ("plan",)
+
+
+class TofuApply(_TofuCommand):
+    """Apply this unit's OpenTofu configuration, and its dependencies' first.
+
+    Each unit in the chain is its own `tofu init` and `tofu apply`, with its
+    own state. That is not a limitation being worked around -- OpenTofu has no
+    equivalent of `ekn.resourcePriority`, so there is no single plan a chain of
+    units could be merged into.
+
+    A failure stops the chain. The units after it are the ones that needed this
+    one.
+    """
+
+    cli_name = "apply"
+
+    auto_approve: bool = opt(
+        False,
+        help="Skip tofu's interactive confirmation. Without it, tofu prompts as usual.",
+    )
+
+    async def run(self) -> None:
+        units = await self._units()
+        args = ["apply", *(["-auto-approve"] if self.auto_approve else [])]
+        try:
+            await run_chain(units, args)
+        except TofuError as exc:
+            _log.error(str(exc))
+            raise SystemExit(1) from exc
+
+
+class TofuDestroy(_TofuCommand):
+    """Destroy what this unit's OpenTofu configuration created.
+
+    Only the named unit. A dependency is something this unit needed built
+    first, so destroying it here would take out whatever else depends on it --
+    destroy each one on its own, in the order you choose.
+    """
+
+    cli_name = "destroy"
+
+    auto_approve: bool = opt(
+        False,
+        help="Skip tofu's interactive confirmation. Without it, tofu prompts as usual.",
+    )
+
+    async def run(self) -> None:
+        units = await self._units()
+        args = ["destroy", *(["-auto-approve"] if self.auto_approve else [])]
+        try:
+            # The named unit alone, which is the last link of the chain.
+            await run_chain(units[-1:], args)
+        except TofuError as exc:
+            _log.error(str(exc))
+            raise SystemExit(1) from exc
+
+
+class Tofu(AttrCommand):
+    """Run OpenTofu over a `class = "tf"` deployment unit.
+
+    Separate from `ekn kubeapply` on purpose. A Kubernetes apply is idempotent
+    and stateless; `tofu` carries a backend, a lock and a plan/apply split, and
+    `--prune` means nothing to it. See design/opentofu.md.
+    """
+
+    subcommands = (TofuPlan, TofuApply, TofuDestroy)
+
+    async def run(self) -> None:
+        self.print_help()
+
+
 class Secrets(AttrCommand):
     """List the bootstrap credentials this configuration expects.
 
@@ -1033,6 +1146,7 @@ class Ekn(AttrCommand):
         Rollback,
         Validate,
         KubeApply,
+        Tofu,
         Secrets,
         ClusterDiff,
         PushCache,
