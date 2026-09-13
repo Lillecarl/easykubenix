@@ -10,6 +10,10 @@ __pycache__/
 dist/
 build/
 
+# `ekn tofu` working directories: .terraform/ and, for a local backend, live
+# state. Per unit, created beside whatever configuration was evaluated.
+.ekn/
+
 # Nix / direnv
 .direnv/
 

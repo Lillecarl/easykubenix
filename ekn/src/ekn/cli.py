@@ -590,6 +590,12 @@ class Rollback(AttrCommand):
     eval is currently broken, so rollback can't depend on it working.
     `--file`/`--flake` is the routine convenience for a one-step-back
     during normal testing, when Nix eval is healthy.
+
+    A `tf` unit's `config.tf.json` rides along, because this replays the whole
+    tree -- but rolling the file back is not rolling the infrastructure back.
+    Nothing applies what is on the branch, and `ekn tofu` reads the Nix
+    evaluation rather than the committed tree, so it would still plan against
+    the current source. Roll the source back and run `ekn tofu apply`.
     """
 
     deploy_branch: str | None = opt(
