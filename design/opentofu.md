@@ -354,6 +354,34 @@ produced on the path where nothing happened, not only where something did.** A
 tool that states what it did not look at is more trustworthy than one that says
 nothing, and far more than one that appears to have looked at everything.
 
+## An inherited guarantee is still a dependency
+
+Separate from the silence rule above, and worse in one specific way.
+
+`latestWhere (v: lib.versionOlder v "1.0.0")` selected a beta of a provider.
+The bound was correct before the move to the OpenTofu registry and correct
+after it. What changed was the *source*: nixpkgs never packaged a prerelease,
+so a version bound had been doing the work of a stability filter without
+anybody writing one. Moving to a complete index removed a constraint that was
+never stated anywhere, because it was a property of what we were reading rather
+than of what we had written.
+
+That is why it could not be caught by reading the code. The other failures in
+this note are two states that look identical at a moment — look harder and you
+find them. Here nothing was wrong at the moment of the change, and the
+expression that depended on the guarantee never mentioned it. There was nothing
+to read.
+
+The evidence it is easy to hit: the same trap was found three times, by two
+people who could not see each other's fixes, and all three reached the same
+`v: !(lib.hasInfix "-" v)` predicate. That is what moved the filter into
+`latest`/`latestWhere` rather than into either project's documentation — a
+guarantee nobody names cannot be restored by a sentence telling people to
+remember it.
+
+**The question worth asking when a source gets more complete: what was the
+narrower one filtering that nothing asked it to?**
+
 ## Ownership and pruning
 
 No analogue is needed. The two labels (`ekn.dev/environment`,

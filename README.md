@@ -307,6 +307,16 @@ it — `tofuRegistry.siderolabs.talos."0.12.0-beta.0"` — or browse with
 selected, so the declared source and version cannot drift from the binaries.
 Write it by hand only to override.
 
+**Read `providers.json` when a selection changes.** `ekn commit` writes it
+beside `config.tf.json`, holding the name, resolved version and store path of
+every provider. It exists because nothing else records them: `config.tf.json`
+carries the constraint you asked for, not what it resolved to, so a provider
+moving underneath you is otherwise invisible until apply time — and a
+`latestWhere` bound is a request not to think about versions, which is exactly
+when you stop noticing them. It is the file that catches an unintended major
+bump, and it is the file that caught a prerelease selection on a live
+migration.
+
 nixpkgs' set is still available as the argument `tofu.providers` receives —
 `plugins: [ plugins.hashicorp_random ]` — but it is a curated 169 providers at
 one version each, so the registry is the general answer and nixpkgs the
