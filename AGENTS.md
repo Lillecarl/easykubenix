@@ -55,6 +55,17 @@ runtime except pydantic. That is why `TC001`/`TC002` are selected and why
 `["pydantic.BaseModel"]` — without it those rules will happily move a live
 model field type into an `if TYPE_CHECKING:` block and break imports.
 
+# Issues
+
+Issues go to the GitHub issue tracker, `gh issue create --repo
+Lillecarl/easykubenix`. Every nixidae project works this way.
+
+Do not use `git-bug` here. It is solid-kubernetes' tracker, for a repository
+that has no GitHub one, and reaching for it in a nixidae project puts an issue
+somewhere nobody else looks: `git-bug` keeps entities in `refs/bugs/*`, which
+no clone fetches by default and no ordinary `git push` publishes. An issue
+filed there is invisible to everyone including the person who asked for it.
+
 # Version control
 
 This repository uses Jujutsu (`jj`) for version control. Prefer `jj` commands
