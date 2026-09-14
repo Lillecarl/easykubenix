@@ -354,6 +354,11 @@ a `$(...)` is the whole idiom — progress goes to stderr. Sensitive outputs
 print: a kubeconfig is marked sensitive and is the main reason to want this, so
 naming one output explicitly is the consent.
 
+If `ekn tofu` reports `invalid choice` for a verb that should exist, the dev
+shell is holding a cached `ekn` from before the bump — `direnv reload`. It
+presents exactly like an upstream change not having landed, which is the wrong
+thing to go looking for.
+
 `--kubeconfig-from-tofu` is the single-operator and bootstrap path. Reading a
 tofu output means reading that unit's state, so it needs that unit's backend
 and its credentials — it couples deploying an application to owning the
