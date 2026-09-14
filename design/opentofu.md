@@ -193,6 +193,25 @@ Neither can hold the other.
 Getting a `tf` unit down before the Kubernetes unit that needs it is therefore
 two commands, and decision 2's kubeconfig bridge is what connects them.
 
+**The assertion is narrower than the problem, and knowing where it stops
+matters.** It refuses a dependency that crosses classes. It cannot refuse a
+same-class dependency that *spans* a different class, because nothing in the
+evaluation knows one step belongs between two others.
+
+The real chain found in use is three stages: a `tf` unit builds the cluster,
+Kubernetes units fill it, and a second `tf` unit configures what those
+installed. Both ends are `tf`, so `dependencies` would accept naming one from
+the other — and that would be worse than naming nothing, because the apply
+would run the two `tf` stages back to back and silently skip the Kubernetes
+one in between.
+
+So a chain like that stays hand-ordered, and `dependencies` is for units whose
+whole closure is one class. There is a real mitigation, and it is the backend
+rather than the tool: a `tf` unit whose state lives on the cluster it
+configures cannot `init` until that cluster answers, so a wrong order fails at
+init instead of half-applying. Where ordering cannot be expressed, making it
+self-enforcing is the next best thing.
+
 ### 4. `ekn commit` writes the rendered `config.tf.json`
 
 So the configuration diff is visible in the branch, the same way the rendered
@@ -281,7 +300,8 @@ Adopting an existing tree? Copy its terraform.tfstate into .ekn/tofu/infra first
 
 Self-limiting — after the first apply the file exists and the line stops — and
 local backends only, since a remote one keeps no local file and its absence
-says nothing. It is the same principle as the orphan scan: an empty state this
+says nothing. Confirmed against a real `kubernetes` backend: the notice stays
+silent there, which is right rather than merely scoped. It is the same principle as the orphan scan: an empty state this
 run just created and an empty state that was always right look identical from
 anywhere downstream, so it has to be said where the difference is still
 knowable.
@@ -353,6 +373,26 @@ The rule both cases want: **an output whose absence is meaningful must be
 produced on the path where nothing happened, not only where something did.** A
 tool that states what it did not look at is more trustworthy than one that says
 nothing, and far more than one that appears to have looked at everything.
+
+## What a remote backend does, measured
+
+The remote path went unexercised for as long as every `tf` unit kept local
+state. A day-2 unit storing state in a Kubernetes Secret — on the cluster it
+configures — is what finally ran it.
+
+- `state_location` prints `kubernetes backend`, read from the rendered
+  configuration without touching the backend.
+- The init-skip holds. A first run configures the backend; a repeat run does
+  no `Initializing the backend` and still reads state, reporting no changes.
+  So "config byte-identical and `.terraform/` present" is sound against a
+  backend that must be reachable.
+- The nothing-to-adopt notice stays silent, correctly.
+
+**Still untested, and not to be read as covered:** a stale `.terraform/`
+outliving its credentials or a moved Secret. That is the case where skipping
+`init` is the wrong call, and both runs above had valid credentials and an
+unmoved backend. The skip is sound in the happy path and unproven in the one
+it was worried about.
 
 ## An inherited guarantee is still a dependency
 
