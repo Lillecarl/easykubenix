@@ -69,6 +69,35 @@ let
       map dropNulls (lib.filter (v: v != null) value)
     else
       value;
+  # A `required_providers` source that names the Terraform registry by host.
+  #
+  # `withPlugins` lays its tree out under `registry.opentofu.org` -- nixpkgs
+  # rewrites the path segment -- so OpenTofu finds a bare `hashicorp/random`
+  # and an explicit `registry.opentofu.org/...` in the store, and does not
+  # find `registry.terraform.io/...` there at all. It then does what it does
+  # for any provider it cannot find locally: queries the registry over the
+  # network.
+  #
+  # Which means the failure depends on whether the machine has network.
+  # Measured with a dead proxy, the bare and opentofu.org forms initialise
+  # from the store and the terraform.io form dies with "Failed to query
+  # available provider packages". On a machine with network it would instead
+  # succeed -- fetching an unpinned provider from the internet, with no
+  # evidence in the output that anything differed.
+  #
+  # That is the whole reason this is an assertion and not a note. A pin that
+  # quietly stops pinning looks exactly like one that works.
+  terraformRegistrySources = lib.concatLists (
+    lib.mapAttrsToList (
+      name: declared:
+      let
+        source = declared.source or null;
+      in
+      lib.optional (
+        lib.isString source && lib.hasPrefix "registry.terraform.io/" source
+      ) "${name}: ${source}"
+    ) (cfg.terraform.required_providers or { })
+  );
 in
 {
   _class = "tf";
@@ -92,7 +121,34 @@ in
 
         A provider still has to be declared to OpenTofu as well, in
         `tofu.terraform.required_providers`. This option only decides which
-        binaries exist.
+        binaries exist. Name it there without a registry host --
+        `hashicorp/random`, not `registry.terraform.io/hashicorp/random`; an
+        assertion explains why.
+
+        Nothing is fetched at evaluation. `plugins` is nixpkgs'
+        `terraform-providers`, built from a `providers.json` checked into
+        nixpkgs that pins every provider by revision and hash, so the nixpkgs
+        pin is what pins the provider set -- one knob, moved as a reviewed
+        whole.
+
+        That also means you get the version nixpkgs carries. For a provider
+        nixpkgs does not package, or a version it does not have, build one:
+        the argument is ignored, so anything that is a package will do.
+
+            tofu.providers = plugins: [
+              plugins.hashicorp_random
+              (pkgs.terraform-providers.mkProvider {
+                owner = "example";
+                repo = "terraform-provider-example";
+                rev = "v1.2.3";
+                hash = "...";
+                vendorHash = "...";
+                homepage = "https://registry.terraform.io/providers/example/example";
+              })
+            ];
+
+        It lands in `providers.json` with its version like any other, so a
+        hand-pinned provider is as visible in review as a packaged one.
       '';
       example = lib.literalExpression "plugins: [ plugins.hashicorp_random ]";
     };
@@ -213,6 +269,28 @@ in
       '';
     };
   };
+
+  config.assertions = [
+    {
+      assertion = terraformRegistrySources == [ ];
+      message = ''
+        These `tofu.terraform.required_providers` entries name the Terraform
+        registry by host:
+
+        ${lib.concatMapStringsSep "\n" (entry: "  ${entry}") terraformRegistrySources}
+
+        `tofu.providers` pins each provider to a store path, and the tree it
+        builds lives under `registry.opentofu.org`. OpenTofu does not look for
+        a `registry.terraform.io/...` source there, so it falls back to
+        querying the registry over the network -- which fails where there is
+        none, and silently fetches an unpinned provider where there is.
+
+        Drop the host: `hashicorp/random`, not
+        `registry.terraform.io/hashicorp/random`. `registry.opentofu.org/...`
+        also resolves from the store if you want it spelled out.
+      '';
+    }
+  ];
 
   config.tofu = {
     wrappedPackage = cfg.package.withPlugins cfg.providers;

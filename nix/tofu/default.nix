@@ -89,6 +89,14 @@ pkgs.runCommand "easykubenix-check-tofu-render"
       and (.[0].path | startswith("/nix/store/"))
     ' ${unit.configFile}/providers.json > /dev/null
 
+    # `init` with no network is the pinning claim, and the sandbox is what
+    # makes it a real one: a provider resolved from the store needs nothing,
+    # and a provider OpenTofu decides to look up cannot be reached. The
+    # fixture's source is the bare `hashicorp/random` for exactly that reason
+    # -- spelled `registry.terraform.io/hashicorp/random` this step fails,
+    # because nixpkgs lays the plugin tree out under `registry.opentofu.org`.
+    # An assertion in tofu.nix rejects that spelling before it gets here,
+    # since off-sandbox it would fetch an unpinned provider and look fine.
     ${unit.tofu} init -input=false
     ${unit.tofu} validate
 
