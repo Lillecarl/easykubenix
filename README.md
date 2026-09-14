@@ -300,8 +300,14 @@ rest of the tree, but `ekn tofu` reads the Nix evaluation rather than the
 branch, so rolling infrastructure back means rolling the source back.
 
 `ekn tofu` keeps a working directory per unit under `.ekn/tofu/<name>`, holding
-`.terraform/` and, for a local backend, live state. Add `.ekn/` to your
-`.gitignore`. Every run prints where state actually lives, because easykubenix
+`.terraform/` and, for a local backend, live state.
+
+**Add `.ekn/` to your repository's `.gitignore` before anyone runs
+`ekn tofu`.** This is a secret-handling step, not housekeeping. OpenTofu state
+holds every attribute of every resource in the clear, including the ones a
+provider marks sensitive — a cluster CA, machine secrets, a kubeconfig. The
+directory is created by the first run, in whatever repository that run happens
+in, and easykubenix cannot ignore it on your behalf. Every run prints where state actually lives, because easykubenix
 has no default backend — a unit that declares none gets a local file, and
 nothing else would say so.
 
