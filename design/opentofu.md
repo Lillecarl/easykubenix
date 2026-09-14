@@ -254,6 +254,15 @@ state already sitting there. Measured end to end: a unit whose state was
 dropped in beforehand plans `No changes. Your infrastructure matches the
 configuration.` rather than planning to create what already exists.
 
+Confirmed against a real tree and not only a fixture. The first adopter
+migrated 25 resources across three providers — hashicorp/kubernetes,
+gavinbunney/kubectl and siderolabs/talos — describing five running Talos VMs,
+their cloud-init Secrets, machine configurations, bootstrap and kubeconfig.
+Every resource refreshed and matched on the first run; nothing planned for
+creation or replacement. No provider wanted re-initialising against the new
+working directory and no resource id had drifted. "It is just a copy" is worth
+believing with that attached.
+
 Nothing special is needed for it, and that is deliberate — a `tf` unit's
 working directory is an ordinary OpenTofu working directory. The one thing to
 get right is the order: copy the state in *before* the first `ekn tofu`
@@ -274,6 +283,15 @@ says nothing. It is the same principle as the orphan scan: an empty state this
 run just created and an empty state that was always right look identical from
 anywhere downstream, so it has to be said where the difference is still
 knowable.
+
+**Delete the copy if you were only rehearsing.** The tool cannot help with this
+one and the danger is worse than the empty case. A rehearsal leaves a state
+file behind; the original tree keeps running and moving; and the next person to
+run the unit adopts a *stale* copy. That plan looks clean — it is internally
+consistent — right up until it silently reverts whatever changed in between. An
+empty state at least plans to create everything, which is loud. Until the real
+cutover, the original tree is the only authority, and a second copy under
+`.ekn/` is precisely what somebody adopts by accident later.
 
 Prove the render before touching state. `config.tf.json` is a build artefact,
 so an adopter can diff it against what the old tree produced and know the
