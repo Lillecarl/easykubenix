@@ -69,6 +69,48 @@ let
       map dropNulls (lib.filter (v: v != null) value)
     else
       value;
+  # One provider's `required_providers` entry, from whichever of the two kinds
+  # of provider derivation it is.
+  #
+  # `lib/tofuRegistry.nix` carries `passthru.providerConfig` deliberately, so a
+  # registry provider needs no interpretation. nixpkgs' `terraform-providers`
+  # predates any of this and carries `passthru.provider-source-address`
+  # instead -- spelled `registry.terraform.io/...`, which is the one form that
+  # does not resolve against the plugin tree.
+  #
+  # That is not nixpkgs being wrong: it is the provider's canonical address,
+  # and `withPlugins` rewrites its own directory tree from it. Rewriting it
+  # the same way here is what lets a nixpkgs provider be declared correctly
+  # without the author hand-writing a form that differs from the one printed
+  # on the derivation.
+  #
+  # A provider with neither is skipped rather than guessed at.
+  providerRequirement =
+    plugin:
+    let
+      address = plugin.passthru.provider-source-address or null;
+      source = lib.replaceStrings [ "registry.terraform.io/" ] [ "registry.opentofu.org/" ] address;
+    in
+    if plugin ? passthru.providerConfig then
+      [
+        {
+          name = plugin.passthru.providerName;
+          value = plugin.passthru.providerConfig;
+        }
+      ]
+    else if lib.isString address then
+      [
+        {
+          name = lib.last (lib.splitString "/" address);
+          value = {
+            inherit source;
+            inherit (plugin) version;
+          };
+        }
+      ]
+    else
+      [ ];
+
   # A `required_providers` source that names the Terraform registry by host.
   #
   # `withPlugins` lays its tree out under `registry.opentofu.org` -- nixpkgs
@@ -301,12 +343,7 @@ in
   # fetches from the network whatever the store happens to hold. `mkDefault`,
   # so naming one by hand still wins.
   config.tofu.terraform.required_providers = lib.mkDefault (
-    lib.listToAttrs (
-      map (plugin: {
-        name = plugin.passthru.providerName;
-        value = plugin.passthru.providerConfig;
-      }) (lib.filter (plugin: plugin ? passthru.providerConfig) (cfg.providers cfg.package.plugins))
-    )
+    lib.listToAttrs (lib.concatMap providerRequirement (cfg.providers cfg.package.plugins))
   );
 
   config.tofu = {
