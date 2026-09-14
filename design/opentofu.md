@@ -241,6 +241,58 @@ deploying apps and owning infra state are different people, an ordinary
 kubeconfig is the answer. `init` is now also skipped when it would change
 nothing, which is most of what that path was paying for.
 
+## Adopting an existing tree
+
+Every real adopter is migrating a tree that already exists and already holds
+live state. The greenfield case above is the easy one; this is the other end of
+the same asymmetry the "deleted unit leaked money" section reasons about.
+
+**The cutover is a file copy.** Put the existing `terraform.tfstate` into
+`.ekn/tofu/<unit>/` before the first run. `prepare` creates the directory,
+copies the rendered configuration in and runs `tofu init`, which adopts the
+state already sitting there. Measured end to end: a unit whose state was
+dropped in beforehand plans `No changes. Your infrastructure matches the
+configuration.` rather than planning to create what already exists.
+
+Nothing special is needed for it, and that is deliberate — a `tf` unit's
+working directory is an ordinary OpenTofu working directory. The one thing to
+get right is the order: copy the state in *before* the first `ekn tofu`
+command, not after a run has already written an empty one.
+
+Prove the render before touching state. `config.tf.json` is a build artefact,
+so an adopter can diff it against what the old tree produced and know the
+conversion is faithful without going near a cluster.
+
+### Two version questions, and only one of them is real
+
+Both measured against OpenTofu 1.12.5, because both come up the moment a tree
+that pinned its own nixpkgs moves into somebody else's evaluation.
+
+**`terraform_version` in the state file is not enforced.** A state recording a
+*newer* OpenTofu is read, planned and applied without complaint, and the
+version is quietly rewritten down on the next write. Checked at 1.12.9, 1.13.0
+and 2.0.0 against a 1.12.5 binary: all three planned, and an apply rewrote the
+field to 1.12.5. So a patch-level difference between the tree's old pin and its
+new one — the common case — is not the blocker it looks like.
+
+**The state *format* version is enforced.** Bumping `version` from 4 to 5
+fails, and usefully:
+
+```
+Error: Error acquiring the state lock
+failed to write backup file: Unsupported state file format:
+The state file uses format version 5, which is not supported by OpenTofu
+```
+
+That is the real compatibility boundary, and it moves far more rarely than the
+binary version does.
+
+One measurement recorded without explanation: `required_version` in the
+`terraform` block was *not* enforced either, in HCL or in JSON — a 1.12.5
+binary initialised and planned against `>= 1.99.0`. That contradicts what the
+constraint is for, and this note does not claim to know why. Do not rely on it
+either way.
+
 ## Silence must not carry a meaning it did not earn
 
 A rule this repository already broke twice while the OpenTofu work was being
