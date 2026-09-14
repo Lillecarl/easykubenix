@@ -4,8 +4,10 @@ A deployment unit can hold OpenTofu configuration instead of Kubernetes
 objects. The two kinds are told apart by the module system's class —
 `class = "tf"` against `class = "kubernetes"`.
 
-Status: built, on both sides. The four design decisions below are answered and
-implemented. `nix build --file ./checks.nix tofu-render` is the gate.
+Status: built, on both sides, and migrated once. The four design decisions
+below are answered and implemented, and a first adopter has moved a live
+25-resource tree onto a `tf` unit — render byte-identical, state adopted
+cleanly. `nix build --file ./checks.nix tofu-render` is the gate.
 
 ## What the class does, and what it does not do
 
@@ -380,10 +382,11 @@ Done, in the Nix half:
    `misroutedObjects` asserts that nothing routes an object into a unit of
    another class.
 4. `easykubenix/tofu.nix` — `_class = "tf"`, the option tree,
-   `tofu.generated` and a pretty-printed `config.tf.json`. `nix/tofu` is its
-   gate: it diffs the render against a literal, then runs `tofu init` and
-   `tofu validate` in the build sandbox, where there is no network to fall
-   back on.
+   `tofu.generated` and a pretty-printed `config.tf.json`, plus
+   `tofu.resolvedProviders` rendering `providers.json` beside it. `nix/tofu`
+   is its gate: it diffs the render against a literal, checks the resolved
+   provider, then runs `tofu init` and `tofu validate` in the build sandbox,
+   where there is no network to fall back on.
 
 Done, in `ekn`:
 
@@ -391,14 +394,21 @@ Done, in `ekn`:
    reads `deployment.tofuUnits` and realises each unit's `configFile` and
    `tofu`; `ekn/tofu.py` copies the configuration out of the read-only store
    into a per-unit working directory, drops the stale `.terraform.lock.hcl`,
-   and runs the closure deepest first.
-6. `ekn commit` writes each `tf` unit's `config.tf.json` to its `path` —
-   decision 4. `gitops.file_groups` no longer raises on an empty
-   `kubernetes.deploymentUnits`, and the "nothing to commit" check moved to
-   where both halves are known.
+   and runs the closure deepest first. `destroy` refuses while `dependents`
+   is non-empty.
+6. `ekn commit` writes each `tf` unit's `config.tf.json` and `providers.json`
+   to its `path` — decision 4. `gitops.file_groups` no longer raises on an
+   empty `kubernetes.deploymentUnits`, and the "nothing to commit" check moved
+   to where both halves are known.
 7. `ekn kubeapply --kubeconfig-from-tofu <unit>:<output>` — decision 2. The
    output lands in a 0600 temporary file, passed straight to `kr8s`, removed
    when the command ends.
+
+What every `ekn tofu` run says about itself, all of it from review or from the
+first adopter: `state_location` names where state lives, `orphaned_state`
+reports what it scanned and what it could not see, and `prepare` says when
+there is no state to adopt. Each is in `ekn/tofu.py`; the reasoning for all
+three is one section up.
 
 Items 1 through 4 needed no change to the `ekn` CLI or to the JSON schema it
 validates, which is why they went first.
