@@ -43,10 +43,19 @@ pkgs.runCommand "easykubenix-check-tofu-registry"
     # plugin tree at all.
     ${pkgs.jq}/bin/jq -e '
       .terraform.required_providers
-      | (keys == ["keycloak", "random"])
+      | (keys == ["keycloak", "random", "talos"])
         and (.keycloak.source == "registry.opentofu.org/keycloak/keycloak")
         and (.random.source == "registry.opentofu.org/hashicorp/random")
+        and (.talos.source == "registry.opentofu.org/siderolabs/talos")
     ' config.tf.json > /dev/null
+
+    # No selected version is a prerelease. A version bound does not exclude
+    # them and the index carries them, so `latestWhere (v: versionOlder v
+    # "1.0.0")` over siderolabs/talos used to pick 0.12.0-beta.0 and say
+    # nothing about it -- a beta provider reaching real state, visible only as
+    # a version string in a file nobody has to read.
+    ${pkgs.jq}/bin/jq -e 'all(.[]; .version | contains("-") | not)' \
+      ${unit.configFile}/providers.json > /dev/null
 
     # The versions are read back rather than pinned to literals, which would
     # only test the registry lock. What is gated is that a version was chosen

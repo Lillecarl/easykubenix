@@ -113,17 +113,58 @@ let
       # registry lists newest first today, and depending on that would make
       # `latest` a property of their formatting.
       ordered = builtins.sort lib.versionOlder (lib.attrNames versions);
-      newest = predicate: lib.last (lib.filter predicate ordered);
+
+      # A prerelease, by SemVer's rule: anything after a hyphen. The registry
+      # carries them -- siderolabs/talos has 34 -- and nixpkgs never did, which
+      # is what makes this a trap rather than a preference.
+      #
+      # `latestWhere (v: versionOlder v "1.0.0")` selected 0.12.0-beta.0, and
+      # it was right to: a beta of 0.12.0 genuinely is older than 1.0.0. The
+      # bound was a complete thought against nixpkgs and is not against an
+      # index that ships prereleases, so the selectors below exclude them and
+      # the bound keeps meaning what its author meant.
+      #
+      # It is worth defaulting rather than documenting because the failure is
+      # silent: a beta provider reaches a live cluster's state, and the only
+      # place it shows is a version string in `providers.json`.
+      isPrerelease = version: lib.hasInfix "-" version;
+      stable = lib.filter (version: !isPrerelease version) ordered;
+
+      pick =
+        what: candidates:
+        if candidates == [ ] then
+          throw ''
+            No stable version of ${owner}/${repo} ${what}.
+
+            ${
+              if stable == [ ] then
+                "This provider ships only prereleases: ${toString (lib.length ordered)} of them, newest ${lib.last ordered}."
+              else
+                "Stable versions available: ${lib.concatStringsSep ", " (lib.takeEnd 5 stable)}."
+            }
+
+            `latest` and `latestWhere` skip prereleases on purpose -- a
+            version bound does not exclude them, and a beta selected by
+            accident reaches real infrastructure. To take one deliberately,
+            name it: `<provider>."${lib.last ordered}"`.
+          ''
+        else
+          versions.${lib.last candidates};
     in
     versions
     // {
-      latest = versions.${lib.last ordered};
+      # Stable only. An exact `<provider>."0.12.0-beta.0"` is how a
+      # prerelease is taken, which makes wanting one a thing somebody typed.
+      latest = pick "exists" stable;
 
       # The selector that earns its place. A provider's major versions are
       # rarely compatible, so "newest below 6.0.0" is the real question, and
       # pinning an exact string means editing it to take a patch release.
-      latestWhere = predicate: versions.${newest predicate};
+      latestWhere = predicate: pick "matches that bound" (lib.filter predicate stable);
 
+      # Unfiltered, unlike the two above: naming a predicate over every
+      # version is already explicit, and this is where somebody goes who wants
+      # to see or choose among prereleases.
       selectVersions = predicate: lib.filterAttrs (version: _: predicate version) versions;
     };
 

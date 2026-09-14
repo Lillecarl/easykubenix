@@ -293,7 +293,15 @@ the registry revision the umbrella locks, plus each release's own shasum;
 
 `latestWhere` is usually what you want over an exact version — a major release
 is where a provider breaks compatibility, and pinning a patch means editing it
-to take a fix. `selectVersions` and `<provider>."1.2.3"` are there too.
+to take a fix.
+
+`latest` and `latestWhere` skip prereleases. The registry carries them where
+nixpkgs never did, so a bound alone is not enough: `latestWhere (v:
+lib.versionOlder v "1.0.0")` over `siderolabs/talos` matches `0.12.0-beta.0`
+perfectly well, and a beta provider would reach real state with nothing but a
+version string in `providers.json` to say so. Take one deliberately by naming
+it — `tofuRegistry.siderolabs.talos."0.12.0-beta.0"` — or browse with
+`selectVersions`, which filters nothing.
 
 `tofu.terraform.required_providers` is derived from whatever `tofu.providers`
 selected, so the declared source and version cannot drift from the binaries.

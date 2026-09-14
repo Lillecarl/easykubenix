@@ -22,6 +22,12 @@
           tofu.providers = _: [
             (tofuRegistry.keycloak.keycloak.latestWhere (v: lib.versionOlder v "6.0.0"))
             (tofuRegistry.hashicorp.random.latestWhere (v: lib.versionOlder v "4.0.0"))
+            # siderolabs/talos is here for one reason: it ships 34
+            # prereleases, and `latestWhere (v: versionOlder v "1.0.0")` used
+            # to select 0.12.0-beta.0 -- correctly, since a beta of 0.12.0 is
+            # older than 1.0.0. The gate asserts every selected version is
+            # stable, which only this provider can currently fail.
+            (tofuRegistry.siderolabs.talos.latestWhere (v: lib.versionOlder v "1.0.0"))
           ];
 
           # Deliberately no `required_providers` here. tofu.nix derives it from
