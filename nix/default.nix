@@ -186,6 +186,10 @@ let
   # provider, both of which the nixpkgs pin already carries. See ./tofu.
   tofu-render = pkgs.callPackage ./tofu { inherit sources; };
 
+  # Providers from the OpenTofu registry rather than nixpkgs. Outside `all`:
+  # it fetches a ~424M index plus a provider zip each. See ./tofu/registry.nix.
+  tofu-registry = pkgs.callPackage ./tofu/registry.nix { inherit sources; };
+
   nixfmt = pkgs.runCommand "easykubenix-check-nixfmt" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
     cd ${nixSources}
     find . -type f -name '*.nix' -print0 | sort -z | xargs -0 nixfmt --check
@@ -200,6 +204,7 @@ in
     kubeapply
     nixfmt
     tofu-render
+    tofu-registry
     validation-e2e
     bootstrap-validation-e2e
     ;
@@ -216,6 +221,7 @@ in
       kubeapply
       nixfmt
       tofu-render
+      tofu-registry
       validation-e2e
       bootstrap-validation-e2e
       ;

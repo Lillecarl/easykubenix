@@ -243,8 +243,17 @@ let
   importYaml = import ./easykubenix/lib/importYaml.nix { inherit lib parseYAMLStream; };
   importHelm = import ./easykubenix/lib/importHelm.nix { inherit lib pkgs importYaml; };
 
+  # The OpenTofu registry, as provider derivations. A module argument rather
+  # than an option so a `tf` module can reach it while deciding its own shape,
+  # and lazy either way: nothing forces `sources.opentofu-registry` -- a ~424M
+  # tree -- unless a configuration actually names a provider from it.
+  tofuRegistry = import ./easykubenix/lib/tofuRegistry.nix {
+    inherit pkgs lib;
+    registry = sources.opentofu-registry;
+  };
+
   moduleArgs = {
-    inherit pkgs;
+    inherit pkgs tofuRegistry;
     inherit (pkgs) lib;
     # The `ekn` CLI package itself, under a distinct name so it can't
     # be conflated with the `ekn` module-arg below (GitOps helpers) or

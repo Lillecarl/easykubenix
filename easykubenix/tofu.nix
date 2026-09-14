@@ -292,6 +292,23 @@ in
     }
   ];
 
+  # `required_providers` for every selected provider that knows its own
+  # source, unless the configuration says otherwise.
+  #
+  # Declaring the binary and the requirement separately is how a configuration
+  # ends up asking for a version it did not pin -- and the failure is the
+  # quiet kind, because OpenTofu resolves the requirement it was given and
+  # fetches from the network whatever the store happens to hold. `mkDefault`,
+  # so naming one by hand still wins.
+  config.tofu.terraform.required_providers = lib.mkDefault (
+    lib.listToAttrs (
+      map (plugin: {
+        name = plugin.passthru.providerName;
+        value = plugin.passthru.providerConfig;
+      }) (lib.filter (plugin: plugin ? passthru.providerConfig) (cfg.providers cfg.package.plugins))
+    )
+  );
+
   config.tofu = {
     wrappedPackage = cfg.package.withPlugins cfg.providers;
 

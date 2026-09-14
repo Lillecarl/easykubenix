@@ -277,13 +277,32 @@ enforces the split: a nested `tf` instance is evaluated with `class = "tf"`, so
 a Kubernetes module imported into it fails at the import naming both classes,
 rather than failing once per option.
 
-Providers are pinned by Nix, not by a lockfile:
+Providers are pinned by Nix, not by a lockfile. The `tofuRegistry` module
+argument is the OpenTofu registry itself — every provider, every version:
 
 ```nix
-tofu.providers = plugins: [ plugins.hashicorp_random ];
+tofu.providers = _: [
+  tofuRegistry.hashicorp.kubernetes.latest
+  (tofuRegistry.keycloak.keycloak.latestWhere (v: lib.versionOlder v "6.0.0"))
+];
 ```
 
-`tofu init` then resolves them from the store and needs no network.
+`tofu init` then resolves them from the store and needs no network. The pin is
+the registry revision the umbrella locks, plus each release's own shasum;
+`umbrella update opentofu-registry` moves it and the lock records it.
+
+`latestWhere` is usually what you want over an exact version — a major release
+is where a provider breaks compatibility, and pinning a patch means editing it
+to take a fix. `selectVersions` and `<provider>."1.2.3"` are there too.
+
+`tofu.terraform.required_providers` is derived from whatever `tofu.providers`
+selected, so the declared source and version cannot drift from the binaries.
+Write it by hand only to override.
+
+nixpkgs' set is still available as the argument `tofu.providers` receives —
+`plugins: [ plugins.hashicorp_random ]` — but it is a curated 169 providers at
+one version each, so the registry is the general answer and nixpkgs the
+special case.
 
 `ekn tofu {plan,apply,destroy} --target infra` runs it. A separate verb from
 `ekn kubeapply` on purpose — OpenTofu carries a backend, a lock and a

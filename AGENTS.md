@@ -26,6 +26,10 @@
   then runs `tofu init` and `tofu validate` over it inside the build sandbox.
   The sandbox is the point: no network there means `tofu.providers` has to
   pin the provider through the store. In `checks.all`; see `nix/tofu`.
+- `nix build --file ./checks.nix tofu-registry` — providers from the OpenTofu
+  registry rather than nixpkgs, `tofu init` in the sandbox. Outside
+  `checks.all` because it fetches a ~424M index; run it when you touch
+  `easykubenix/lib/tofuRegistry.nix`. See `nix/tofu/registry.nix`.
 - `nix build --file ./checks.nix kubeapply` — the apply gate. It boots a
   single-node kubeadm cluster under User-Mode Linux and runs
   `ekn _applyManifest` inside it, so it answers what the two gates above
