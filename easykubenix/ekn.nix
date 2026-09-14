@@ -263,6 +263,18 @@ in
         `nixkube.systems` enables, so a single-architecture cluster never
         meets this.
 
+        `always-allow-substitutes = true` in the deployer's nix.conf removes
+        it without changing any derivation. Measured on the same foreign
+        environment, into an empty store, with binfmt off:
+
+          (default)  error: Cannot build '...-nodeEnv.drv'
+                     Reason: platform mismatch
+          (true)     copying path '...-nodeEnv' from 'https://nix-csi.cachix.org'
+
+        It is a machine-wide setting: it lets Nix fetch any output whose
+        derivation asked to be built locally, which is a deliberate trade
+        rather than a free one.
+
         Override for that, or whenever a project needs a different (narrower
         or wider) closure pushed.
       '';
