@@ -225,25 +225,43 @@ in
 
         A module reaches them through the `csiPkgs` module argument:
 
-          { csiPkgs, pkgs, ... }:
+          { csiPkgs, pkgs, lib, ... }:
           {
-            ekn.cachePackage = pkgs.buildEnv {
-              name = "nixkube-node-paths";
-              paths = builtins.attrValues (
-                builtins.mapAttrs (_: p: p.nixkube-node-env) csiPkgs
-              );
-            };
+            ekn.cachePackage = pkgs.linkFarm "nixkube-node-paths" (
+              lib.concatLists (
+                lib.mapAttrsToList (system: p: [
+                  { name = "''${system}-node"; path = p.nixkube-node-env; }
+                  { name = "''${system}-pynixd"; path = p.nixkube-pynixd-env; }
+                ]) csiPkgs
+              )
+            );
           }
 
-        Know the cost before doing this on a multi-architecture cluster.
-        Naming the other architecture's environment makes the deployer
-        realise it, and `buildEnv` sets `allowSubstitutes = false`, so Nix
-        builds it rather than fetching it even when a cache already has it.
-        Measured: one such `buildEnv` over both architectures wanted to build
-        the aarch64 `nodeEnv` on an x86_64 machine, while its seven aarch64
-        dependencies fetched normally. Without binfmt that fails outright.
-        Restrict `paths` to the architectures the deployer can realise, or
-        push the missing one from a machine that can.
+        `linkFarm` and not `buildEnv`. Nothing here wants the environments
+        merged, only one derivation that depends on all of them, and merging
+        them fails:
+
+          error: two given paths contain a conflicting subpath:
+            .../cacheEnv/bin/kill and .../nodeEnv/bin/kill
+
+        linkFarm gives each input its own name, so it cannot collide.
+
+        Both environments, not only the node one. `nixkube-node-env` is what
+        the node's init fetches; `nixkube-pynixd-env` is what pynixd mounts
+        for itself. Pushing only the first leaves pynixd unable to start on a
+        node that does not already have its own.
+
+        Measured on nixkube's own instance: the closure holds 604 paths and
+        names all four environments, against 1 for the manifest alone.
+
+        On a multi-architecture cluster, know the cost. `buildEnv` sets
+        `allowSubstitutes = false`, so a foreign-architecture environment is
+        built rather than fetched even when a cache holds that exact output:
+        one such closure wanted to build the aarch64 `nodeEnv` on an x86_64
+        machine while its seven aarch64 dependencies fetched normally.
+        Without binfmt that fails outright. `csiPkgs` holds only the systems
+        `nixkube.systems` enables, so a single-architecture cluster never
+        meets this.
 
         Override for that, or whenever a project needs a different (narrower
         or wider) closure pushed.
