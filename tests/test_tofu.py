@@ -5,6 +5,7 @@ from pathlib import Path as SyncPath
 from typing import TYPE_CHECKING
 
 import pytest
+import structlog.testing
 from anyio import Path
 
 from ekn.cli import parse
@@ -365,3 +366,36 @@ class TestOrphanedState:
     async def test_no_root_yet_is_not_an_orphan(self, tmp_path: pathlib.Path) -> None:
         """Nothing has run here, so there is nothing to have leaked."""
         assert await orphaned_state([], Path(tmp_path / "never-created")) == (0, [])
+
+
+class TestAdoptionNotice:
+    """The one sharp edge in migrating an existing tree: the state copy has to
+    happen before the first run, and missing it plans to create what already
+    exists."""
+
+    @staticmethod
+    async def _lines(tmp_path: pathlib.Path, *, with_state: bool) -> list[str]:
+        unit = _unit(tmp_path, "infra", _fake_tofu(tmp_path, "tofu", _RECORDER), {})
+        root = Path(tmp_path / "work")
+        if with_state:
+            await (root / "infra").mkdir(parents=True)
+            await (root / "infra" / "terraform.tfstate").write_text("{}")
+        messages: list[str] = []
+        with structlog.testing.capture_logs() as logs:
+            await prepare(unit, root)
+            messages.extend(str(entry.get("event", "")) for entry in logs)
+        return messages
+
+    async def test_says_so_when_there_is_no_state_to_adopt(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
+
+        assert any("no existing state" in line for line in await self._lines(tmp_path, with_state=False))
+
+    async def test_stays_quiet_once_state_exists(self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Self-limiting: after the first apply the file is there and the
+        notice stops, so a steady-state run never carries it."""
+        monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
+
+        assert not any("no existing state" in line for line in await self._lines(tmp_path, with_state=True))

@@ -259,6 +259,22 @@ working directory is an ordinary OpenTofu working directory. The one thing to
 get right is the order: copy the state in *before* the first `ekn tofu`
 command, not after a run has already written an empty one.
 
+That ordering is the only sharp edge in the migration, so `prepare` says it
+rather than leaving it to this document. A first run with a local backend and
+no state file prints:
+
+```console
+infra: no existing state, so this plans as if nothing exists yet.
+Adopting an existing tree? Copy its terraform.tfstate into .ekn/tofu/infra first.
+```
+
+Self-limiting — after the first apply the file exists and the line stops — and
+local backends only, since a remote one keeps no local file and its absence
+says nothing. It is the same principle as the orphan scan: an empty state this
+run just created and an empty state that was always right look identical from
+anywhere downstream, so it has to be said where the difference is still
+knowable.
+
 Prove the render before touching state. `config.tf.json` is a build artefact,
 so an adopter can diff it against what the old tree produced and know the
 conversion is faithful without going near a cluster.

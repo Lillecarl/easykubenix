@@ -135,7 +135,27 @@ async def prepare(unit: TofuUnit, root: Path | None = None) -> Path:
         await lock.unlink()
 
     await _run(unit, workdir, ["init", "-input=false"])
-    _log.info(f"{unit.name}: state at {await state_location(workdir)}")
+    location = await state_location(workdir)
+    _log.info(f"{unit.name}: state at {location}")
+
+    # Adopting an existing tree is a file copy into this directory, and the
+    # copy has to happen before the first run. Miss it and nothing objects:
+    # `tofu` plans to create what already exists, which for an adopter is the
+    # whole cluster a second time.
+    #
+    # Nothing downstream can catch that either -- an empty state this run just
+    # created and an empty state that was always right look identical from
+    # there. So it is said here, where it is still true and still cheap, and
+    # only while there is no state to contradict it: after the first apply the
+    # file exists and the line stops on its own.
+    #
+    # Local backends only. A remote one keeps no local file, so its absence
+    # says nothing at all.
+    if location.endswith("(local, not committed)") and not await (workdir / "terraform.tfstate").exists():
+        _log.info(
+            f"{unit.name}: no existing state, so this plans as if nothing exists yet. "
+            f"Adopting an existing tree? Copy its terraform.tfstate into {workdir} first."
+        )
     return workdir
 
 
