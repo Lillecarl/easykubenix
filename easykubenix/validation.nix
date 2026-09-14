@@ -76,6 +76,38 @@ in
   };
   config.validation =
     let
+      # Which family the harness speaks, and it is not a free choice.
+      # kube-apiserver refuses to start when its advertise address is of a
+      # different family from the first `--service-cluster-ip-range` entry:
+      #
+      #   service IP family "fd00:96::/108" must match public address
+      #   family "37.27.129.237"
+      #
+      # -- that address being the build host's own external IPv4, which
+      # kube-apiserver auto-detects when given none. `serviceSubnet` derives
+      # from `kubernetes.clusterInfo.serviceCidr`, so a hardcoded IPv4
+      # loopback here disagreed with it by construction the moment an
+      # environment declared itself IPv6-only. Declaring the truth about the
+      # cluster was what broke the harness.
+      #
+      # `serviceSubnet` lists IPv4 first, so IPv6 is primary exactly when
+      # there is no IPv4 CIDR. Dual-stack keeps IPv4, matching that order.
+      primaryIsIPv6 = config.kubernetes.clusterInfo.serviceCidr.ipv4 == null;
+
+      # Loopback of the primary family. Measured: a Nix build sandbox's
+      # network namespace has `::1` up and bindable, the same as 127.0.0.1.
+      bindAddress = if primaryIsIPv6 then "::1" else "127.0.0.1";
+
+      # The same address inside a `host:port` join, where an IPv6 literal
+      # needs brackets or everything after the first colon reads as the port.
+      bindHost = if primaryIsIPv6 then "[${bindAddress}]" else bindAddress;
+
+      # Documentation space of the primary family: RFC 5737 for IPv4, RFC
+      # 3849 for IPv6. Both are reserved and unroutable, and 2001:db8::/32
+      # sits inside 2000::/3, so it satisfies the global-unicast demand the
+      # comment below describes.
+      advertiseAddress = if primaryIsIPv6 then "2001:db8::10" else "192.0.2.10";
+
       # Two documents in one file, the way kubeadm splits them by kind. The
       # InitConfiguration pins the API server's advertise address, which
       # kubeadm would otherwise default from the default route -- and a build
@@ -84,15 +116,15 @@ in
       # address must NOT be loopback either: for a loopback advertise address
       # kubeadm demands a *global unicast* IP on the lo interface, which a
       # sandbox namespace cannot have. Nothing binds it -- it exists only as
-      # a certificate SAN; the apiserver binds 127.0.0.1 below and clients
-      # reach it through controlPlaneEndpoint, which is 127.0.0.1 too. The
-      # value is RFC 5737 documentation space, reserved and unroutable.
+      # a certificate SAN; the apiserver binds `bindAddress` below and clients
+      # reach it through controlPlaneEndpoint, which is the same address. See
+      # `advertiseAddress` above for the documentation space each family uses.
       cfgFile = pkgs.writeText "kubeadm-config.yaml" (
         builtins.concatStringsSep "\n---\n" [
           (builtins.toJSON {
             apiVersion = cfg.kubeadmConfig.apiVersion;
             kind = "InitConfiguration";
-            localAPIEndpoint.advertiseAddress = "192.0.2.10";
+            localAPIEndpoint.advertiseAddress = advertiseAddress;
           })
           (builtins.toJSON cfg.kubeadmConfig)
         ]
@@ -104,7 +136,7 @@ in
         apiVersion = "kubeadm.k8s.io/v1beta4";
         kind = "ClusterConfiguration";
         kubernetesVersion = "v${config.kubernetes.package.version}";
-        controlPlaneEndpoint = "$BIND_ADDRESS:$KUBERNETES_PORT";
+        controlPlaneEndpoint = "${bindHost}:$KUBERNETES_PORT";
         certificatesDir = "$CERT_DIR";
         networking = {
           podSubnet = cfg.podSubnet;
@@ -135,7 +167,7 @@ in
                 ${lib.getExe pkgs.python3Minimal} -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()'
             end
 
-            set --export BIND_ADDRESS 127.0.0.1
+            set --export BIND_ADDRESS ${bindAddress}
             set --export KUBERNETES_PORT $(get_free_port)
             set ETCD_CLIENT_PORT $(get_free_port)
             set ETCD_PEER_PORT $(get_free_port)
