@@ -347,6 +347,27 @@ and its credentials — it couples deploying an application to owning the
 infrastructure state. Where those are different people, use an ordinary
 kubeconfig and keep the two apart.
 
+### Bumping across the renderChart stamp removal
+
+`pkgs.renderChart` no longer takes `deploymentUnit`, and a caller that passed
+it moves the stamping into a transformer. The failure is loud in one direction
+and silent in the other, so the order matters:
+
+- **Against the new revision**, passing `deploymentUnit` fails with
+  `function 'anonymous lambda' called with unexpected argument 'deploymentUnit'`.
+- **Against the old revision**, dropping it does not fail. The parameter
+  defaulted to null, so the objects simply stop being routed — measured on a
+  real tree, one chart went from 23 objects to 12 and the unit count from 32 to
+  24, with no error anywhere.
+
+So the adaptation and the pin bump have to be one commit. Preparing the
+adaptation early, against the old pin, gives a clean-looking run with a quietly
+wrong answer rather than a failure.
+
+Measure from a clean working copy on both sides of the bump. Two of the first
+measurements of this change were half-applied edits rather than the bump
+itself, and only reverting to the committed state and re-measuring caught it.
+
 See `design/opentofu.md`.
 
 ### Kluctl integration (deprecated)
