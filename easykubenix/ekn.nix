@@ -202,12 +202,29 @@ in
         Derivation whose full closure gets pushed to `ekn.cacheTo`. Defaults
         to `internal.manifestJSONFile` -- the same manifest-JSON derivation
         `ekn validate` already builds, rather than a fresh whole-cluster
-        dump. Nix string context means its closure automatically includes
-        every store path referenced anywhere in the generated manifests
-        (e.g. CSI-mounted store paths embedded in `volumeAttributes`),
-        without needing to enumerate them by hand. Override only if a
-        project needs a different (narrower or wider) closure pushed
-        instead.
+        dump. Its closure covers every store path the manifests reference
+        *with string context intact*, so most projects need not enumerate
+        anything by hand.
+
+        A path a module deliberately strips context from is NOT in it, and
+        that is the case worth checking before relying on this. nixkube
+        discards context on every resource annotated `nixkube/discard`,
+        because rendering on one architecture would otherwise have to build
+        the other's `buildEnv`, which sets `allowSubstitutes = false` and so
+        can never be fetched. Measured on nixkube's own instance:
+
+          store paths named as text in manifest.json   4
+          paths in its closure                         1   (itself)
+
+        The four are the node and pynixd environments -- exactly the paths a
+        node needs to boot. So a cluster whose nodes depend on this push must
+        set `cachePackage` to something that names them with context, such as
+        a `buildEnv` over them, rather than assuming the manifest carries
+        them. `ekn deploy` reports a successful push either way, which is
+        what makes this worth stating here.
+
+        Override for that, or whenever a project needs a different (narrower
+        or wider) closure pushed.
       '';
     };
   };
