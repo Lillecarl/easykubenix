@@ -223,6 +223,28 @@ in
         them. `ekn deploy` reports a successful push either way, which is
         what makes this worth stating here.
 
+        A module reaches them through the `csiPkgs` module argument:
+
+          { csiPkgs, pkgs, ... }:
+          {
+            ekn.cachePackage = pkgs.buildEnv {
+              name = "nixkube-node-paths";
+              paths = builtins.attrValues (
+                builtins.mapAttrs (_: p: p.nixkube-node-env) csiPkgs
+              );
+            };
+          }
+
+        Know the cost before doing this on a multi-architecture cluster.
+        Naming the other architecture's environment makes the deployer
+        realise it, and `buildEnv` sets `allowSubstitutes = false`, so Nix
+        builds it rather than fetching it even when a cache already has it.
+        Measured: one such `buildEnv` over both architectures wanted to build
+        the aarch64 `nodeEnv` on an x86_64 machine, while its seven aarch64
+        dependencies fetched normally. Without binfmt that fails outright.
+        Restrict `paths` to the architectures the deployer can realise, or
+        push the missing one from a machine that can.
+
         Override for that, or whenever a project needs a different (narrower
         or wider) closure pushed.
       '';
