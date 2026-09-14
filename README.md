@@ -341,6 +341,19 @@ $ ekn tofu apply --target infra
 $ ekn kubeapply --target apps --kubeconfig-from-tofu infra:kubeconfig
 ```
 
+To reach anything else a unit built, or to verify it at all:
+
+```console
+$ export KUBECONFIG=$(mktemp)
+$ ekn tofu output --target infra kubeconfig > "$KUBECONFIG"
+$ kubectl get nodes
+```
+
+`ekn tofu output` writes the value and nothing else to stdout, so a redirect or
+a `$(...)` is the whole idiom — progress goes to stderr. Sensitive outputs
+print: a kubeconfig is marked sensitive and is the main reason to want this, so
+naming one output explicitly is the consent.
+
 `--kubeconfig-from-tofu` is the single-operator and bootstrap path. Reading a
 tofu output means reading that unit's state, so it needs that unit's backend
 and its credentials — it couples deploying an application to owning the

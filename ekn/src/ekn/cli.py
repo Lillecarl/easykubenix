@@ -67,6 +67,7 @@ from ekn.tofu import (
     file_groups as tofu_file_groups,
     kubeconfig_from_output as tofu_kubeconfig,
     orphaned_state as tofu_orphaned_state,
+    output as tofu_output,
     run_chain,
 )
 from ekn.validation import EphemeralControlPlane, exec_capture, prepare_validation_objects
@@ -1003,6 +1004,47 @@ class TofuDestroy(_TofuCommand):
             raise SystemExit(1) from exc
 
 
+class TofuOutput(_TofuCommand):
+    """Print one of a tf unit's OpenTofu outputs on stdout.
+
+    The supported way to reach what a unit built. Without it a unit's outputs
+    are unreachable except by running the wrapped `tofu` by hand inside
+    `.ekn/`, which is a private working directory rather than an interface --
+    and after a migration there is no conventional kubeconfig path left either,
+    because the old tree that had one is gone.
+
+    It also unblocks verification. A rendered configuration proves nothing
+    about a cluster; querying the live one is the only check that counts, and
+    that needs a kubeconfig.
+
+    Raw and unadorned, so a redirect is the whole idiom:
+
+        export KUBECONFIG=$(mktemp)
+        ekn tofu output --target infra kubeconfig > "$KUBECONFIG"
+
+    Sensitive outputs print. A kubeconfig is marked sensitive and is the main
+    reason to want this, so refusing them would refuse the use case. Naming one
+    output explicitly is the consent; nothing here prints an output nobody
+    asked for, and the value never reaches the log.
+    """
+
+    cli_name = "output"
+
+    name: str = pos(help="Which of the unit's OpenTofu outputs to print.")
+
+    async def run(self) -> None:
+        units = await self._units()
+        try:
+            value = await tofu_output(units[-1], self.name)
+        except TofuError as exc:
+            _log.error(str(exc))
+            raise SystemExit(1) from exc
+        # Verbatim, with no trailing newline added: `tofu output -raw` adds
+        # none, and a caller redirecting into a file wants the bytes the
+        # output holds rather than the bytes plus one.
+        sys.stdout.write(value)
+
+
 class Tofu(AttrCommand):
     """Run OpenTofu over a `class = "tf"` deployment unit.
 
@@ -1011,7 +1053,7 @@ class Tofu(AttrCommand):
     `--prune` means nothing to it. See design/opentofu.md.
     """
 
-    subcommands = (TofuPlan, TofuApply, TofuDestroy)
+    subcommands = (TofuPlan, TofuApply, TofuOutput, TofuDestroy)
 
     async def run(self) -> None:
         self.print_help()
@@ -1350,6 +1392,12 @@ def main() -> None:
         processors=[
             structlog.dev.ConsoleRenderer(),
         ],
+        # stderr, not structlog's default stdout. `ekn tofu output` writes one
+        # value to stdout for a caller to redirect, and `prepare` logs two
+        # lines on the way there -- left on stdout those land in the file.
+        # Progress belongs on stderr for every command here anyway; this is
+        # the one that could not work without it.
+        logger_factory=structlog.PrintLoggerFactory(sys.stderr),
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
         cache_logger_on_first_use=True,
     )

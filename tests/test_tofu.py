@@ -8,7 +8,7 @@ import pytest
 import structlog.testing
 from anyio import Path
 
-from ekn.cli import parse
+from ekn.cli import Tofu, parse
 from ekn.eval import TofuUnit
 from ekn.tofu import (
     TofuError,
@@ -17,6 +17,7 @@ from ekn.tofu import (
     file_groups,
     kubeconfig_from_output,
     orphaned_state,
+    output,
     prepare,
     run_chain,
     state_location,
@@ -399,3 +400,34 @@ class TestAdoptionNotice:
         monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
 
         assert not any("no existing state" in line for line in await self._lines(tmp_path, with_state=True))
+
+
+class TestOutputCommandLine:
+    """`ekn tofu output` is the supported way to reach what a unit built.
+    Without it a unit's outputs need the wrapped `tofu` run by hand inside
+    `.ekn/`, which is a private working directory rather than an interface."""
+
+    def test_it_takes_a_target_and_an_output_name(self) -> None:
+        command = parse(["tofu", "output", "--target", "infra", "kubeconfig", "-f", "."])
+        assert type(command).__name__ == "TofuOutput"
+        assert command.target == "infra"
+        assert command.name == "kubeconfig"
+
+    def test_the_output_name_is_required(self) -> None:
+        with pytest.raises(SystemExit):
+            parse(["tofu", "output", "--target", "infra", "-f", "."])
+
+    def test_it_is_mounted_under_tofu(self) -> None:
+        """Beside plan/apply/destroy, taking `--target` like all of them --
+        `UNIT:OUTPUT` stays specific to `--kubeconfig-from-tofu`, where one
+        flag value has to carry both halves."""
+        assert "output" in {command.cli_name for command in Tofu.subcommands}
+
+
+async def test_output_returns_the_value_verbatim(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No trailing newline added: `tofu output -raw` adds none, and a caller
+    redirecting into a file wants the bytes the output holds."""
+    monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
+    unit = _unit(tmp_path, "infra", _fake_tofu(tmp_path, "tofu", _OUTPUTS), {})
+
+    assert await output(unit, "kubeconfig", Path(tmp_path / "work")) == "apiVersion: v1\n"
