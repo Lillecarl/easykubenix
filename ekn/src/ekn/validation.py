@@ -91,6 +91,37 @@ async def prepare_validation_objects(
     return [await maybe_decrypt(obj) for obj in objects]
 
 
+#: etcd's loopback, and deliberately not the API server's. etcd's family has no
+#: bearing on the constraint that matters here -- kube-apiserver requires its
+#: *advertise* address to match the first `--service-cluster-ip-range` entry,
+#: and says nothing about where etcd lives. easykubenix's Nix harness
+#: (validation.nix) hardcodes the same address for the same reason, and these
+#: two implementations agreeing is worth more than either being clever.
+ETCD_HOST = "127.0.0.1"
+
+
+def bind_addresses(service_subnet: str) -> tuple[str, str]:
+    """The API server's loopback for *service_subnet*, bare and bracketed.
+
+    kube-apiserver refuses to start when its advertise address is of a
+    different family from the first service CIDR:
+
+        service IP family "fd00:96::/108" must match public address
+        family "37.27.129.237"
+
+    `serviceSubnet` lists IPv4 first (see validation.nix), so IPv6 is primary
+    exactly when the first entry is an IPv6 CIDR. Dual-stack keeps IPv4.
+
+    Two forms because they are not interchangeable: flags take the bare
+    address, and a `host:port` join needs an IPv6 literal bracketed or
+    everything after the first colon reads as the port.
+    """
+    primary = service_subnet.split(",")[0].strip()
+    if ":" in primary:
+        return "::1", "[::1]"
+    return "127.0.0.1", "127.0.0.1"
+
+
 class EphemeralControlPlane:
     """Ephemeral, controller-less etcd+kube-apiserver pair for `ekn validate`.
 
@@ -133,6 +164,7 @@ class EphemeralControlPlane:
         self.env: dict[str, str] = {}
         self._cert_dir: str = ""
         self._bind: str = ""
+        self._bind_host: str = ""
         self._k8s_port: int = 0
         self._etcd_client_port: int = 0
         self._etcd_peer_port: int = 0
@@ -169,7 +201,10 @@ class EphemeralControlPlane:
         kubeadm_cfg = str(tmp / "kubeadm-config.json")
         self.schema_file = str(tmp / "k8s-schema.json")
 
-        self._bind = "127.0.0.1"
+        # Mirrors `bindAddress`/`bindHost` in validation.nix, by name as well
+        # as by value: this harness exists twice, and the names lining up is
+        # what makes a future change to one obviously due in the other.
+        self._bind, self._bind_host = bind_addresses(self._service_subnet)
         self._k8s_port = _free_port()
         self._etcd_client_port = _free_port()
         self._etcd_peer_port = _free_port()
@@ -182,7 +217,9 @@ class EphemeralControlPlane:
         await Path(self._cert_dir).mkdir(parents=True)
         kubeadm_config_text = (
             json.dumps(self._kubeadm_config)
-            .replace("$BIND_ADDRESS", self._bind)
+            # Bracketed: the only `$BIND_ADDRESS` in a kubeadm config is inside
+            # `controlPlaneEndpoint`, which is a host:port join.
+            .replace("$BIND_ADDRESS", self._bind_host)
             .replace("$KUBERNETES_PORT", str(self._k8s_port))
             .replace("$CERT_DIR", self._cert_dir)
         )
@@ -226,11 +263,11 @@ class EphemeralControlPlane:
                 "etcd",
                 f"--data-dir={tmp}/etcd-data",
                 "--name=default",
-                f"--listen-client-urls=https://{self._bind}:{self._etcd_client_port}",
-                f"--advertise-client-urls=https://{self._bind}:{self._etcd_client_port}",
-                f"--listen-peer-urls=https://{self._bind}:{self._etcd_peer_port}",
-                f"--initial-advertise-peer-urls=https://{self._bind}:{self._etcd_peer_port}",
-                f"--initial-cluster=default=https://{self._bind}:{self._etcd_peer_port}",
+                f"--listen-client-urls=https://{ETCD_HOST}:{self._etcd_client_port}",
+                f"--advertise-client-urls=https://{ETCD_HOST}:{self._etcd_client_port}",
+                f"--listen-peer-urls=https://{ETCD_HOST}:{self._etcd_peer_port}",
+                f"--initial-advertise-peer-urls=https://{ETCD_HOST}:{self._etcd_peer_port}",
+                f"--initial-cluster=default=https://{ETCD_HOST}:{self._etcd_peer_port}",
                 "--client-cert-auth=true",
                 f"--trusted-ca-file={self._cert_dir}/etcd/ca.crt",
                 f"--cert-file={self._cert_dir}/etcd/server.crt",
@@ -250,7 +287,7 @@ class EphemeralControlPlane:
         for attempt in range(10):
             rc, _, err = await exec_capture(
                 "etcdctl",
-                f"--endpoints=https://{self._bind}:{self._etcd_client_port}",
+                f"--endpoints=https://{ETCD_HOST}:{self._etcd_client_port}",
                 f"--cacert={self._cert_dir}/etcd/ca.crt",
                 f"--cert={self._cert_dir}/etcd/healthcheck-client.crt",
                 f"--key={self._cert_dir}/etcd/healthcheck-client.key",
@@ -278,9 +315,15 @@ class EphemeralControlPlane:
                 f"--etcd-cafile={self._cert_dir}/etcd/ca.crt",
                 f"--etcd-certfile={self._cert_dir}/apiserver-etcd-client.crt",
                 f"--etcd-keyfile={self._cert_dir}/apiserver-etcd-client.key",
-                f"--etcd-servers=https://{self._bind}:{self._etcd_client_port}",
+                f"--etcd-servers=https://{ETCD_HOST}:{self._etcd_client_port}",
                 f"--service-cluster-ip-range={self._service_subnet}",
                 f"--bind-address={self._bind}",
+                # Absent entirely until now, which is the half a corrected
+                # `--bind-address` would not have fixed on its own: without it
+                # kube-apiserver auto-detects the host's external address
+                # ("external host was not specified, using 37.27.129.237") and
+                # dies on the family mismatch however it is bound.
+                f"--advertise-address={self._bind}",
                 f"--secure-port={self._k8s_port}",
                 "--allow-privileged=true",
                 f"--client-ca-file={self._cert_dir}/ca.crt",
