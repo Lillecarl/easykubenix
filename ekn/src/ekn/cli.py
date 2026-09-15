@@ -425,8 +425,12 @@ async def _push_ekn_cache(file: _Path | None, flake: str | None, attr: str | Non
         _log.error("ekn.cachePackage's build produced no 'out' output")
         raise SystemExit(1)
 
+    timeout_sec = cfg.cache_timeout_sec
+    if timeout_sec is not None:
+        _log.info(f"pushing {cache_package_out} to {cache_to} (up to {timeout_sec:g}s)")
+
     try:
-        await push_closure_to_store([cache_package_out], cache_to)
+        await push_closure_to_store([cache_package_out], cache_to, timeout_sec=timeout_sec)
     except NixError as exc:
         if allow_failure:
             _log.warning(
@@ -434,6 +438,21 @@ async def _push_ekn_cache(file: _Path | None, flake: str | None, attr: str | Non
             )
             return
         _report_nix_error(exc)
+    except TimeoutError:
+        # A timeout is a failure of the push like any other, so
+        # `--cache-allow-failure` covers it too. Said with the setting's
+        # name, because the reason a deploy stopped here is a number
+        # somebody chose and can change.
+        reason = (
+            f"cache push to {cache_to} did not finish within "
+            f"ekn.cacheTimeoutSec ({timeout_sec:g}s). The host may be "
+            f"routed but not listening, which ssh waits out in silence."
+        )
+        if allow_failure:
+            _log.warning(f"{reason} Continuing anyway (--cache-allow-failure).")
+            return
+        _log.error(reason)
+        raise SystemExit(1) from None
     _log.info(f"pushed {cache_package_out} to {cache_to}")
 
 

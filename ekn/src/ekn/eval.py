@@ -8,6 +8,7 @@ from contextvars import ContextVar
 from os import PathLike
 from typing import TYPE_CHECKING, Annotated, Any
 
+import anyio
 from anyio import Path
 from nanopynix import NixError, NixEvalSettings, NixSettings
 from nanopynix.primops import yaml_primops
@@ -143,6 +144,9 @@ class GitOpsManifestsResult(BaseModel):
 class CacheConfigResult(BaseModel):
     cache_to: str | None
     cache_package_out: str | None
+    # Seconds to allow the push; None waits forever. `ekn.cacheTimeoutSec`
+    # says why there is a bound at all.
+    cache_timeout_sec: float | None = None
 
 
 class SopsAgeIdentity(BaseModel):
@@ -925,9 +929,17 @@ async def evaluate_cache_config(
         if cache_to is None:
             return CacheConfigResult.model_validate({"cache_to": None, "cache_package_out": None})
 
+        timeout_sec = await proxy.attr("ekn").attr("cacheTimeoutSec").to_python()
+
         with timed_stage("cache-push: build ekn.cachePackage"):
             cache_package_out = (await proxy.attr("ekn").attr("cachePackage").build()).get("out")
-        return CacheConfigResult.model_validate({"cache_to": cache_to, "cache_package_out": cache_package_out})
+        return CacheConfigResult.model_validate(
+            {
+                "cache_to": cache_to,
+                "cache_package_out": cache_package_out,
+                "cache_timeout_sec": timeout_sec,
+            }
+        )
 
 
 async def realise_attr(
@@ -965,6 +977,7 @@ async def push_closure_to_store(
     *,
     substitute_on_destination: bool = True,
     check_sigs: bool = False,
+    timeout_sec: float | None = None,
 ) -> None:
     """Copy the closure of already-realised `paths` to the store at `to`.
 
@@ -977,18 +990,29 @@ async def push_closure_to_store(
     whatever session/store originally realised the paths -- the physical
     Nix store on disk is what actually matters, not which in-process Store
     handle built it.
+
+    `timeout_sec` bounds the whole copy and raises `TimeoutError` when it
+    runs out. There is a bound because a store URI naming a host that drops
+    packets rather than refusing them leaves ssh in `SYN-SENT` until the
+    kernel gives up on its SYN retries -- minutes, silently, and a deploy
+    that looks hung rather than failed. See easykubenix issue #20.
+
+    The deadline is outside the `async with`, so expiry unwinds the session
+    as well: the worker holding the stuck connection goes with it, rather
+    than being left to finish a copy nobody is waiting for.
     """
-    async with (
-        _session() as session,
-        session.store() as source,
-        session.store(uri=to) as dest,
-    ):
-        await source.copy_closure(
-            paths,
-            dest,
-            substitute=substitute_on_destination,
-            check_sigs=check_sigs,
-        )
+    with anyio.fail_after(timeout_sec):
+        async with (
+            _session() as session,
+            session.store() as source,
+            session.store(uri=to) as dest,
+        ):
+            await source.copy_closure(
+                paths,
+                dest,
+                substitute=substitute_on_destination,
+                check_sigs=check_sigs,
+            )
 
 
 async def _validation_config(proxy: Any) -> ValidationResult:

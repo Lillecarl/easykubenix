@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from ekn.cli import Deploy, JsonToYaml, Validate, YamlToJson
-from ekn.eval import evaluate_file, evaluate_flake_ekn
+from ekn.cli import Deploy, JsonToYaml, Validate, YamlToJson, _push_ekn_cache
+from ekn.eval import CacheConfigResult, evaluate_cache_config, evaluate_file, evaluate_flake_ekn
 from ekn.git import commit_manifests, diff_manifests
 from ekn.gitops import flatten_manifests
 
@@ -384,3 +384,106 @@ class TestFlakeEval:
             assert isinstance(commit_id, str)
         finally:
             os.environ.pop("EKN_REPO", None)
+
+
+class TestCachePushTimeout:
+    """`ekn.cacheTimeoutSec` -- see easykubenix issue #20.
+
+    A `cacheTo` host that is routed but not listening drops the connect
+    rather than refusing it, and ssh waits that out in silence. The push has
+    a deadline for that reason, and these cover what the deadline does when
+    it expires rather than whether anyio's `fail_after` works.
+    """
+
+    @staticmethod
+    def _stub(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        timeout_sec: float | None,
+        push: object,
+    ) -> list[float | None]:
+        """Point `_push_ekn_cache` at a config with `timeout_sec` and a
+        recording push. Returns the list the timeout is recorded into."""
+        seen: list[float | None] = []
+
+        async def cache_config(*_args: object, **_kwargs: object) -> CacheConfigResult:
+            return CacheConfigResult(
+                cache_to="ssh-ng://nix@unreachable.invalid",
+                cache_package_out="/nix/store/deadbeef-manifest.json",
+                cache_timeout_sec=timeout_sec,
+            )
+
+        async def push_closure(*_args: object, timeout_sec: float | None = None, **_kwargs: object) -> None:
+            seen.append(timeout_sec)
+            await push()  # type: ignore[operator]
+
+        monkeypatch.setattr("ekn.cli.evaluate_cache_config", cache_config)
+        monkeypatch.setattr("ekn.cli.push_closure_to_store", push_closure)
+        return seen
+
+    async def test_timeout_reaches_the_push(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def fine() -> None:
+            return None
+
+        seen = self._stub(monkeypatch, timeout_sec=42, push=fine)
+
+        await _push_ekn_cache(None, ".#test", None, allow_failure=False)
+
+        assert seen == [42]
+
+    async def test_timeout_stops_the_deploy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def slow() -> None:
+            raise TimeoutError
+
+        self._stub(monkeypatch, timeout_sec=1, push=slow)
+
+        with pytest.raises(SystemExit) as exc:
+            await _push_ekn_cache(None, ".#test", None, allow_failure=False)
+        assert exc.value.code == 1
+
+    async def test_allow_failure_covers_a_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The flag's promise is "log a warning and continue". A timeout is
+        a failure of the push like any other, so it is covered too."""
+
+        async def slow() -> None:
+            raise TimeoutError
+
+        self._stub(monkeypatch, timeout_sec=1, push=slow)
+
+        await _push_ekn_cache(None, ".#test", None, allow_failure=True)
+
+    async def test_null_timeout_waits_forever(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def fine() -> None:
+            return None
+
+        seen = self._stub(monkeypatch, timeout_sec=None, push=fine)
+
+        await _push_ekn_cache(None, ".#test", None, allow_failure=False)
+
+        assert seen == [None]
+
+    async def test_the_option_reaches_the_config(self, tmp_path: Path) -> None:
+        """The chain unstubbed: `ekn.cacheTimeoutSec` as written, through
+        `evaluate_cache_config`, into the field `_push_ekn_cache` reads. A
+        default that never reached Python would leave the deploy exactly as
+        unbounded as it was before."""
+        sources_path = PROJECT_ROOT / "nix/sources.nix"
+        f = tmp_path / "instance.nix"
+        f.write_text(f"""
+            let
+              sources = import {sources_path};
+              pkgs = import sources.nixpkgs {{ }};
+            in
+            {{
+              config.ekn = {{
+                cacheTo = "ssh-ng://nix@example.invalid";
+                cacheTimeoutSec = 7;
+                cachePackage = pkgs.writeText "ekn-cache-timeout-test" "hi";
+              }};
+            }}
+        """)
+
+        cfg = await evaluate_cache_config(f, None, None, None)
+
+        assert cfg.cache_timeout_sec == 7
+        assert cfg.cache_to == "ssh-ng://nix@example.invalid"

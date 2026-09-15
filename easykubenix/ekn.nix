@@ -195,6 +195,34 @@ in
       example = "ssh-ng://nix@cache.example.com:2222";
     };
 
+    cacheTimeoutSec = lib.mkOption {
+      type = lib.types.nullOr lib.types.ints.positive;
+      default = 600;
+      description = ''
+        Seconds `ekn deploy` gives the push to `ekn.cacheTo` before it gives
+        up. `null` waits forever.
+
+        There is a default because forever is what it used to do. ssh has no
+        connect timeout of its own here, so a host that drops packets rather
+        than refusing them leaves the push in `SYN-SENT` until the kernel
+        exhausts its SYN retries, with no output the whole time -- which
+        reads as a slow validate or a hung process rather than as a cache
+        nobody can reach. Issue #20 has the measurement.
+
+        `--cache-allow-failure` does not help with that on its own: it
+        decides what to do once the push returns, and the point here is that
+        it does not return. The two work together -- this bounds the wait,
+        and that flag decides whether the deploy continues afterwards.
+
+        This bounds the whole push, not the connect, because that is the
+        part a store URI gives us any control over. So it has to be larger
+        than a real push of `ekn.cachePackage`'s closure over the slowest
+        link you deploy across, and the default is generous for that reason
+        rather than tuned.
+      '';
+      example = 120;
+    };
+
     cachePackage = lib.mkOption {
       type = lib.types.package;
       default = config.internal.manifestJSONFile;
