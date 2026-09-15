@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path as SyncPath
 from typing import TYPE_CHECKING
 
 import pytest
@@ -216,10 +215,10 @@ async def test_kubeconfig_from_output_is_private_and_temporary(
     unit = _unit(tmp_path, "infra", tofu, {})
 
     async with kubeconfig_from_output(unit, "kubeconfig", Path(tmp_path / "work")) as path:
-        assert SyncPath(path).read_text() == "apiVersion: v1\n"
-        assert SyncPath(path).stat().st_mode & 0o077 == 0
+        assert await Path(path).read_text() == "apiVersion: v1\n"
+        assert (await Path(path).stat()).st_mode & 0o077 == 0
 
-    assert not SyncPath(path).exists()
+    assert not await Path(path).exists()
 
 
 async def test_kubeconfig_from_output_reports_a_missing_output(
