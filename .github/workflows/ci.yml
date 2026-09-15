@@ -12,7 +12,31 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: nixbuild/nix-quick-install-action@v35
+      # cachix/install-nix-action, which installs a daemon, and not
+      # nixbuild/nix-quick-install-action, which does not.
+      #
+      # A daemon builds in a sandbox whose build directory is `/build`. A
+      # single-user nix builds under the runner's TMPDIR, so a derivation
+      # that names `/build` cannot create it and has no way to ask for
+      # root. `nix/tofu` sets `HOME = "/build/home"` because tofu writes its
+      # plugin cache there, so `checks.tofu-render` failed every run with
+      #
+      #     mkdir: cannot create directory '/build': Permission denied
+      #
+      # and took `checks.all` with it. Same class as nixkube's issue #23,
+      # and the same fix.
+      #
+      # The substituters come with it. This job built every dependency from
+      # source before, because nothing gave it a cache to read; a daemon
+      # ignores substituters a user it does not trust asks for, which is
+      # what `trusted-users` is for.
+      - uses: cachix/install-nix-action@master
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            trusted-users = root runner
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= lillecarl.cachix.org-1:NN/LLMg7mbyvZCu32Qlo8LpSHqNw7Rr3VBCEYQvRpT0=
+            substituters = https://cache.nixos.org?priority=1 https://lillecarl.cachix.org?priority=2
       # No flake command anywhere in this job. `checks.nix` and `shell.nix` are
       # plain imports, so every gate here also runs from a checkout with no
       # flake support -- which is the point. `all` covers every example, so a
@@ -42,7 +66,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: nixbuild/nix-quick-install-action@v35
+      # The same installer as `checks` above, and for the same reason.
+      - uses: cachix/install-nix-action@master
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            trusted-users = root runner
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= lillecarl.cachix.org-1:NN/LLMg7mbyvZCu32Qlo8LpSHqNw7Rr3VBCEYQvRpT0=
+            substituters = https://cache.nixos.org?priority=1 https://lillecarl.cachix.org?priority=2
 
       - uses: cachix/cachix-action@v15
         with:
