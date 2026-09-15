@@ -33,6 +33,7 @@ jobs:
       - uses: cachix/install-nix-action@master
         with:
           extra_nix_config: |
+            access-tokens = github.com=${{ github.token }}
             experimental-features = nix-command flakes
             trusted-users = root runner
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= lillecarl.cachix.org-1:NN/LLMg7mbyvZCu32Qlo8LpSHqNw7Rr3VBCEYQvRpT0=
@@ -70,6 +71,7 @@ jobs:
       - uses: cachix/install-nix-action@master
         with:
           extra_nix_config: |
+            access-tokens = github.com=${{ github.token }}
             experimental-features = nix-command flakes
             trusted-users = root runner
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= lillecarl.cachix.org-1:NN/LLMg7mbyvZCu32Qlo8LpSHqNw7Rr3VBCEYQvRpT0=
