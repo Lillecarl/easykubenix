@@ -466,7 +466,13 @@ class TestCachePushTimeout:
         """The chain unstubbed: `ekn.cacheTimeoutSec` as written, through
         `evaluate_cache_config`, into the field `_push_ekn_cache` reads. A
         default that never reached Python would leave the deploy exactly as
-        unbounded as it was before."""
+        unbounded as it was before.
+
+        A real instance, so the option's type and its place in the tree are
+        part of what this covers -- a hand-written `{ config.ekn = ...; }`
+        would answer for neither. `cachePackage` is left at its default,
+        which is what a project that never thought about it will push.
+        """
         sources_path = PROJECT_ROOT / "nix/sources.nix"
         f = tmp_path / "instance.nix"
         f.write_text(f"""
@@ -474,12 +480,16 @@ class TestCachePushTimeout:
               sources = import {sources_path};
               pkgs = import sources.nixpkgs {{ }};
             in
-            {{
-              config.ekn = {{
-                cacheTo = "ssh-ng://nix@example.invalid";
-                cacheTimeoutSec = 7;
-                cachePackage = pkgs.writeText "ekn-cache-timeout-test" "hi";
-              }};
+            import {PROJECT_ROOT} {{
+              inherit pkgs;
+              modules = [
+                {{
+                  ekn.environment = "easykubenix";
+                  ekn.cacheTo = "ssh-ng://nix@example.invalid";
+                  ekn.cacheTimeoutSec = 7;
+                  kubernetes.objects.default.ConfigMap.c.data.key = "value";
+                }}
+              ];
             }}
         """)
 
