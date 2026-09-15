@@ -1107,9 +1107,7 @@ class TestAssertionsAndWarnings:
         # The API server admits a Service's families against the families its
         # service CIDR carries and nothing else; the eval-time refusal names
         # the Service instead of leaving the denial to admission.
-        with pytest.raises(
-            nanopynix.NixError, match=r"default/Service/v6 declares spec\.ipFamilies \[ IPv6 \]"
-        ):
+        with pytest.raises(nanopynix.NixError, match=r"default/Service/v6 declares spec\.ipFamilies \[ IPv6 \]"):
             await evaluate_file(NIX_TEST_FILE, "iPv6ServiceOnIPv4ClusterThrows")
 
     async def test_require_dual_stack_on_a_single_stack_cluster_is_rejected(self) -> None:
@@ -1126,9 +1124,7 @@ class TestAssertionsAndWarnings:
         # The admission denial this pre-flights is "provided IP is not in the
         # valid range"; 10.97.x is podSubnet's near-miss for serviceCidr's
         # 10.96.0.0/16.
-        with pytest.raises(
-            nanopynix.NixError, match=r"default/Service/dns pins spec clusterIP 10\.97\.0\.10"
-        ):
+        with pytest.raises(nanopynix.NixError, match=r"default/Service/dns pins spec clusterIP 10\.97\.0\.10"):
             await evaluate_file(NIX_TEST_FILE, "pinnedIPv4OutsideCidrThrows")
 
     async def test_a_pinned_cluster_ip_inside_the_cidr_renders(self) -> None:
@@ -1154,9 +1150,7 @@ class TestClusterInfo:
 
     async def test_a_dual_stack_cluster_serves_its_services_and_the_harness(self) -> None:
         assert len(await evaluate_file(NIX_TEST_FILE, "dualStackClusterRenders")) > 0
-        assert (
-            await evaluate_file(NIX_TEST_FILE, "dualStackClusterServiceSubnet") == "10.96.0.0/16,fd00:96::/112"
-        )
+        assert await evaluate_file(NIX_TEST_FILE, "dualStackClusterServiceSubnet") == "10.96.0.0/16,fd00:96::/112"
 
 
 class TestValidationConfig:
