@@ -49,9 +49,7 @@ jobs:
           fetch-depth: 100
       - id: resolve
         name: Resolve the umbrella revision
-        run: |
-          rev=$(ci/walkback.sh https://github.com/nixidae/nixidae easykubenix)
-          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+        run: ci/walkback.sh https://github.com/nixidae/nixidae easykubenix | sed 's/^/rev=/' >> "$GITHUB_OUTPUT"
 
   checks:
     needs: umbrella-rev
