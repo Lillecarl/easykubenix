@@ -218,6 +218,16 @@ in
 
             echo "etcd is ready; starting kube-apiserver"
 
+            # --advertise-address is `advertiseAddress`, not $BIND_ADDRESS.
+            # kube-apiserver 1.37.0 refuses a loopback advertise address:
+            #
+            #   cannot use public IP 127.0.0.1 with endpoint reconciler:
+            #   Invalid value: "127.0.0.1": may not be in the loopback range
+            #
+            # That is the same global-unicast demand kubeadm already makes,
+            # and `advertiseAddress` is the address that answers it. The
+            # apiserver still binds loopback; this one reaches only the
+            # `kubernetes` service endpoint, which nothing here calls.
             set command kube-apiserver \
               --watch-cache=false \
               --anonymous-auth=false \
@@ -227,7 +237,7 @@ in
               --etcd-servers=https://127.0.0.1:$ETCD_CLIENT_PORT \
               --service-cluster-ip-range=${cfg.serviceSubnet} \
               --bind-address=$BIND_ADDRESS \
-              --advertise-address=$BIND_ADDRESS \
+              --advertise-address=${advertiseAddress} \
               --secure-port=$KUBERNETES_PORT \
               --allow-privileged=true \
               --client-ca-file=$CERT_DIR/ca.crt \
