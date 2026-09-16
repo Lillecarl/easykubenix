@@ -122,6 +122,30 @@ def bind_addresses(service_subnet: str) -> tuple[str, str]:
     return "127.0.0.1", "127.0.0.1"
 
 
+def advertise_address(service_subnet: str) -> str:
+    """The API server's advertise address for *service_subnet*.
+
+    Not the bind address. kube-apiserver 1.37.0 refuses a loopback one:
+
+        cannot use public IP 127.0.0.1 with endpoint reconciler:
+        Invalid value: "127.0.0.1": may not be in the loopback range
+
+    Documentation space of the primary family -- RFC 5737 for IPv4, RFC 3849
+    for IPv6. Both are reserved and unroutable, and 2001:db8::/32 sits inside
+    2000::/3, so it is global unicast as the check demands. validation.nix's
+    `advertiseAddress` is the same pair for the same reason, and kubeadm has
+    always needed it.
+
+    Nothing binds this. It reaches only the `kubernetes` service endpoint,
+    which no client here calls, and it keeps the family match `bind_addresses`
+    describes.
+    """
+    primary = service_subnet.split(",")[0].strip()
+    if ":" in primary:
+        return "2001:db8::10"
+    return "192.0.2.10"
+
+
 class EphemeralControlPlane:
     """Ephemeral, controller-less etcd+kube-apiserver pair for `ekn validate`.
 
@@ -205,6 +229,7 @@ class EphemeralControlPlane:
         # as by value: this harness exists twice, and the names lining up is
         # what makes a future change to one obviously due in the other.
         self._bind, self._bind_host = bind_addresses(self._service_subnet)
+        self._advertise: str = advertise_address(self._service_subnet)
         self._k8s_port = _free_port()
         self._etcd_client_port = _free_port()
         self._etcd_peer_port = _free_port()
@@ -318,12 +343,12 @@ class EphemeralControlPlane:
                 f"--etcd-servers=https://{ETCD_HOST}:{self._etcd_client_port}",
                 f"--service-cluster-ip-range={self._service_subnet}",
                 f"--bind-address={self._bind}",
-                # Absent entirely until now, which is the half a corrected
-                # `--bind-address` would not have fixed on its own: without it
-                # kube-apiserver auto-detects the host's external address
-                # ("external host was not specified, using 37.27.129.237") and
-                # dies on the family mismatch however it is bound.
-                f"--advertise-address={self._bind}",
+                # Not `self._bind`, and not absent. Absent, kube-apiserver
+                # auto-detects the host's external address ("external host was
+                # not specified, using 37.27.129.237") and dies on the family
+                # mismatch however it is bound. Loopback, 1.37.0 refuses it
+                # outright. `advertise_address` says what answers both.
+                f"--advertise-address={self._advertise}",
                 f"--secure-port={self._k8s_port}",
                 "--allow-privileged=true",
                 f"--client-ca-file={self._cert_dir}/ca.crt",

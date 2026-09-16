@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ipaddress
+
 import pytest
 
-from ekn.validation import ETCD_HOST, bind_addresses
+from ekn.validation import ETCD_HOST, advertise_address, bind_addresses
 
 
 class TestBindAddresses:
@@ -38,3 +40,48 @@ class TestBindAddresses:
         hardcodes the same address -- these two harnesses agreeing is worth
         more than either being clever."""
         assert ETCD_HOST == "127.0.0.1"
+
+
+class TestAdvertiseAddress:
+    """kube-apiserver 1.37.0 refuses a loopback advertise address outright:
+    `cannot use public IP 127.0.0.1 with endpoint reconciler`. So it is not
+    the bind address, and it has to be global unicast."""
+
+    @pytest.mark.parametrize(
+        ("subnet", "expected"),
+        [
+            ("10.96.0.0/16", "192.0.2.10"),
+            ("fd00:96::/108", "2001:db8::10"),
+            ("10.96.0.0/16,fd00:96::/108", "192.0.2.10"),
+            ("  fd00:96::/108 , 10.96.0.0/16 ", "2001:db8::10"),
+        ],
+    )
+    def test_the_family_follows_the_first_cidr(self, subnet: str, expected: str) -> None:
+        """The same rule bind_addresses uses. The apiserver demands the two
+        agree, so they are derived from one place."""
+        assert advertise_address(subnet) == expected
+
+    @pytest.mark.parametrize("subnet", ["10.96.0.0/16", "fd00:96::/108"])
+    def test_it_is_global_unicast_and_never_loopback(self, subnet: str) -> None:
+        """What the 1.37.0 check actually asks.
+
+        Go's `IsGlobalUnicast()`, which is everything that is not loopback,
+        link-local, multicast or unspecified. Deliberately not Python's
+        `is_global`: that follows the IANA special-purpose registry, where
+        documentation space is listed and so answers False. The two names
+        mean different things, and the apiserver asks the Go one.
+        """
+        address = ipaddress.ip_address(advertise_address(subnet))
+
+        assert not address.is_loopback
+        assert not address.is_link_local
+        assert not address.is_multicast
+        assert not address.is_unspecified
+
+    @pytest.mark.parametrize("subnet", ["10.96.0.0/16", "fd00:96::/108"])
+    def test_it_matches_the_family_it_binds(self, subnet: str) -> None:
+        """A mismatch is the other way this fails: `service IP family must
+        match public address family`."""
+        bare, _ = bind_addresses(subnet)
+
+        assert ipaddress.ip_address(advertise_address(subnet)).version == ipaddress.ip_address(bare).version
