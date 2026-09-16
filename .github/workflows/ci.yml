@@ -25,8 +25,14 @@ jobs:
   # nixkube run 35026926963: seven seconds apart, two store paths, and a later
   # job asking for one nothing had built. nanopynix issue #301.
   #
-  # git ls-remote uses the git protocol, which the api.github.com limit above
-  # does not count. It takes three seconds.
+  # **It resolves the umbrella that locks this commit, not the head of the
+  # umbrella default branch.** The head is a moving answer: it is whatever
+  # landed most recently, which for a branch nobody landed is not related to
+  # this commit at all. `ci/walkback.sh` reads
+  # `refs/umbrella/easykubenix/<revision>` from the umbrella remote instead,
+  # walking HEAD backwards to the nearest revision the umbrella has locked.
+  # One `git ls-remote` and one `git rev-list`, over the git protocol, which
+  # the api.github.com limit above does not count.
   #
   # Every job below that runs nix reads it. docs-deploy runs none, and it
   # already waits for docs-build.
@@ -36,9 +42,16 @@ jobs:
     outputs:
       rev: ${{ steps.resolve.outputs.rev }}
     steps:
+      # A branch nobody landed needs its branch point, so the checkout has to
+      # reach that far back.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 100
       - id: resolve
         name: Resolve the umbrella revision
-        run: git ls-remote https://github.com/nixidae/nixidae main | cut -f1 | sed 's/^/rev=/' >> "$GITHUB_OUTPUT"
+        run: |
+          rev=$(ci/walkback.sh https://github.com/nixidae/nixidae easykubenix)
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
 
   checks:
     needs: umbrella-rev
