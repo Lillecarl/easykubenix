@@ -15,7 +15,35 @@ env:
   UMBRELLA_GIT: "1"
 
 jobs:
+  # One umbrella revision for the whole run.
+  #
+  # `nix/sources.nix` resolves the umbrella from UMBRELLA_REV when it is set.
+  # Without it that reference is unlocked, so every job takes the head of the
+  # default branch at the moment it starts. `umbrella land` pushes the working
+  # copies, which starts the run, and the umbrella lock commit follows seconds
+  # later, so a run that straddles the push reads two umbrellas. Measured in
+  # nixkube run 35026926963: seven seconds apart, two store paths, and a later
+  # job asking for one nothing had built. nanopynix issue #301.
+  #
+  # git ls-remote uses the git protocol, which the api.github.com limit above
+  # does not count. It takes three seconds.
+  #
+  # Every job below that runs nix reads it. docs-deploy runs none, and it
+  # already waits for docs-build.
+  umbrella-rev:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      rev: ${{ steps.resolve.outputs.rev }}
+    steps:
+      - id: resolve
+        name: Resolve the umbrella revision
+        run: git ls-remote https://github.com/nixidae/nixidae main | cut -f1 | sed 's/^/rev=/' >> "$GITHUB_OUTPUT"
+
   checks:
+    needs: umbrella-rev
+    env:
+      UMBRELLA_REV: ${{ needs.umbrella-rev.outputs.rev }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -69,7 +97,9 @@ jobs:
 
   docs-build:
     if: github.ref == 'refs/heads/develop'
-    needs: checks
+    needs: [checks, umbrella-rev]
+    env:
+      UMBRELLA_REV: ${{ needs.umbrella-rev.outputs.rev }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
