@@ -208,8 +208,21 @@ async def ssa_apply(
     `.patch()` covers merge-patch and json-patch only and had no form for
     server-side apply at all. `APIObject.async_apply` is that form, carried
     in the umbrella's kr8s fork for upstreaming. See issue #29.
+
+    That form is now kr8s-org/kr8s#721, rebased in the fork, so the arguments
+    are its names: `server_side=True` because it also does client-side
+    strategic merge and defaults to that, and `force_conflicts` rather than
+    `force`. `validate="warn"` keeps the API server's own default, which is
+    what the hand-built PATCH got; the upstream default is `"strict"` and
+    would start rejecting manifests that deploy today.
     """
-    result: JsonValue = await obj.async_apply(field_manager=field_manager, force=force, dry_run=dry_run)
+    result: JsonValue = await obj.async_apply(
+        server_side=True,
+        field_manager=field_manager,
+        force_conflicts=force,
+        dry_run=dry_run,
+        validate="warn",
+    )
     if not isinstance(result, dict):
         raise TypeError(f"server-side apply response must be an object, got {type(result).__name__}")
     return result
