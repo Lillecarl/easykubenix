@@ -10,6 +10,8 @@ from kr8s.asyncio.objects import APIObject, get_class, new_class
 from nanopynix.models import JsonValue
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping
+
     from kr8s._api import Api  # kr8s.asyncio.api() returns this, not kr8s.Api
 
 _log = structlog.get_logger()
@@ -302,7 +304,9 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     field_manager: str = DEFAULT_FIELD_MANAGER,
     crd_establish_timeout: int = 60,
     prune: bool = True,
-    prune_kinds: set[str] | None = None,
+    prune_kinds: Mapping[str, str] | None = None,
+    hand_applied: Collection[str] = (),
+    declared_units: Collection[str] | None = None,
     protect: set[tuple[str, str, str]] | None = None,
 ) -> None:
     """Apply `objects` in barrier order, then (if `prune`) prune anything
@@ -314,20 +318,30 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     `unit_label` into the manifests themselves. Together they pick the prune
     scope -- see `_prune`.
 
-    Known limitation: pruning only scans kinds present in *this* apply --
-    if every object of some kind is removed from the generated config in one
-    go, stale objects of that now-absent kind won't be found or deleted.
-    Fine for the ephemeral, always-fresh apiserver `ekn validate` runs this
-    against; needs a kind list independent of the current apply set (e.g.
-    from `kubernetes.apiMappings`) before this drives a real, persistent
-    cluster.
+    `hand_applied` names the units a whole-instance prune must not touch, and
+    is ignored when `unit` is set. See `prune_selector`. `declared_units` is
+    every unit the configuration declares, read only to warn -- see `_prune`.
+    `None` means the caller has no registry to check against, so it says
+    nothing rather than warning about every labelled object it prunes.
 
-    `prune_kinds`, when given, is unioned into the kinds scanned for pruning
-    alongside whatever kinds this apply itself touched -- an additive seam
-    for the eventual fix above (an `apiMappings`-sourced kind list), added
-    now so that fix won't be a breaking signature change later. No caller
-    passes it yet; `None` (the default) preserves today's current-apply-only
-    scanning exactly.
+    `prune_kinds` maps kind to apiVersion, and each entry is scanned for
+    pruning whether or not this apply touched that kind. `ekn kubeapply`
+    passes `kubernetes.apiMappings`. Without it, pruning only scans kinds
+    present in *this* apply, so removing the last object of some kind from
+    the configuration leaves every stale object of that kind behind -- which
+    is exactly the case a whole-instance `--prune` exists to answer.
+
+    A kind the cluster does not serve is skipped, not an error: a mapping is
+    what the configuration knows, not what this cluster has. It carries the
+    apiVersion rather than the bare kind because `_prune` needs a *class*,
+    and resolving a bare name goes through the `async_lookup_kind` path
+    `discover` exists to avoid.
+
+    Residual gap, and it needs API discovery to close: `apiMappings` is
+    evaluated from the current configuration, and a removed Helm chart takes
+    the mappings its CRDs taught with it (see `lib/importYaml.nix`). Built-in
+    kinds are covered; the custom kinds of a wholly removed component are
+    not.
 
     `protect` names `(namespace, kind, name)` identities that pruning must
     never delete, even though this apply did not produce them. Absence from
@@ -385,18 +399,22 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     if not prune:
         return
 
+    classes |= await _extra_classes(api, prune_kinds or {}, already=kinds)
     await _prune(
         api=api,
         selector=prune_selector(
             environment=environment,
             unit=unit,
+            hand_applied=hand_applied,
             environment_label=environment_label,
             unit_label=unit_label,
         ),
-        scan_kinds=kinds | (prune_kinds or set()),
+        scan_kinds=kinds | set(classes),
         classes=classes,
         desired_keys=desired_keys,
         protected=protected,
+        declared_units=declared_units,
+        unit_label=unit_label,
     )
 
 
@@ -406,8 +424,9 @@ def _check_unit_labels(objects: list[Manifest], unit: str, unit_label: str) -> N
     A `--target <name>` apply prunes by `unit_label=<name>`, so an object in
     its set that carries a different value -- or none -- is applied into a
     scope its own prune will never look at. Absent the label it is worse than
-    orphaned: the next whole-instance `--prune` selects on the label's
-    absence, so it takes the object as its own and deletes it.
+    orphaned: a whole-instance `--prune` excludes the hand-applied units by
+    their label value, and `notin` matches an unlabelled object, so it takes
+    the object as its own and deletes it.
 
     Nothing here should be reachable: easykubenix renders the label onto every
     object in a unit, and `eval._raw_manifest_in_unit` adds it to the one kind
@@ -428,7 +447,8 @@ def _check_unit_labels(objects: list[Manifest], unit: str, unit_label: str) -> N
             f"these objects do not carry {unit_label}={unit!r}, which is the scope this apply prunes by:\n"
             f"{listed}\n"
             f"An object applied into a unit without the unit's label is deleted by the next "
-            f"whole-instance prune, which selects on that label's absence."
+            f"whole-instance prune, whose selector excludes hand-applied units by label value "
+            f"and therefore matches an object carrying no unit label at all."
         )
         raise ValueError(msg)
 
@@ -437,6 +457,7 @@ def prune_selector(
     *,
     environment: str,
     unit: str | None,
+    hand_applied: Collection[str] = (),
     environment_label: str = DEFAULT_ENVIRONMENT_LABEL,
     unit_label: str = DEFAULT_UNIT_LABEL,
 ) -> str:
@@ -444,27 +465,100 @@ def prune_selector(
 
     Two scopes, and the difference between them is the deployment-unit label:
 
-    - A whole-instance apply (`unit is None`) owns this environment's objects
-      that belong to no unit: `ekn.dev/environment=E,!ekn.dev/deployment-unit`.
     - A `--target X` apply owns this environment's objects in that unit:
       `ekn.dev/environment=E,ekn.dev/deployment-unit=X`.
+    - A whole-instance apply (`unit is None`) owns this environment's objects
+      except those of the units in `hand_applied`:
+      `ekn.dev/environment=E,ekn.dev/deployment-unit notin (bootstrap,cni)`.
 
-    The not-exists clause is the load-bearing half. A deployment unit's
-    objects never reach `kubernetes.generated` -- a bootstrap unit renders a
-    whole nested instance, and only `ekn kubeapply --target <name>` applies
-    it. Without the clause, a whole-instance prune would list those objects
-    (they carry the environment label, since `ekn` applied them), find them
-    absent from its own desired set, and delete them. That is ArgoCD and the
-    CNI. easykubenix requires the unit label for exactly this reason; see the
-    assertion in easykubenix/gitops.nix.
+    `hand_applied` names the units whose objects never reach
+    `kubernetes.generated` -- each renders a whole nested instance, and only
+    `ekn kubeapply --target <name>` applies it. They carry the environment
+    label, because `ekn` applied them, so a whole-instance prune lists them,
+    finds them absent from its own desired set, and deletes them. That is
+    ArgoCD and the CNI. The caller builds the set by *inverting* the
+    discriminator at easykubenix/kubernetes.nix:1249 -- every declared unit
+    except the routing-only ones -- so a unit of a class nobody has written
+    yet is excluded rather than pruned.
 
-    Returned as a string rather than a dict because a not-exists clause has no
-    dict form. `kr8s` passes a string selector through verbatim as
-    `labelSelector`, which is what makes `!key` work.
+    **`notin` also matches an object that carries no unit label at all**, so
+    this one clause replaces the `!ekn.dev/deployment-unit` it used to be and
+    loses nothing. Measured on a live cluster (2026-09-17) rather than taken
+    from the documentation, with a control object carrying no unit label,
+    because the natural counts on that cluster are identical under both
+    behaviours -- it has no unlabelled objects -- and a `notin` that did not
+    subsume would silently narrow the scope to nothing while looking healthy.
+
+    An empty `hand_applied` emits **no unit clause at all**, rather than an
+    empty `notin ()`, which the API server rejects: `labels.NewRequirement`
+    refuses `in`/`notin` with an empty value set. That is the ordinary shape
+    for a config with no nested units, which is what `ekn validate` applies.
+
+    Returned as a string rather than a dict because neither a set-based clause
+    nor a not-exists clause has a dict form. `kr8s` passes a string selector
+    through verbatim as `labelSelector`.
     """
-    if unit is None:
-        return f"{environment_label}={environment},!{unit_label}"
-    return f"{environment_label}={environment},{unit_label}={unit}"
+    if unit is not None:
+        return f"{environment_label}={environment},{unit_label}={unit}"
+    if not hand_applied:
+        return f"{environment_label}={environment}"
+    excluded = ",".join(sorted(hand_applied))
+    return f"{environment_label}={environment},{unit_label} notin ({excluded})"
+
+
+async def _extra_classes(
+    api: Api,
+    prune_kinds: Mapping[str, str],
+    *,
+    already: set[str],
+) -> dict[str, type[APIObject]]:
+    """Resolve each `prune_kinds` entry this apply did not already touch.
+
+    A kind the cluster does not serve is skipped. `apiMappings` is what the
+    configuration knows; a cluster that never had the CRD is the ordinary
+    case, not a reason to abandon a prune whose apply half already ran.
+    """
+    resolved: dict[str, type[APIObject]] = {}
+    for kind, api_version in prune_kinds.items():
+        if kind in already:
+            continue
+        try:
+            resolved[kind] = type(await build_object({"kind": kind, "apiVersion": api_version}, api))
+        except KindNotServedError:
+            _log.debug("not scanning unserved kind", kind=kind, api_version=api_version)
+    return resolved
+
+
+def _unit_of(obj: APIObject, unit_label: str) -> str | None:
+    metadata = obj.raw.get("metadata")
+    labels = metadata.get("labels") if isinstance(metadata, dict) else None
+    unit = labels.get(unit_label) if isinstance(labels, dict) else None
+    return unit if isinstance(unit, str) else None
+
+
+def _owner(obj: APIObject) -> str | None:
+    """The controller that owns `obj`, if any -- and therefore why not to
+    delete it.
+
+    An object with `ownerReferences` was created by something that is still
+    running, so deleting it is either churn (the owner recreates it) or a
+    loss. The case that forces the rule is an External Secrets Operator
+    Secret: on nixlab2 all eight carry `ownerReferences: [ExternalSecret]`
+    and hold the only copy of every Harbor and oauth2-proxy credential.
+
+    A hard rule and not a flag. Those eight stay out of prune scope today
+    only because ESO does not copy `ekn.dev/environment` into what it
+    materialises -- someone else's template, which can start copying it at
+    any time. This guard does not depend on that one holding.
+    """
+    metadata = obj.raw.get("metadata")
+    refs = metadata.get("ownerReferences") if isinstance(metadata, dict) else None
+    if not isinstance(refs, list) or not refs:
+        return None
+    first = refs[0]
+    if not isinstance(first, dict):
+        return "<unknown>"
+    return f"{first.get('kind', '<unknown>')}/{first.get('name', '<unnamed>')}"
 
 
 async def _prune(  # noqa: PLR0913 -- one caller, and every argument is state that caller built
@@ -475,12 +569,21 @@ async def _prune(  # noqa: PLR0913 -- one caller, and every argument is state th
     classes: dict[str, type[APIObject]],
     desired_keys: set[tuple[str, str, str]],
     protected: set[tuple[str, str, str]],
+    declared_units: Collection[str] | None = None,
+    unit_label: str = DEFAULT_UNIT_LABEL,
 ) -> None:
     """Delete objects in this run's prune scope that it did not produce.
 
     Split out of `apply_and_prune` to keep that function under the complexity
     limit rather than growing its `noqa`. The apply half and the prune half
     share only the values passed here. See `prune_selector` for the scope.
+
+    `declared_units` is every unit the configuration declares, and is only
+    read to warn. Deleting an object of a unit the configuration no longer
+    names is correct -- it is what removing a unit means -- but it is also
+    one line of config away from deleting ArgoCD and the CNI, and before the
+    set-based selector the not-exists clause hid that case entirely. `None`
+    means the caller holds no such registry, and warns about nothing.
     """
     _log.info("pruning", kinds=len(scan_kinds), selector=selector)
     for kind in scan_kinds:
@@ -491,8 +594,9 @@ async def _prune(  # noqa: PLR0913 -- one caller, and every argument is state th
         # `"singular.group/version"` string that `new_class` mis-splits so that
         # every listed object reports a lowercase `.kind`.
         #
-        # `prune_kinds` names kinds this apply did not touch, so those have no
-        # class and stay strings.
+        # `_extra_classes` resolves the `prune_kinds` entries through the same
+        # path, so in practice every kind here has one. The string fallback
+        # stays as the safe default for a caller that built `classes` itself.
         target: str | type[APIObject] = classes.get(kind, kind)
         # kr8s.Api.async_get's `label_selector`/`field_selector` params and its
         # `APIObject | dict` yield type are both bare-`dict`/unannotated
@@ -517,14 +621,28 @@ async def _prune(  # noqa: PLR0913 -- one caller, and every argument is state th
             # listed object's mangled one -- otherwise every CRD-based
             # object's key mismatches and everything gets "pruned".
             key = (obj.namespace or "none", kind, obj.name)
+            if key in desired_keys:
+                continue
             if key in protected:
                 # Absent from `desired_keys` and still not ours to delete.
                 # See `protect` on `apply_and_prune`.
                 _log.info("keeping protected object", kind=kind, namespace=obj.namespace, name=obj.name)
                 continue
-            if key not in desired_keys:
-                _log.info("pruning", kind=kind, namespace=obj.namespace, name=obj.name)
-                await obj.delete()
+            owner = _owner(obj)
+            if owner is not None:
+                _log.info("keeping owned object", kind=kind, namespace=obj.namespace, name=obj.name, owner=owner)
+                continue
+            unit = _unit_of(obj, unit_label)
+            if declared_units is not None and unit is not None and unit not in declared_units:
+                _log.warning(
+                    "pruning an object of a unit this configuration no longer declares",
+                    kind=kind,
+                    namespace=obj.namespace,
+                    name=obj.name,
+                    unit=unit,
+                )
+            _log.info("pruning", kind=kind, namespace=obj.namespace, name=obj.name)
+            await obj.delete()
 
 
 __all__ = [

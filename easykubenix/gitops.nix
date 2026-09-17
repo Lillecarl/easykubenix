@@ -604,10 +604,10 @@ in
 
           The label is what scopes pruning, so every unit has to carry one.
           `ekn kubeapply --target <name> --prune' selects on its value, and a
-          whole-instance `ekn kubeapply --prune' selects on its *absence* --
-          that is how a whole-instance prune leaves a bootstrap unit's
-          objects alone. Those objects exist nowhere but in the unit, so
-          nothing else marks them as somebody's.
+          whole-instance `ekn kubeapply --prune' excludes the hand-applied
+          units by value -- that is how it leaves a bootstrap unit's objects
+          alone. Those objects exist nowhere but in the unit, so nothing else
+          marks them as somebody's.
 
           A unit with no label therefore does not merely lose its own
           `--target' prune. Its objects look unowned to the next

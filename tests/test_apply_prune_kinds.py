@@ -44,6 +44,15 @@ class _FakeApi(Api):
         self.objects_by_kind = objects_by_kind
         self.queried_kinds: list[str] = []
 
+    # An empty discovery document: every kind kr8s has no builtin class for is
+    # unserved. That is what makes the "skipped rather than fatal" test a test
+    # of `_extra_classes` and not of `discover`.
+    async def async_api_resources(self) -> list[dict[str, Any]]:
+        return []
+
+    async def async_api_resources_uncached(self) -> list[dict[str, Any]]:
+        return []
+
     # Mirrors kr8s.asyncio.Api.async_get exactly. The double subclasses Api so
     # that beartype's isinstance check on `prune_kinds`' annotated parameter
     # accepts it, and a subclass has to honour the base signature -- only
@@ -61,10 +70,14 @@ class _FakeApi(Api):
         raw: bool = False,
         **kwargs: object,
     ) -> AsyncGenerator[APIObject | dict[Any, Any]]:
-        if not isinstance(kind, str):
-            raise TypeError(f"this double is only exercised with string kinds, got {kind!r}")
-        self.queried_kinds.append(kind)
-        for obj in self.objects_by_kind.get(kind, []):
+        # A resolved class, not a name. `_extra_classes` puts every
+        # `prune_kinds` entry through `build_object`, so the prune loop never
+        # hands `async_get` a bare string -- which is the point, because a
+        # string goes through `async_lookup_kind` and mangles `.kind` for
+        # every CRD-backed object.
+        name = kind if isinstance(kind, str) else kind.kind
+        self.queried_kinds.append(name)
+        for obj in self.objects_by_kind.get(name, []):
             yield obj
 
 
@@ -77,7 +90,26 @@ async def test_prune_kinds_is_scanned_even_when_absent_from_the_current_apply() 
         api=api,
         environment="disc",
         prune=True,
-        prune_kinds={"ConfigMap"},
+        prune_kinds={"ConfigMap": "v1"},
+    )
+
+    assert api.queried_kinds == ["ConfigMap"]
+    cast("AsyncMock", stale.delete).assert_awaited_once()
+
+
+async def test_a_kind_the_cluster_does_not_serve_is_skipped_rather_than_fatal() -> None:
+    """`apiMappings` is what the configuration knows, not what this cluster
+    has. A mapping for a CRD that was never installed must not abandon a
+    prune whose apply half already ran."""
+    stale = _fake_configmap("stale-one")
+    api = _FakeApi(objects_by_kind={"ConfigMap": [stale]})
+
+    await apply_and_prune(
+        [],
+        api=api,
+        environment="disc",
+        prune=True,
+        prune_kinds={"ConfigMap": "v1", "Widget": "example.com/v1"},
     )
 
     assert api.queried_kinds == ["ConfigMap"]

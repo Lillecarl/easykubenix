@@ -717,10 +717,11 @@ class TestGitOpsTargetMetadata:
     async def test_a_unit_declining_the_label_is_rejected(self) -> None:
         """The label scopes pruning in both directions, so it cannot be opted out of.
 
-        A whole-instance `--prune` selects on the label's *absence*, which is
-        what makes it leave a bootstrap unit's objects alone. Those objects
-        exist nowhere but in the unit, so nothing else marks them as anyone's.
-        A unit that declines the label hands them to that prune.
+        A whole-instance `--prune` excludes the hand-applied units *by label
+        value*, which is what makes it leave a bootstrap unit's objects alone.
+        Those objects exist nowhere but in the unit, so nothing else marks
+        them as anyone's. A unit that declines the label hands them to that
+        prune, because `notin` matches an unlabelled object.
         """
         with pytest.raises(nanopynix.NixError, match=r"ekn\.dev/deployment-unit"):
             await evaluate_file(NIX_TEST_FILE, "declinedUnitLabelThrows")
@@ -891,9 +892,9 @@ class TestGitOpsTargetSubmoduleEndToEnd:
         """Nix never parses a raw file, so `ekn` adds the label at load time.
 
         Without it the object reaches the cluster with the environment label
-        and no unit label, and the next whole-instance `--prune` -- which
-        selects on that label's absence -- deletes it. For a bootstrap unit
-        the raw file is typically ArgoCD's own `install.yaml`.
+        and no unit label, and the next whole-instance `--prune` deletes it --
+        `notin` matches an object carrying no unit label at all. For a
+        bootstrap unit the raw file is typically ArgoCD's own `install.yaml`.
         """
         cfg = await evaluate_kubeapply_config(self._probe(tmp_path), None, None, None, "bootstrap")
 

@@ -338,7 +338,7 @@ async def test_prune_does_not_delete_a_seed_it_could_not_produce(
         api=api,
         environment=environment,
         prune=True,
-        prune_kinds={"Secret"},
+        prune_kinds={"Secret": "v1"},
         protect=plan.protected,
     )
 

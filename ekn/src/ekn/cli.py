@@ -1247,7 +1247,10 @@ class ApplyManifest(Command):
     environment: str = opt(required=True, help="Value for the ekn.dev/environment label (ekn.environment).")
     unit: str | None = opt(
         None,
-        help="Deployment unit this manifest is. Scopes pruning to objects carrying that ekn.dev/deployment-unit label; omitted, pruning covers objects carrying no unit label at all.",
+        help="Deployment unit this manifest is. Scopes pruning to objects carrying that ekn.dev/deployment-unit label; omitted, pruning covers this environment except the --hand-applied units.",
+    )
+    hand_applied: list[str] = opt(
+        help="Units a whole-instance prune must not touch: the ones whose objects never reach kubernetes.generated. Repeatable. Ignored with --unit.",
     )
     resource_priority_file: _Path | None = opt(
         None,
@@ -1285,6 +1288,7 @@ class ApplyManifest(Command):
                 api=api,
                 environment=self.environment,
                 unit=self.unit,
+                hand_applied=self.hand_applied,
                 resource_priority=resource_priority,
             )
         except kr8s.ServerError as exc:

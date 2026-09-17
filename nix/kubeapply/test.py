@@ -42,16 +42,36 @@ UNIT_LABEL = "ekn.dev/deployment-unit"
 RESOURCES = ("namespaces", "configmaps", "crds", "deployments", "widget-parts")
 
 
-def selector(environment, unit=None):
+def selector(environment, unit=None, hand_applied=()):
     """The label selector one apply owns.  Mirrors `apply.prune_selector`.
 
     Written out again here rather than imported, deliberately.  A test that
     asks the code under test what it prunes by cannot catch that answer being
     wrong; this one asks the API server the same question independently.
+
+    The `notin` clause is also the one behaviour a double cannot check: that
+    it matches an object carrying no unit label at all.  Only a real API
+    server answers that, and if it did not, the whole-instance scope would
+    silently shrink to nothing while every assertion still passed.
     """
-    if unit is None:
-        return f"{ENV_LABEL}={environment},!{UNIT_LABEL}"
-    return f"{ENV_LABEL}={environment},{UNIT_LABEL}={unit}"
+    if unit is not None:
+        return f"{ENV_LABEL}={environment},{UNIT_LABEL}={unit}"
+    if not hand_applied:
+        return f"{ENV_LABEL}={environment}"
+    return f"{ENV_LABEL}={environment},{UNIT_LABEL} notin ({','.join(sorted(hand_applied))})"
+
+
+def hand_applied_units(settings, unit):
+    """The units a prune of this scope must not touch.
+
+    Derived in one place rather than at each call, because a site that forgot
+    it would widen the scope silently -- and the assertion it would break is
+    "the whole-instance prune left the unit alone", which is the one this
+    file exists for.  `settings["unit"]` is a `deployment.units.<name>` with
+    its own `modules` (see ../kubeapply/manifests.nix), so it is exactly the
+    hand-applied case.  A `--target` prune excludes nothing.
+    """
+    return () if unit is not None else (settings["unit"],)
 
 
 async def apply(cp, settings, generation, environment, unit=None):
@@ -62,6 +82,7 @@ async def apply(cp, settings, generation, environment, unit=None):
     what the apply did -- an hour-long gate whose build log says only
     "passed" answers nothing when somebody asks it later.
     """
+    hand_applied = hand_applied_units(settings, unit)
     scope = environment if unit is None else f"{environment}/{unit}"
     print(f"[kubeapply] applying {generation} as {scope}", flush=True)
     command = (
@@ -71,6 +92,8 @@ async def apply(cp, settings, generation, environment, unit=None):
     )
     if unit is not None:
         command += f" --unit {unit}"
+    for excluded in hand_applied:
+        command += f" --hand-applied {excluded}"
     rc, out = await cp.execute(command, timeout=APPLY_TIMEOUT)
     if rc != 0:
         raise MachineError(f"[cp] {generation} did not apply (exit {rc}):\n{out}")
@@ -78,18 +101,19 @@ async def apply(cp, settings, generation, environment, unit=None):
     return out
 
 
-async def inventory(cp, environment, unit=None):
+async def inventory(cp, settings, environment, unit=None):
     """Everything on the cluster inside one prune scope.
 
     Maps ``(kind, namespace, name)`` to the object's resourceVersion, over
     every kind any generation here applies.  The label selector is the same
     one `apply_and_prune` prunes by, so this sees exactly what a prune sees.
     """
+    scope = selector(environment, unit, hand_applied_units(settings, unit))
     found = {}
     for resource in RESOURCES:
         data = await get_json(
             cp,
-            f"get {resource} --all-namespaces --selector '{selector(environment, unit)}'",
+            f"get {resource} --all-namespaces --selector '{scope}'",
         )
         for item in data["items"]:
             metadata = item["metadata"]
@@ -128,7 +152,7 @@ async def check_first_apply(cp, settings):
 
     expect(
         "what gen1 put on the cluster",
-        keys(await inventory(cp, settings["environment"])),
+        keys(await inventory(cp, settings, settings["environment"])),
         keys(
             {
                 ("Namespace", "none", namespace),
@@ -159,7 +183,7 @@ async def check_other_environment(cp, settings):
     await apply(cp, settings, "other", settings["otherEnvironment"])
     expect(
         "what the other environment owns",
-        keys(await inventory(cp, settings["otherEnvironment"])),
+        keys(await inventory(cp, settings, settings["otherEnvironment"])),
         keys(
             {
                 ("Namespace", "none", settings["otherNamespace"]),
@@ -175,7 +199,7 @@ async def check_unit_apply(cp, settings):
     The unit label is rendered into the manifest, so `ekn` never writes it --
     it only reads it back to scope a prune.  This asserts both halves of that
     separation: the unit's objects answer the unit's selector, and they do not
-    answer the whole-instance one, which excludes anything carrying the label.
+    answer the whole-instance one, which excludes this unit by name.
     """
     namespace = settings["namespace"]
     environment, unit = settings["environment"], settings["unit"]
@@ -183,7 +207,7 @@ async def check_unit_apply(cp, settings):
 
     expect(
         "what the unit owns",
-        keys(await inventory(cp, environment, unit)),
+        keys(await inventory(cp, settings, environment, unit)),
         keys(
             {
                 ("ConfigMap", namespace, "bootstrap"),
@@ -192,7 +216,7 @@ async def check_unit_apply(cp, settings):
         ),
     )
 
-    instance = keys(await inventory(cp, environment))
+    instance = keys(await inventory(cp, settings, environment))
     for name in (f"ConfigMap/{namespace}/bootstrap", f"ConfigMap/{namespace}/bootstrap-extra"):
         if name in instance:
             raise MachineError(f"{name} answers the whole-instance selector, which excludes unit objects")
@@ -211,13 +235,13 @@ async def check_unit_prune(cp, settings):
 
     expect(
         "what survives the unit's own prune",
-        keys(await inventory(cp, environment, unit)),
+        keys(await inventory(cp, settings, environment, unit)),
         keys({("ConfigMap", namespace, "bootstrap")}),
     )
 
     expect(
         "the instance after the unit's prune",
-        keys(await inventory(cp, environment)),
+        keys(await inventory(cp, settings, environment)),
         keys(
             {
                 ("Namespace", "none", namespace),
@@ -250,9 +274,9 @@ async def check_idempotent(cp, settings):
     def only_inert(inventoried):
         return {key: value for key, value in inventoried.items() if key[0] in inert}
 
-    before = only_inert(await inventory(cp, settings["environment"]))
+    before = only_inert(await inventory(cp, settings, settings["environment"]))
     await apply(cp, settings, "gen1", settings["environment"])
-    after = only_inert(await inventory(cp, settings["environment"]))
+    after = only_inert(await inventory(cp, settings, settings["environment"]))
 
     expect("a second apply of gen1 rewrote objects", after, before)
     print(f"[kubeapply] {len(before)} objects unchanged by a second apply", flush=True)
@@ -271,7 +295,7 @@ async def check_prune(cp, settings):
 
     expect(
         "what survives gen2",
-        keys(await inventory(cp, settings["environment"])),
+        keys(await inventory(cp, settings, settings["environment"])),
         keys(
             {
                 ("Namespace", "none", namespace),
@@ -285,7 +309,7 @@ async def check_prune(cp, settings):
 
     expect(
         "the other environment after a prune",
-        keys(await inventory(cp, settings["otherEnvironment"])),
+        keys(await inventory(cp, settings, settings["otherEnvironment"])),
         keys(
             {
                 ("Namespace", "none", settings["otherNamespace"]),
@@ -296,12 +320,12 @@ async def check_prune(cp, settings):
 
     # The load-bearing half of the whole-instance selector.  gen2 shares this
     # environment and this namespace with the unit, and applies neither of the
-    # unit's ConfigMaps -- so without the `!ekn.dev/deployment-unit` clause it
-    # would list them, find them absent from its desired set, and delete them.
-    # On a real cluster that is ArgoCD and the CNI.
+    # unit's ConfigMaps -- so without the `notin` exclusion it would list them,
+    # find them absent from its desired set, and delete them.  On a real
+    # cluster that is ArgoCD and the CNI.
     expect(
         "the deployment unit after a whole-instance prune",
-        keys(await inventory(cp, settings["environment"], settings["unit"])),
+        keys(await inventory(cp, settings, settings["environment"], settings["unit"])),
         keys(
             {
                 ("ConfigMap", namespace, "bootstrap"),
@@ -330,7 +354,7 @@ async def check_prune_gap(cp, settings):
     expect(
         "what survives gen3 -- see this test's docstring, which explains why"
         " the wanted list below still holds a WidgetPart",
-        keys(await inventory(cp, settings["environment"])),
+        keys(await inventory(cp, settings, settings["environment"])),
         keys(
             {
                 ("Namespace", "none", namespace),

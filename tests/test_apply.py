@@ -52,8 +52,13 @@ class FakeApi:
         namespaced: bool = True,
         listed: list[tuple[str, str, str]] | None = None,
         resources: list[dict[str, Any]] | None = None,
+        extra_metadata: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.namespaced = namespaced
+        # Merged into a listed object's `metadata`, keyed by its name. What
+        # the prune guards read -- `ownerReferences` and the unit label --
+        # lives there and nowhere else.
+        self._extra_metadata = extra_metadata or {}
         # (namespace, kind-as-reported-by-list, name) triples "already on
         # the cluster" under the environment label before this apply.
         self._listed = listed or []
@@ -105,9 +110,9 @@ class FakeApi:
         return self._resources
 
     def async_get(self, kind: str | type, *, namespace: Any, label_selector: Any):
-        # `apply_and_prune` passes the class it applied through, so that kr8s
-        # never has to look a kind up by name. A `prune_kinds` entry has no
-        # class and arrives as a string.
+        # `apply_and_prune` passes a class for every kind: the ones it applied,
+        # and the `prune_kinds` entries `_extra_classes` resolved. A string
+        # would go through `async_lookup_kind` and mangle `.kind`.
         wanted = kind.kind if isinstance(kind, type) else kind
 
         async def _gen():
@@ -117,7 +122,10 @@ class FakeApi:
                     continue
                 cls = new_class(listed_kind, "example.com/v1", namespaced=True)
                 obj = cls(
-                    {"kind": listed_kind, "metadata": {"name": name, "namespace": ns}},
+                    {
+                        "kind": listed_kind,
+                        "metadata": {"name": name, "namespace": ns} | self._extra_metadata.get(name, {}),
+                    },
                     api=self,  # type: ignore[arg-type]
                 )
 
@@ -250,19 +258,139 @@ class TestApplyAndPrune:
         assert api.deleted == [("argocd", "verticalpodautoscaler", "long-gone")]
 
 
+class TestPruneLeavesOwnedObjects:
+    """An object with `ownerReferences` is never pruned.
+
+    Measured on nixlab2 (2026-09-17): all eight External Secrets Operator
+    Secrets carry `ownerReferences: [ExternalSecret]` and hold the only copy
+    of every Harbor and oauth2-proxy credential. They stay outside the
+    environment-labelled scope today only because ESO does not copy
+    `ekn.dev/environment` into what it materialises -- someone else's
+    template. This guard does not depend on that one holding.
+    """
+
+    SPEC: ClassVar[dict[str, Any]] = {
+        "apiVersion": "autoscaling.k8s.io/v1",
+        "kind": "VerticalPodAutoscaler",
+        "metadata": {"name": "argocd-server", "namespace": "argocd"},
+    }
+
+    async def test_an_owned_object_survives_a_prune_that_would_take_it(self) -> None:
+        api = FakeApi(
+            listed=[
+                ("argocd", "verticalpodautoscaler", "argocd-server"),
+                ("argocd", "verticalpodautoscaler", "materialised"),
+            ],
+            extra_metadata={
+                "materialised": {"ownerReferences": [{"kind": "ExternalSecret", "name": "harbor-admin"}]},
+            },
+        )
+
+        await apply_and_prune([self.SPEC], api=api, environment="full")  # type: ignore[arg-type]
+
+        assert api.deleted == []
+
+    async def test_an_empty_owner_reference_list_is_not_an_owner(self) -> None:
+        """The API server drops the key when the last owner goes, but a
+        client that writes `[]` must not read as owned -- that would make the
+        guard silently unprunable-by-default."""
+        api = FakeApi(
+            listed=[
+                ("argocd", "verticalpodautoscaler", "argocd-server"),
+                ("argocd", "verticalpodautoscaler", "long-gone"),
+            ],
+            extra_metadata={"long-gone": {"ownerReferences": []}},
+        )
+
+        await apply_and_prune([self.SPEC], api=api, environment="full")  # type: ignore[arg-type]
+
+        assert api.deleted == [("argocd", "verticalpodautoscaler", "long-gone")]
+
+
+class TestPruneWarnsAboutUndeclaredUnits:
+    """Deleting an object of a unit the configuration no longer declares is
+    correct, and is also one line of config away from deleting ArgoCD and the
+    CNI. Before the set-based selector the not-exists clause hid the case.
+    """
+
+    SPEC: ClassVar[dict[str, Any]] = {
+        "apiVersion": "autoscaling.k8s.io/v1",
+        "kind": "VerticalPodAutoscaler",
+        "metadata": {"name": "argocd-server", "namespace": "argocd"},
+    }
+
+    async def test_it_still_deletes_and_it_says_which_unit(self, capsys: pytest.CaptureFixture[str]) -> None:
+        api = FakeApi(
+            listed=[
+                ("argocd", "verticalpodautoscaler", "argocd-server"),
+                ("argocd", "verticalpodautoscaler", "orphan"),
+            ],
+            extra_metadata={"orphan": {"labels": {"ekn.dev/deployment-unit": "retired"}}},
+        )
+
+        await apply_and_prune(  # type: ignore[arg-type]
+            [self.SPEC],
+            api=api,
+            environment="full",
+            declared_units=["bootstrap"],
+        )
+
+        assert api.deleted == [("argocd", "verticalpodautoscaler", "orphan")]
+        # structlog writes to stdout rather than through `logging`, so
+        # `caplog` stays empty here however loudly the warning fires.
+        assert "retired" in capsys.readouterr().out
+
+    async def test_a_declared_unit_is_pruned_without_the_warning(self, capsys: pytest.CaptureFixture[str]) -> None:
+        api = FakeApi(
+            listed=[
+                ("argocd", "verticalpodautoscaler", "argocd-server"),
+                ("argocd", "verticalpodautoscaler", "orphan"),
+            ],
+            extra_metadata={"orphan": {"labels": {"ekn.dev/deployment-unit": "routed"}}},
+        )
+
+        await apply_and_prune(  # type: ignore[arg-type]
+            [self.SPEC],
+            api=api,
+            environment="full",
+            declared_units=["routed"],
+        )
+
+        assert api.deleted == [("argocd", "verticalpodautoscaler", "orphan")]
+        assert "no longer declares" not in capsys.readouterr().out
+
+
 class TestPruneSelector:
     """The two prune scopes, as the string `kr8s` is handed.
 
     A raw string is passed through verbatim as `labelSelector`, which is what
-    makes the not-exists form work at all -- there is no dict spelling of it.
+    makes the set-based form work at all -- there is no dict spelling of it.
     """
 
-    def test_a_whole_instance_apply_owns_what_belongs_to_no_unit(self) -> None:
-        assert prune_selector(environment="prod", unit=None) == "ekn.dev/environment=prod,!ekn.dev/deployment-unit"
-
-    def test_a_target_apply_owns_that_unit(self) -> None:
+    def test_a_whole_instance_apply_excludes_the_hand_applied_units(self) -> None:
         assert (
-            prune_selector(environment="prod", unit="bootstrap")
+            prune_selector(environment="prod", unit=None, hand_applied=["bootstrap", "cni"])
+            == "ekn.dev/environment=prod,ekn.dev/deployment-unit notin (bootstrap,cni)"
+        )
+
+    def test_the_excluded_units_are_sorted_so_the_selector_is_stable(self) -> None:
+        """Nix hands back an attrset, and a selector that reorders between two
+        evaluations of the same configuration is a diff nobody can read."""
+        assert prune_selector(environment="prod", unit=None, hand_applied={"cni", "bootstrap"}) == prune_selector(
+            environment="prod",
+            unit=None,
+            hand_applied={"bootstrap", "cni"},
+        )
+
+    def test_no_hand_applied_units_emits_no_unit_clause(self) -> None:
+        """Not `notin ()`. The API server refuses an empty value set --
+        `labels.NewRequirement` rejects `in`/`notin` with one -- and a config
+        with no nested units is the ordinary shape `ekn validate` applies."""
+        assert prune_selector(environment="prod", unit=None) == "ekn.dev/environment=prod"
+
+    def test_a_target_apply_owns_that_unit_and_ignores_the_exclusions(self) -> None:
+        assert (
+            prune_selector(environment="prod", unit="bootstrap", hand_applied=["bootstrap", "cni"])
             == "ekn.dev/environment=prod,ekn.dev/deployment-unit=bootstrap"
         )
 
@@ -272,8 +400,8 @@ class TestUnitLabelGuard:
 
     The dangerous half is a *missing* label. The object is applied with the
     environment label, this apply's prune never looks at it, and the next
-    whole-instance prune -- which selects on the label's absence -- takes it
-    as its own and deletes it.
+    whole-instance prune takes it as its own and deletes it -- `notin`
+    matches an object carrying no unit label at all.
     """
 
     async def test_an_unlabelled_object_is_refused(self) -> None:

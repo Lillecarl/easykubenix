@@ -1041,8 +1041,9 @@ in
                 at apply time (see `_raw_manifest_in_unit` in
                 ekn/src/ekn/eval.py). It is the prune scope, and a routed
                 object without it is deleted by the next whole-instance
-                `--prune`, which selects on that label's absence. `ekn commit`
-                still writes the file byte-identical.
+                `--prune`: that selector excludes the hand-applied units by
+                label value, and `notin` matches an object with no such label
+                at all. `ekn commit` still writes the file byte-identical.
               '';
             };
           };

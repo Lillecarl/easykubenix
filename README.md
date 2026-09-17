@@ -114,14 +114,25 @@ Two labels decide the scope, not one:
 
 | apply | prune selector |
 | --- | --- |
-| `ekn kubeapply --prune` | `ekn.dev/environment=E,!ekn.dev/deployment-unit` |
+| `ekn kubeapply --prune` | `ekn.dev/environment=E,ekn.dev/deployment-unit notin (bootstrap,…)` |
 | `ekn kubeapply --target X --prune` | `ekn.dev/environment=E,ekn.dev/deployment-unit=X` |
 
-`E` is `ekn.environment`. The not-exists clause is what keeps the two apart. A
-deployment unit's objects never reach `kubernetes.generated` — a bootstrap unit
-renders a whole nested instance, and only `--target <name>` applies it — so
-without that clause a whole-instance prune would find them, see them absent
-from its own desired set, and delete them.
+`E` is `ekn.environment`. The excluded units are the hand-applied ones: those
+whose objects never reach `kubernetes.generated`, because each renders a whole
+nested instance that only `--target <name>` applies. Without the exclusion a
+whole-instance prune would find them, see them absent from its own desired set,
+and delete them — that is ArgoCD and the CNI.
+
+`notin` also matches an object carrying no unit label at all, so the one clause
+covers both the unit-less objects and every unit that is not hand-applied. A
+configuration with no hand-applied units emits no unit clause at all, because
+the API server rejects an empty `notin ()`.
+
+A routed unit — one with no `modules` of its own — *is* in scope, and that is
+the point of the set-based form. Its objects reach `kubernetes.generated`, so
+they are in the desired set of every whole-instance apply, and removing one
+from the configuration now deletes it. The older not-exists clause skipped
+every labelled object, so a removed component kept running for ever.
 
 `ekn` stamps the environment label at apply time, so only the objects `ekn`
 itself applies carry it. On a GitOps cluster that is the minority: nearly
