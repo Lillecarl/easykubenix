@@ -243,6 +243,14 @@ let
   importYaml = import ./easykubenix/lib/importYaml.nix { inherit lib parseYAMLStream; };
   importHelm = import ./easykubenix/lib/importHelm.nix { inherit lib pkgs importYaml; };
 
+  # `sources.nixpkgs` rather than `pkgs.path`: the first is a string naming a
+  # store path, the second is a path value that an interpolation re-imports.
+  # Measured 0.36s against 6.3s. See nixTransform.nix.
+  nixTransform = import ./easykubenix/lib/nixTransform.nix {
+    inherit lib pkgs;
+    inherit (sources) nixpkgs;
+  };
+
   # The OpenTofu registry, as provider derivations. A module argument rather
   # than an option so a `tf` module can reach it while deciding its own shape,
   # and lazy either way: nothing forces `sources.opentofu-registry` -- a ~424M
@@ -326,6 +334,12 @@ let
         # neither hand-rolls the primop-vs-CLI-fallback dispatch. See
         # parseYamlStream.nix.
         inherit parseYAMLStream;
+        # Run a Nix transform in a derivation and read the JSON back, so a
+        # value carried whole by `mkUntyped` -- which nothing walks, and so
+        # nothing can transform -- is still transformable. The store caches
+        # the result, so a richer transform does not cost the render more.
+        # See nixTransform.nix.
+        inherit nixTransform;
         # The two import primitives. Each returns a config fragment
         # (`kubernetes.resources` + `kubernetes.crds` + `kubernetes.apiMappings`)
         # that a caller places with `lib.mkMerge`, so a component built as a
