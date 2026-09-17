@@ -17,8 +17,11 @@ def anyio_backend() -> str:
 
 
 class _FakeResponse:
-    def __init__(self, data: dict[str, Any]) -> None:
+    # kr8s reads `Warning` off the headers of every apply response and logs
+    # each one, so a fake with no `headers` raises rather than applying.
+    def __init__(self, data: dict[str, Any], headers: dict[str, str] | None = None) -> None:
         self._data = data
+        self.headers = headers or {}
 
     def json(self) -> dict[str, Any]:
         return self._data
@@ -173,6 +176,11 @@ class TestClusterDiff:
             {
                 ("GET", "configmaps/argocd-cm"): _not_found(),
                 ("PATCH", "configmaps/argocd-cm"): _missing_namespace("argocd"),
+                # kr8s reads any 404 from the apply PATCH as "the object is
+                # not there yet" and retries as a create. A real API server
+                # answers that POST with the same missing namespace, so the
+                # fake does too.
+                ("POST", "configmaps"): _missing_namespace("argocd"),
             }
         )
 
