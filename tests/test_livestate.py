@@ -1,0 +1,160 @@
+"""The read phase's decisions: what to skip, and who else owns it.
+
+The sweep itself belongs to the caller, so everything here is a pure
+function over what the sweep returned. Issue Lillecarl/easykubenix#28.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from ekn.livestate import (
+    HASH_ANNOTATION,
+    ForeignOwner,
+    LiveObject,
+    canonical_json,
+    desired_hash,
+    foreign_owners,
+    manifest_hash,
+    skippable,
+    strip_hash_annotation,
+)
+
+if TYPE_CHECKING:
+    from ekn.apply import Manifest
+
+ENV = "nixlab2"
+
+
+def manifest(name: str = "a", hash_value: str | None = None, **annotations: str) -> Manifest:
+    metadata: dict[str, Any] = {"name": name, "namespace": "default"}
+    combined = dict(annotations)
+    if hash_value is not None:
+        combined[HASH_ANNOTATION] = hash_value
+    if combined:
+        metadata["annotations"] = combined
+    return {"apiVersion": "v1", "kind": "ConfigMap", "metadata": metadata}
+
+
+def live(name: str = "a", hash_value: str | None = None, environment: str | None = ENV) -> LiveObject:
+    return LiveObject(
+        key=("default", "ConfigMap", name),
+        manifest_hash=hash_value,
+        environment=environment,
+    )
+
+
+class TestTheHash:
+    def test_it_ignores_its_own_annotation(self) -> None:
+        """The annotation is part of the object, so hashing it in would make
+        the value depend on itself."""
+        without = manifest()
+        with_hash = manifest(hash_value="sha256:whatever")
+
+        assert manifest_hash(without) == manifest_hash(with_hash)
+
+    def test_it_keeps_every_other_annotation(self) -> None:
+        assert manifest_hash(manifest()) != manifest_hash(manifest(other="value"))
+
+    def test_stripping_leaves_no_empty_annotations_key(self) -> None:
+        """An empty `annotations: {}` is not the same JSON as no annotations
+        at all, and the two producers have to agree byte for byte."""
+        stripped = strip_hash_annotation(manifest(hash_value="sha256:x"))
+        metadata = stripped["metadata"]
+        assert isinstance(metadata, dict)
+        assert "annotations" not in metadata
+
+    def test_canonical_json_is_stable_under_key_order(self) -> None:
+        a: Manifest = {"b": 1, "a": 2}
+        b: Manifest = {"a": 2, "b": 1}
+        assert canonical_json(a) == canonical_json(b) == '{"a":2,"b":1}'
+
+    def test_a_render_without_the_annotation_has_no_desired_hash(self) -> None:
+        assert desired_hash(manifest()) is None
+        assert desired_hash(manifest(hash_value="sha256:x")) == "sha256:x"
+
+
+class TestSkipping:
+    """Three conditions, and the third is the one easily left out."""
+
+    def test_it_never_skips_without_the_flag(self) -> None:
+        spec = manifest(hash_value="sha256:x")
+        state = {("default", "ConfigMap", "a"): live(hash_value="sha256:x")}
+
+        assert not skippable(spec, state, environment=ENV, assume_unchanged=False)
+        assert skippable(spec, state, environment=ENV, assume_unchanged=True)
+
+    def test_a_changed_hash_is_never_skipped(self) -> None:
+        """Negative control: the one thing fast mode must never get wrong."""
+        spec = manifest(hash_value="sha256:new")
+        state = {("default", "ConfigMap", "a"): live(hash_value="sha256:old")}
+
+        assert not skippable(spec, state, environment=ENV, assume_unchanged=True)
+
+    def test_an_object_the_cluster_does_not_have_is_never_skipped(self) -> None:
+        assert not skippable(manifest(hash_value="sha256:x"), {}, environment=ENV, assume_unchanged=True)
+
+    def test_an_unstamped_object_is_applied_once(self) -> None:
+        """The condition that dissolves the fast-mode/prune conflict.
+
+        An object ArgoCD applied carries the hash (it is in the committed
+        YAML) but no `ekn.dev/environment`, which is what `--prune` selects
+        by. Skipping it would leave prune deleting an object that is present
+        and correct. So the first converge applies it, stamps it, and every
+        converge after skips it.
+        """
+        spec = manifest(hash_value="sha256:x")
+        unstamped = {("default", "ConfigMap", "a"): live(hash_value="sha256:x", environment=None)}
+        stamped = {("default", "ConfigMap", "a"): live(hash_value="sha256:x")}
+
+        assert not skippable(spec, unstamped, environment=ENV, assume_unchanged=True)
+        assert skippable(spec, stamped, environment=ENV, assume_unchanged=True)
+
+    def test_another_environments_stamp_does_not_count(self) -> None:
+        spec = manifest(hash_value="sha256:x")
+        state = {("default", "ConfigMap", "a"): live(hash_value="sha256:x", environment="other")}
+
+        assert not skippable(spec, state, environment=ENV, assume_unchanged=True)
+
+    def test_a_render_with_no_hash_is_never_skipped(self) -> None:
+        """A configuration rendered before the annotation existed. Applying
+        it is the only correct answer."""
+        state = {("default", "ConfigMap", "a"): live(hash_value="sha256:x")}
+
+        assert not skippable(manifest(), state, environment=ENV, assume_unchanged=True)
+
+
+class TestForeignOwners:
+    ENGINE = ("argocd-controller", "kube-controller-manager")
+
+    def test_the_engine_and_ourselves_are_not_reported(self) -> None:
+        """Taking fields from the GitOps engine is the intent of this mode,
+        so reporting it would bury the surprising half in noise."""
+        obj = LiveObject(
+            key=("vm", "Deployment", "victoria-metrics-operator"),
+            managers=frozenset({"argocd-controller", "kube-controller-manager", "ekn"}),
+        )
+
+        assert foreign_owners([obj], engine_managers=self.ENGINE) == []
+
+    def test_a_controller_that_owns_a_field_is_reported(self) -> None:
+        obj = LiveObject(
+            key=("default", "Service", "traefik"),
+            managers=frozenset({"argocd-controller", "cilium-operator-lb-ipam"}),
+        )
+
+        assert foreign_owners([obj], engine_managers=self.ENGINE) == [
+            ForeignOwner(("default", "Service", "traefik"), ("cilium-operator-lb-ipam",)),
+        ]
+
+    def test_a_person_who_ran_a_rollout_is_reported(self) -> None:
+        """The case in miniature: somebody ran `kubectl rollout restart`,
+        that manager still owns a field, and nothing says so."""
+        obj = LiveObject(key=("apps", "Deployment", "web"), managers=frozenset({"ekn", "kubectl-rollout"}))
+
+        assert foreign_owners([obj], engine_managers=self.ENGINE)[0].managers == ("kubectl-rollout",)
+
+    def test_the_managers_are_sorted(self) -> None:
+        obj = LiveObject(key=("a", "B", "c"), managers=frozenset({"zeta", "alpha"}))
+
+        assert foreign_owners([obj], engine_managers=())[0].managers == ("alpha", "zeta")
