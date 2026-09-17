@@ -241,6 +241,43 @@ class TestKubeValueType:
             await evaluate_file(NIX_TEST_FILE, "mkNumberedListRejectsNonIntKeys")
 
 
+class TestTheBranchOrderIsLoadBearing:
+    """Two orderings in `baseType` are correctness, not performance.
+
+    The list is otherwise sorted by measured node frequency -- strings
+    58.8%, attribute sets 32.1%, `null` 0.02% -- because `oneOf` is a left
+    fold and a value matching at position k pays k checks. These two must
+    survive the next person who re-counts and re-sorts. Issue
+    Lillecarl/easykubenix#31.
+    """
+
+    async def test_an_absolute_path_string_stays_a_string(self) -> None:
+        """`types.str` must precede `types.path`.
+
+        `path.check` accepts any string beginning with "/", and manifests
+        are full of absolute-path-looking strings -- every `mountPath` and
+        every `command`. Swap the two and each merges as a path, which
+        either copies a file into the store or fails because none exists.
+        """
+        result = await evaluate_file(NIX_TEST_FILE, "absolutePathStringsStayStrings")
+
+        assert result == {
+            "mountPath": "/var/lib/grafana",
+            "command": "/bin/sh",
+            "notAPath": "/nix/store/0000000000000000000000000000000-nothing-here",
+        }
+        assert all(isinstance(value, str) for value in result.values())
+
+    async def test_a_lone_marked_list_still_becomes_a_list(self) -> None:
+        """`namedListOf` must precede `objectType`, which the file already
+        documents. A plain object fails the former's check, so ordinary
+        objects still fall through; a marked one must not be taken by the
+        attribute map and keep its `_type` in the output."""
+        result = await evaluate_file(NIX_TEST_FILE, "loneMkNamedListBecomesList")
+
+        assert result == {"containers": [{"name": "main", "image": "v1"}]}
+
+
 class TestUntypedValues:
     """A value carried whole, never walked.
 

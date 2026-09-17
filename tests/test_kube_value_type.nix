@@ -725,6 +725,21 @@ let
   # renders as its store path, not as an attribute set.
   pathBranch = evalValue [ { value.file = ./test_kube_value_type.nix; } ];
 
+  # `types.str` must come before `types.path` in the branch list, because
+  # `path.check` accepts any string beginning with "/". Manifests are full of
+  # absolute-path-looking strings, and every one of them would merge as a
+  # path -- copying a file into the store, or failing because none exists --
+  # if the two were ever swapped by a later reordering.
+  absolutePathStringsStayStrings = evalValue [
+    {
+      value = {
+        mountPath = "/var/lib/grafana";
+        command = "/bin/sh";
+        notAPath = "/nix/store/0000000000000000000000000000000-nothing-here";
+      };
+    }
+  ];
+
   # An empty attribute set is an object, and an empty list is a list. Both are
   # legal Kubernetes values, and `{}` and `[]` are not interchangeable there.
   # `namedListOf` comes before `objectType`, so an empty list has to fail
@@ -907,6 +922,7 @@ in
     numberedEntryMkDefaultLoses
     numberedEntrySwitchedOffIsNotAdded
     scalarBranches
+    absolutePathStringsStayStrings
     emptyObjectStaysAnObject
     emptyListStaysAList
     markedListInsideAnObject
