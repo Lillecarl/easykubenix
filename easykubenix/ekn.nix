@@ -273,6 +273,21 @@ in
         says which, because a broken check and a missing path need different
         fixes.
 
+        **A static substituter list cannot express a runtime-injected one,
+        and that is a property of the cluster rather than of the checker.**
+        nixkube injects pynixd as a substituter on a node when `nix store
+        ping` answers, so a path held only by pynixd is reachable while
+        pynixd is up and unreachable while it is not. A checker asking a
+        fixed list reports such a path as missing.
+
+        That report is not simply a false positive. It is the same shape as
+        the outage this guard exists for: a path whose only source is a
+        workload in the cluster is available exactly as long as that
+        workload is. Teaching the checker to ask pynixd would make the
+        answer pass and the fragility invisible, which is why the list it
+        asks should be the substituters a node can rely on *without* the
+        cluster already being healthy.
+
         This is the guard, not the fix. It does not push anything; see
         `ekn.cacheTo`.
       '';
