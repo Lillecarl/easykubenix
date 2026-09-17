@@ -70,6 +70,22 @@ self: lib: rec {
   # `else if` asked a third time, on every node of every value this walks.
   # The three marker names are compared inline for that reason; the
   # predicates stay for callers with a single value to test.
+  #
+  # Measured on a real render (39 grafana dashboards, both arms from pinned
+  # umbrellas, output byte-identical). Five frames per node became two:
+  #
+  #   before  hasMarker 237,837  isMarkedList 238,025  isIfExists 238,025
+  #           isAttrs 238,025    isAttrs 238,025
+  #   after   hasMarker 237,837  isAttrs 238,025
+  #
+  #   this file      1,866,790 -> 1,052,587   (-43.6%)
+  #   whole render   9,540,152 -> 8,487,924   (-11.0%)
+  #
+  # **Do not expect the rest of this file to shrink the same way.** What is
+  # left is a floor the walk cannot avoid: `isList` at 159,294, `attrValues`
+  # and `any` at 78,731 each, and `kubeAttrsToLists` at about 125,000. They
+  # are one call per node, not a repeated question. Predicting two thirds
+  # here was wrong for exactly that reason.
   hasMarker =
     value:
     if lib.isAttrs value then
