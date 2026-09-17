@@ -45,6 +45,14 @@ let
   # here is value-only except `parseYamlStream.nix`, `serialiseYaml.nix`,
   # `tofuRegistry.nix` and `importHelm.nix`, which take `pkgs` -- the overlay
   # in `default.nix` imports none of those.
+  #
+  # **The whole directory, on purpose.** Every file here is an input, so an
+  # edit to any one of them rebuilds every transform. That is the right side
+  # to pay on. This directory changes when easykubenix does, which is a
+  # deliberate version bump; a transform is read on every evaluation of every
+  # configuration. Narrowing the set buys a rare rebuild and costs a fileset
+  # that has to track what the overlay imports, and that silently drops a
+  # file a transform needs when it falls behind.
   eknLib = ./.;
 
   # Fixed, so every transform shares one file and one store path.
