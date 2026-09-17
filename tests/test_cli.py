@@ -497,3 +497,77 @@ class TestCachePushTimeout:
 
         assert cfg.cache_timeout_sec == 7
         assert cfg.cache_to == "ssh-ng://nix@example.invalid"
+
+
+class TestTheExitCode:
+    """A command that fails must not report success.
+
+    Issue #21: `ekn` printed a traceback and exited **0**. A `&&` chain then
+    continued against infrastructure nothing had touched, and one `ekn deploy
+    --push` aborted before commit and push while the GitOps branches still
+    pointed at a destroyed cluster's render -- reported as a success.
+
+    It does not reproduce on this tree. These are the guard, because the
+    defect is silent in the dangerous direction and nothing asserted the
+    invariant.
+
+    A subprocess, and not `pytest.raises(SystemExit)`. The claim is about the
+    **exit code of the process**, and an in-process check cannot see the step
+    that was wrong: everything up to `sys.exit` was already correct.
+    """
+
+    def _run(self, body: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-c", body],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=PROJECT_ROOT,
+        )
+
+    def test_an_unhandled_exception_exits_non_zero(self) -> None:
+        """The general case, and the one the issue asks for."""
+        done = self._run(
+            "import sys\n"
+            "from ekn import cli\n"
+            "class Boom:\n"
+            "    async def run(self):\n"
+            "        raise RuntimeError('aborted before commit and push')\n"
+            "cli.dispatch = lambda parser, args: Boom()\n"
+            "sys.argv = ['ekn', 'deploy']\n"
+            "cli.main()\n"
+        )
+
+        assert done.returncode != 0, done.stdout + done.stderr
+        assert "aborted before commit and push" in done.stderr
+
+    def test_a_failure_before_the_command_runs_exits_non_zero(self) -> None:
+        """The first case of the issue: `-A` with no `--file` or `--flake`.
+
+        It raises out of `dispatch`, which is before `main` installs the
+        traceback handler at all.
+        """
+        done = self._run(
+            "import sys\n"
+            "from ekn import cli\n"
+            "sys.argv = ['ekn', '-A', 'environments.nixlab2', 'tofu', 'output',"
+            " '--target', 'x', 'y']\n"
+            "cli.main()\n"
+        )
+
+        assert done.returncode != 0, done.stdout + done.stderr
+
+    def test_success_still_exits_zero(self) -> None:
+        """Without this the two above pass on a command that always fails."""
+        done = self._run(
+            "import sys\n"
+            "from ekn import cli\n"
+            "class Fine:\n"
+            "    async def run(self):\n"
+            "        return None\n"
+            "cli.dispatch = lambda parser, args: Fine()\n"
+            "sys.argv = ['ekn', 'deploy']\n"
+            "cli.main()\n"
+        )
+
+        assert done.returncode == 0, done.stdout + done.stderr
