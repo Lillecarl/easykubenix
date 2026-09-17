@@ -21,6 +21,7 @@ from .apply import (
     DEFAULT_ENVIRONMENT_LABEL,
     DEFAULT_FIELD_MANAGER,
     build_object,
+    field_manager_for,
     ssa_apply,
     with_environment_label,
 )
@@ -45,13 +46,14 @@ for an object this apply has already decided it must delete.
 """
 
 
-def _applier(
+def _applier(  # noqa: PLR0913 -- one caller, and each argument is a piece of what an apply writes
     api: Api,
     *,
     environment: str,
     field_manager: str,
     environment_label: str,
     desired: dict[tuple[str, str, str], type[APIObject]],
+    unit_managers: Mapping[str, str] | None = None,
 ):
     """The apply step, recording what it built into `desired` for the prune.
 
@@ -70,7 +72,10 @@ def _applier(
             api,
         )
         desired[(obj.namespace or "none", obj.kind, obj.name)] = type(obj)
-        await ssa_apply(obj, field_manager=field_manager)
+        await ssa_apply(
+            obj,
+            field_manager=field_manager_for(spec, default=field_manager, unit_managers=unit_managers),
+        )
         return obj
 
     return apply
@@ -118,6 +123,7 @@ async def converge_direct(  # noqa: PLR0913 -- one caller, and each argument is 
     concurrency: int = DEFAULT_CONCURRENCY,
     settle_seconds: float = DEFAULT_SETTLE_SECONDS,
     allow_recreate: bool = False,
+    unit_managers: Mapping[str, str] | None = None,
 ) -> tuple[ConvergeReport, dict[tuple[str, str, str], type[APIObject]]]:
     """Apply `objects` until the cluster stops changing, or until it stops
     making progress.
@@ -145,6 +151,7 @@ async def converge_direct(  # noqa: PLR0913 -- one caller, and each argument is 
             field_manager=field_manager,
             environment_label=environment_label,
             desired=desired,
+            unit_managers=unit_managers,
         ),
         delete=_deleter(api) if allow_recreate else None,
         resource_priority=resource_priority,

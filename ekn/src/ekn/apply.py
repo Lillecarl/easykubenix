@@ -258,6 +258,47 @@ def _object_key(obj: APIObject) -> tuple[str, str, str]:
     return (obj.namespace or "none", obj.kind, obj.name)
 
 
+def field_manager_for(
+    spec: Manifest,
+    *,
+    default: str,
+    unit_managers: Mapping[str, str] | None,
+    unit_label: str = DEFAULT_UNIT_LABEL,
+) -> str:
+    """Which manager to apply one object as.
+
+    `unit_managers` maps unit name to its `fieldManager`. `None` means "use
+    `default` for everything", which is what a whole-instance apply did
+    before this existed and what it still does unless the engine is paused.
+
+    **Why per object.** A whole-instance apply is one group, so it applied
+    everything as `ekn` even though every object carries the unit that
+    declares a manager. That is right for an apply that runs again -- it
+    keeps conflict detection -- and wrong for a full deploy standing in for
+    a paused engine, which has a successor and does not run again. Server-
+    side apply only drops a field when its *owning* manager stops declaring
+    it, so a field written as `ekn` and later removed from the configuration
+    is not removed by the engine re-applying as its own manager: `force`
+    takes contested fields, it does not drop fields another manager owns.
+    Orphaned, silently, for ever.
+
+    **Only safe while that engine is stopped.** Two writers sharing one
+    manager name are one manager to the API server, so each apply's field
+    set replaces the other's -- `ekn` applying the working copy and the
+    engine applying committed git would each remove what the other declared.
+    That is active flapping and waiting does not fix it. Hence the caller
+    passes `None` unless the pause is in effect.
+    """
+    if not unit_managers:
+        return default
+    metadata = spec.get("metadata")
+    labels = metadata.get("labels") if isinstance(metadata, dict) else None
+    unit = labels.get(unit_label) if isinstance(labels, dict) else None
+    if not isinstance(unit, str):
+        return default
+    return unit_managers.get(unit, default)
+
+
 def with_environment_label(spec: Manifest, label: str, value: str) -> Manifest:
     """Stamp `ekn.dev/environment` onto a copy of `spec`.
 
@@ -801,6 +842,7 @@ __all__ = [
     "barriers",
     "build_object",
     "discover",
+    "field_manager_for",
     "prune_generation",
     "prune_selector",
     "ssa_apply",

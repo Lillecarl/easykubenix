@@ -217,6 +217,9 @@ class KubeApplyConfigResult(BaseModel):
     #: none -- which is right for one with no CSI-backed store. See
     #: `storecheck.assert_fetchable`.
     assert_cached: str | None = Field(default=None, alias="assertCached")
+    #: `deployment.unitFieldManagers` -- unit name to its `fieldManager`.
+    #: Read **only while the engine is paused**; see `apply.field_manager_for`.
+    unit_field_managers: dict[str, str] = Field(default_factory=dict, alias="unitFieldManagers")
 
     @property
     def objects(self) -> list[dict[str, Any]]:
@@ -936,6 +939,11 @@ async def evaluate_kubeapply_config(
         declared = (
             await deployment.attr("declaredUnits").to_python() if await deployment.has_attr("declaredUnits") else None
         )
+        unit_managers = (
+            await deployment.attr("unitFieldManagers").to_python()
+            if await deployment.has_attr("unitFieldManagers")
+            else {}
+        )
         # `[]` and "the option does not exist" mean the same thing here, unlike
         # for `handAppliedUnits`: both say this configuration names no engine,
         # and `--pause-engine` refuses on either rather than pausing nothing.
@@ -961,6 +969,7 @@ async def evaluate_kubeapply_config(
                 "apiMappings": await proxy.attr("kubernetes").attr("apiMappings").to_python(),
                 "enginePause": engine_pause,
                 "assertCached": assert_cached,
+                "unitFieldManagers": unit_managers,
             }
         )
 

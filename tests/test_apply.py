@@ -7,7 +7,8 @@ import anyio
 import pytest
 from kr8s.asyncio.objects import new_class
 
-from ekn.apply import _wait_established, apply_and_prune, discover, prune_selector
+from ekn.apply import _wait_established, apply_and_prune, discover, field_manager_for, prune_selector
+from ekn.directapply import converge_direct
 
 
 @pytest.fixture(scope="module")
@@ -82,6 +83,7 @@ class FakeApi:
         self.uncached_reads = 0
         self.deleted: list[tuple[str, str, str]] = []
         self.patched: list[tuple[str, str, str]] = []
+        self.managers: dict[str, str] = {}
 
     @asynccontextmanager
     async def call_api(
@@ -100,6 +102,9 @@ class FakeApi:
 
         body = _json.loads(content or "{}")
         self.patched.append((namespace or "none", body["kind"], body["metadata"]["name"]))
+        # Which manager each object was applied as. SSA sends it as a query
+        # parameter, so this is the only place a test can see it.
+        self.managers[body["metadata"]["name"]] = (params or {}).get("fieldManager", "")
         yield _FakeResponse(body)
 
     async def async_api_resources(self) -> list[dict[str, Any]]:
@@ -452,6 +457,69 @@ class TestPruneWarnsAboutUndeclaredUnits:
 
         assert api.deleted == [("argocd", "verticalpodautoscaler", "orphan")]
         assert "no longer declares" not in capsys.readouterr().out
+
+
+class TestFieldManagerPerUnit:
+    """Which manager a whole-instance apply writes each object as.
+
+    Measured on nixlab2: all 37 Kubernetes units declare `fieldManager =
+    "argocd-controller"`, and 919/919 generated objects carry a unit label
+    -- but a whole-instance apply is one group, so it wrote everything as
+    `ekn`. That is right for an apply that runs again and wrong for a full
+    deploy standing in for a paused engine.
+    """
+
+    UNITS: ClassVar[dict[str, str]] = {"vm-logs": "argocd-controller", "plain": "ekn"}
+
+    @staticmethod
+    def _spec(unit: str | None) -> dict[str, Any]:
+        labels = {"ekn.dev/deployment-unit": unit} if unit else {}
+        return {"kind": "ConfigMap", "metadata": {"name": "a", "labels": labels}}
+
+    def test_an_object_applies_as_its_own_units_manager(self) -> None:
+        assert field_manager_for(self._spec("vm-logs"), default="ekn", unit_managers=self.UNITS) == "argocd-controller"
+
+    def test_no_unit_managers_means_the_default_for_everything(self) -> None:
+        """The gate. `None` is what the caller passes unless the engine is
+        actually paused -- two writers sharing one manager name are one
+        manager to the API server, so each apply's field set replaces the
+        other's, and that is active flapping rather than a slow leak."""
+        assert field_manager_for(self._spec("vm-logs"), default="ekn", unit_managers=None) == "ekn"
+        assert field_manager_for(self._spec("vm-logs"), default="ekn", unit_managers={}) == "ekn"
+
+    def test_an_unlabelled_object_keeps_the_default(self) -> None:
+        assert field_manager_for(self._spec(None), default="ekn", unit_managers=self.UNITS) == "ekn"
+
+    def test_a_unit_the_map_does_not_name_keeps_the_default(self) -> None:
+        """A label naming a unit this instance does not declare is left
+        alone rather than guessed at -- the same rule `stampRouted` uses."""
+        assert field_manager_for(self._spec("gone"), default="ekn", unit_managers=self.UNITS) == "ekn"
+
+    async def test_the_converging_apply_uses_it_per_object(self) -> None:
+        """End to end: two objects in one apply, two different managers."""
+        api = FakeApi()
+        specs = [
+            {
+                "apiVersion": "autoscaling.k8s.io/v1",
+                "kind": "VerticalPodAutoscaler",
+                "metadata": {"name": "a", "namespace": "argocd", "labels": {"ekn.dev/deployment-unit": "vm-logs"}},
+            },
+            {
+                "apiVersion": "autoscaling.k8s.io/v1",
+                "kind": "VerticalPodAutoscaler",
+                "metadata": {"name": "b", "namespace": "argocd", "labels": {"ekn.dev/deployment-unit": "plain"}},
+            },
+        ]
+
+        report, _desired = await converge_direct(
+            specs,  # type: ignore[arg-type]
+            api=api,  # type: ignore[arg-type]
+            environment="full",
+            unit_managers=self.UNITS,
+        )
+
+        assert report.ok
+        assert api.managers == {"a": "argocd-controller", "b": "ekn"}
 
 
 class TestPruneSelector:

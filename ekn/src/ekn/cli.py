@@ -77,7 +77,7 @@ from ekn.tofu import (
 from ekn.validation import EphemeralControlPlane, exec_capture, prepare_validation_objects
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
     from ekn.eval import TofuUnit
 
@@ -714,6 +714,7 @@ async def _converge_group(  # noqa: PLR0913 -- the same state `apply_and_prune` 
     options: _ConvergeOptions,
     prune: bool,
     protect: set[tuple[str, str, str]],
+    unit_managers: Mapping[str, str] | None,
 ) -> None:
     """One group, converged rather than applied in barriers.
 
@@ -736,6 +737,7 @@ async def _converge_group(  # noqa: PLR0913 -- the same state `apply_and_prune` 
         concurrency=options.concurrency,
         settle_seconds=options.settle_seconds,
         allow_recreate=options.allow_recreate,
+        unit_managers=unit_managers,
     )
     report_failures(report)
     if not report.ok:
@@ -877,6 +879,11 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
         seeds.report(plan.actions)
 
     held = held_by_engine_pause or set()
+    # Only while the engine is stopped. A whole-instance apply otherwise
+    # writes everything as its own manager, which keeps conflict detection
+    # for a run that happens again -- and a full deploy standing in for a
+    # paused engine is not one of those. See `apply.field_manager_for`.
+    unit_managers = cfg.unit_field_managers if held_by_engine_pause is not None else None
 
     # After seed resolution and before the first apply. A seed rewrites an
     # object's data, so checking earlier would assert paths this run is not
@@ -907,6 +914,7 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
                 options=converge,
                 prune=prune and group.unit == target,
                 protect=protected,
+                unit_managers=unit_managers,
             )
             continue
         await apply_and_prune(

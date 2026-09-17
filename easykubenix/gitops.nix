@@ -101,6 +101,27 @@ in
       '';
     };
 
+    unitFieldManagers = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      readOnly = true;
+      description = ''
+        Each unit's `fieldManager`, so a **whole-instance** apply can write
+        each object as the manager its own unit declares.
+
+        A whole-instance apply is one group and wrote everything as
+        `ekn.cachePackage`'s default manager, even though every routed
+        object carries the unit that names one. That is right for an apply
+        that runs again -- it keeps conflict detection -- and wrong for a
+        full deploy standing in for a paused engine, which has a successor
+        and does not run again.
+
+        `ekn` reads this **only while the engine is paused**. Two writers
+        sharing one manager name are one manager to the API server, so each
+        apply's field set replaces the other's; using the engine's name
+        while the engine runs is worse than the orphaned fields it fixes.
+      '';
+    };
+
     declaredUnits = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       readOnly = true;
@@ -587,6 +608,8 @@ in
   };
 
   config.deployment.declaredUnits = lib.attrNames config.deployment.units;
+
+  config.deployment.unitFieldManagers = lib.mapAttrs (_name: unit: unit.fieldManager) config.deployment.units;
 
   # The same discriminator `kubernetes.nix` uses to decide what reaches
   # `kubernetes.generated`, inverted. See the option's description.
