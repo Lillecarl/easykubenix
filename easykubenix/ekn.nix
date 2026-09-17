@@ -184,13 +184,32 @@ in
     };
 
     cacheTo = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
+      type = lib.types.nullOr (
+        lib.types.either lib.types.str (lib.types.listOf lib.types.str)
+      );
       default = null;
       description = ''
-        Destination Nix store URI (e.g. "ssh-ng://user@host:2222") that `ekn
-        deploy` automatically pushes `ekn.cachePackage`'s closure to, before
-        committing/pushing GitOps manifests to the remote. `null` disables
-        the cache push entirely.
+        Destination Nix store URI (e.g. "ssh-ng://user@host:2222"), or a
+        list of them, that `ekn deploy` and `ekn kubeapply` push
+        `ekn.cachePackage`'s closure to before they act. `null` disables the
+        cache push entirely.
+
+        **A list is allowed because one destination cannot always be
+        enough.** A store path is only useful where whatever mounts it can
+        reach it, and a single destination cannot serve a path whose
+        *consumer is that destination*. On nixlab2 `cacheTo` is pynixd, and
+        pynixd's own environment is mounted over CSI on a node -- so pushing
+        that leg here can never bootstrap it, and it needs a substituter
+        that does not depend on pynixd.
+
+        Every destination is pushed to, in order. A failure in any of them
+        fails the push, subject to `--cache-allow-failure`: a path that
+        reached only some of the stores that need it is the case this
+        option exists to avoid.
+
+        A plain string stays valid and means what it always did. This option
+        does not decide *which* destinations an instance needs -- that is a
+        property of where its paths are consumed.
       '';
       example = "ssh-ng://nix@cache.example.com:2222";
     };

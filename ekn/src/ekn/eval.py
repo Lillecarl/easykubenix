@@ -144,7 +144,10 @@ class GitOpsManifestsResult(BaseModel):
 
 
 class CacheConfigResult(BaseModel):
-    cache_to: str | None
+    #: `ekn.cacheTo`, always as a list. Nix accepts a bare string for the
+    #: ordinary one-destination case; normalising here means every consumer
+    #: has one shape to handle rather than a branch it can forget.
+    cache_to: list[str] = Field(default_factory=list)
     cache_package_out: str | None
     # Seconds to allow the push; None waits forever. `ekn.cacheTimeoutSec`
     # says why there is a bound at all.
@@ -999,9 +1002,12 @@ async def evaluate_cache_config(
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
 
-        cache_to = await proxy.attr("ekn").attr("cacheTo").to_python()
-        if cache_to is None:
-            return CacheConfigResult.model_validate({"cache_to": None, "cache_package_out": None})
+        declared = await proxy.attr("ekn").attr("cacheTo").to_python()
+        if declared is None:
+            return CacheConfigResult.model_validate({"cache_to": [], "cache_package_out": None})
+        # A bare string is the ordinary one-destination case; normalise it
+        # here so nothing downstream has to branch on the shape.
+        cache_to = [declared] if isinstance(declared, str) else declared
 
         timeout_sec = await proxy.attr("ekn").attr("cacheTimeoutSec").to_python()
 

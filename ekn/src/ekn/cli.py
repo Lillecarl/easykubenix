@@ -458,16 +458,33 @@ async def _push_ekn_cache(file: _Path | None, flake: str | None, attr: str | Non
     except ValidationError as exc:
         _report_validation_error("cache config", exc)
 
-    cache_to = cfg.cache_to
-    if cache_to is None:
-        _log.info("ekn.cacheTo is null -- skipping pre-deploy cache push")
+    if not cfg.cache_to:
+        _log.info("ekn.cacheTo is null -- skipping the cache push")
         return
     cache_package_out = cfg.cache_package_out
     if cache_package_out is None:
         _log.error("ekn.cachePackage's build produced no 'out' output")
         raise SystemExit(1)
 
-    timeout_sec = cfg.cache_timeout_sec
+    # Every destination, because a path that reached only some of the stores
+    # that need it is the case `ekn.cacheTo` accepts a list to avoid.
+    for cache_to in cfg.cache_to:
+        await _push_one_cache(
+            cache_package_out,
+            cache_to,
+            timeout_sec=cfg.cache_timeout_sec,
+            allow_failure=allow_failure,
+        )
+
+
+async def _push_one_cache(
+    cache_package_out: str,
+    cache_to: str,
+    *,
+    timeout_sec: float | None,
+    allow_failure: bool,
+) -> None:
+    """One destination of `ekn.cacheTo`. See `_push_ekn_cache`."""
     if timeout_sec is not None:
         _log.info(f"pushing {cache_package_out} to {cache_to} (up to {timeout_sec:g}s)")
 

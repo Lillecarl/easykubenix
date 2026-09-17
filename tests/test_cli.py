@@ -415,7 +415,7 @@ class TestCachePushTimeout:
 
         async def cache_config(*_args: object, **_kwargs: object) -> CacheConfigResult:
             return CacheConfigResult(
-                cache_to="ssh-ng://nix@unreachable.invalid",
+                cache_to=["ssh-ng://nix@unreachable.invalid"],
                 cache_package_out="/nix/store/deadbeef-manifest.json",
                 cache_timeout_sec=timeout_sec,
             )
@@ -503,7 +503,61 @@ class TestCachePushTimeout:
         cfg = await evaluate_cache_config(f, None, None, None)
 
         assert cfg.cache_timeout_sec == 7
-        assert cfg.cache_to == "ssh-ng://nix@example.invalid"
+        # A bare string in Nix, a one-element list here: normalised at the
+        # boundary so nothing downstream branches on the shape.
+        assert cfg.cache_to == ["ssh-ng://nix@example.invalid"]
+
+    async def test_a_list_of_destinations_is_kept_in_order(self, tmp_path: Path) -> None:
+        """One destination cannot serve a path whose consumer *is* that
+        destination -- nixlab2's `cacheTo` is pynixd, and pynixd's own
+        environment is mounted over CSI on a node."""
+        sources_path = PROJECT_ROOT / "nix/sources.nix"
+        f = tmp_path / "multi.nix"
+        f.write_text(f"""
+            let
+              sources = import {sources_path};
+              pkgs = import sources.nixpkgs {{ }};
+            in
+            import {PROJECT_ROOT} {{
+              inherit pkgs;
+              modules = [
+                {{
+                  ekn.environment = "easykubenix";
+                  ekn.cacheTo = [ "ssh-ng://nix@pynixd" "https://nixkube.cachix.org" ];
+                  kubernetes.objects.default.ConfigMap.c.data.key = "value";
+                }}
+              ];
+            }}
+        """)
+
+        cfg = await evaluate_cache_config(f, None, None, None)
+
+        assert cfg.cache_to == ["ssh-ng://nix@pynixd", "https://nixkube.cachix.org"]
+
+    async def test_no_cache_to_is_an_empty_list(self, tmp_path: Path) -> None:
+        """Not `None`. The push loop asks `if not cfg.cache_to`, so one
+        falsy shape rather than two is one branch nobody can forget."""
+        sources_path = PROJECT_ROOT / "nix/sources.nix"
+        f = tmp_path / "nocache.nix"
+        f.write_text(f"""
+            let
+              sources = import {sources_path};
+              pkgs = import sources.nixpkgs {{ }};
+            in
+            import {PROJECT_ROOT} {{
+              inherit pkgs;
+              modules = [
+                {{
+                  ekn.environment = "easykubenix";
+                  kubernetes.objects.default.ConfigMap.c.data.key = "value";
+                }}
+              ];
+            }}
+        """)
+
+        cfg = await evaluate_cache_config(f, None, None, None)
+
+        assert cfg.cache_to == []
 
 
 class TestAWholeInstancePruneNeedsItsExclusionSet:
