@@ -51,6 +51,52 @@ args = lib.mkMerge [
 ];
 ```
 
+### Matching with a predicate
+
+A prefix only reads a string. For a list of objects with neither a `name` nor a
+stable index — `tolerations` is the usual one — `lib.mkReplaceWhere` addresses
+an element with a function:
+
+```nix
+tolerations = lib.mkReplaceWhere {
+  control-plane = {
+    where = toleration:
+      (toleration.key or null) == "node-role.kubernetes.io/control-plane";
+    value = {
+      key = "node-role.kubernetes.io/control-plane";
+      operator = "Exists";
+      effect = "NoExecute";
+    };
+  };
+};
+```
+
+The attribute name is a label. It names the replacement in an error, and it is
+what two definitions of the same replacement merge on; it is not matched against
+anything. `mkReplaceList` is the short form of this: a label with no `where`
+matches by the start of its own name, and both forms share one marker, so they
+compose on one field.
+
+`value` **merges over the element it matched.** The element joins the merge as a
+default, leaf by leaf, so ordinary module-system rules decide the rest:
+
+| you write | you get |
+| --- | --- |
+| `value.effect = "NoExecute"` | that field changed, every other field of the element untouched, no `mkForce` needed |
+| a field the element does not have | added |
+| `value = lib.mkForce { ... }` | the element dropped and the body in its place, **losing every field the body does not name** |
+| a string element | replaced, because a string is a single leaf |
+| two modules setting one field | a conflict that names the field |
+
+A second module overrides a replacement by writing the label with no `where`,
+because two predicates for one label cannot be merged:
+
+```nix
+tolerations = lib.mkReplaceWhere {
+  control-plane.value.effect = lib.mkForce "PreferNoSchedule";
+};
+```
+
 ---
 
 ## Conditional Definitions

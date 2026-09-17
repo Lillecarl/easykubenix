@@ -71,8 +71,8 @@ let
       throw '''
         nixTransform: the result still holds a marker after conversion.
 
-        `mkIfExists` and `mkReplaceList` need an option to merge against
-        and there is none here. Use plain values, or
+        `mkIfExists`, `mkReplaceList` and `mkReplaceWhere` need an option to
+        merge against and there is none here. Use plain values, or
         `mkNamedList`/`mkNumberedList`, which this runner converts back to
         lists.
       '''

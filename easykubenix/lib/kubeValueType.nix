@@ -19,6 +19,7 @@ let
     isNumberedList
     isReplaceList
     isUntyped
+    replaceWhereKey
     stripListMarker
     # Both directions back to a list are shared with `kubeAttrsToLists`, the
     # pass kubernetes.nix runs over generator and transformer output. See
@@ -102,12 +103,14 @@ let
       }) list
     );
   # A `listOf elemType` alternative. It also accepts the explicit
-  # `lib.mkNamedList`, `lib.mkNumberedList` and `lib.mkReplaceList` markers. An
-  # attribute set with `_type = "namedList"` is a short form to override by
-  # name. An attribute set with `_type = "numberedList"` is a short form to
-  # override by index, and it keeps the order. An attribute set with
-  # `_type = "replaceList"` replaces an element that starts with the key, and
-  # keeps its position.
+  # `lib.mkNamedList`, `lib.mkNumberedList`, `lib.mkReplaceList` and
+  # `lib.mkReplaceWhere` markers. An attribute set with `_type = "namedList"`
+  # is a short form to override by name. An attribute set with
+  # `_type = "numberedList"` is a short form to override by index, and it keeps
+  # the order. An attribute set with `_type = "replaceList"` replaces the
+  # element a label addresses and keeps its position: by the start of the
+  # label's own name, or by the predicate under `_where` that
+  # `lib.mkReplaceWhere` puts there.
   #
   # The behavior is opt-in. It is not a guess from the shape of the data.
   # A Kubernetes field has one fixed shape. It is always a list. It is never a
@@ -134,7 +137,7 @@ let
     in
     mkOptionType rec {
       name = "namedListOf";
-      description = "list of ${elemType.description}, or an mkNamedList/mkNumberedList/mkReplaceList-tagged attrset";
+      description = "list of ${elemType.description}, or an mkNamedList/mkNumberedList/mkReplaceList/mkReplaceWhere-tagged attrset";
       # A callable check with `isV2MergeCoherent`. The flag tells the module
       # system that this check agrees with this merge, so `either`/`oneOf` can
       # pick a branch without running `checkV2MergeCoherence` over every
@@ -288,25 +291,114 @@ let
               baseEvaluation = lib.modules.mergeDefinitions loc listType plainDefs;
               base = baseEvaluation.mergedValue;
 
-              # The replacements merge as an attribute set, so two modules that
-              # patch the same element conflict with the module system's own
-              # message, and `mkForce` on one entry works.
-              replaceEvaluation = lib.modules.mergeDefinitions loc attrsType (
-                map (def: def // { value = stripListMarker def.value; }) (
-                  filter (def: isReplaceList def.value) defs
-                )
-              );
-              replacements = replaceEvaluation.mergedValue;
+              replaceDefs = filter (def: isReplaceList def.value) defs;
+
+              # `_where` holds functions, and this type rejects a function as a
+              # value, so it must not reach the merge below. Stripped here and
+              # not in `stripListMarker`, which the other two branches and
+              # `kubeAttrsToLists` share.
+              stripEntries =
+                value:
+                removeAttrs value [
+                  "_type"
+                  replaceWhereKey
+                ];
+
+              # Every label any definition writes. Not the merged entries: the
+              # merge happens per label, below, and it needs the matched
+              # element, which needs the label resolved first.
+              labels = lib.unique (concatMap (def: attrNames (stripEntries def.value)) replaceDefs);
+
+              # The definitions of one label, each keeping the file it came
+              # from so a conflict names the right module.
+              bodiesFor =
+                label:
+                concatMap (
+                  def:
+                  lib.optional ((stripEntries def.value) ? ${label}) (
+                    def // { value = (stripEntries def.value).${label}; }
+                  )
+                ) replaceDefs;
+
+              # A label may carry a predicate, from `mkReplaceWhere`. Collect
+              # them per label across the definitions. Two of them cannot be
+              # merged -- nothing compares two functions -- so more than one is
+              # an error rather than a winner.
+              # The predicates given for a label, ignoring the value-only
+              # entries that record the label with a null.
+              wheresFor =
+                label:
+                filter (where: where != null) (
+                  concatMap (
+                    def:
+                    lib.optional (
+                      (def.value.${replaceWhereKey} or { }) ? ${label}
+                    ) def.value.${replaceWhereKey}.${label}
+                  ) replaceDefs
+                );
+              # Does any definition address this label by a predicate at all,
+              # including one that only overrides the value?
+              whereKeyed = label: any (def: (def.value.${replaceWhereKey} or { }) ? ${label}) replaceDefs;
+              # A label that one definition gives a predicate and another gives
+              # as a plain key. The plain key means "match by prefix", so using
+              # the predicate would silently change what that definition asked
+              # for.
+              plainlyKeyed =
+                label:
+                any (
+                  def: (stripEntries def.value) ? ${label} && !((def.value.${replaceWhereKey} or { }) ? ${label})
+                ) replaceDefs;
 
               indices = lib.genList (i: i) (lib.length base);
               # Every key matches against the plain list, never against the
               # result of the key before it. Thus the replacements happen at
               # the same time and their order cannot matter.
-              matchesOf = key: filter (index: lib.hasPrefix key (lib.elemAt base index)) indices;
-              matched = map (key: {
-                inherit key;
-                matches = matchesOf key;
-              }) (attrNames replacements);
+              #
+              # `addErrorContext` because the predicate is the user's function
+              # and it meets every element: `o: o.key == "x"` against a string
+              # otherwise dies with "value is a string while a set was
+              # expected" and names neither the label nor the element.
+              matchesOf =
+                label: predicate:
+                filter (
+                  index:
+                  let
+                    element = lib.elemAt base index;
+                  in
+                  builtins.addErrorContext "while testing the mkReplaceWhere predicate `${label}' against ${builtins.toJSON element}" (
+                    predicate element
+                  )
+                ) indices;
+              labelled = map (
+                label:
+                let
+                  wheres = wheresFor label;
+                in
+                {
+                  inherit label wheres;
+                  explicit = whereKeyed label;
+                  mixed = whereKeyed label && plainlyKeyed label;
+                }
+              ) labels;
+
+              tooManyWheres = filter (entry: lib.length entry.wheres > 1) labelled;
+              mixedKeying = filter (entry: entry.mixed) labelled;
+              # A label addressed by a predicate that nobody ever supplied:
+              # every definition of it set only a `value'.
+              whereless = filter (entry: entry.explicit && entry.wheres == [ ]) labelled;
+              # A label with no predicate matches by the start of its own name.
+              # That is `mkReplaceList`, and it is why this branch reads a list
+              # of strings unless every label carries a predicate.
+              prefixKeyed = filter (entry: !entry.explicit) labelled;
+
+              matched = map (entry: {
+                key = entry.label;
+                matches =
+                  if entry.explicit then
+                    matchesOf entry.label (lib.head entry.wheres)
+                  else
+                    matchesOf entry.label (element: lib.isString element && lib.hasPrefix entry.label element);
+              }) labelled;
 
               unmatched = filter (entry: entry.matches == [ ]) matched;
               ambiguous = filter (entry: lib.length entry.matches > 1) matched;
@@ -329,7 +421,7 @@ let
             if plainDefs == [ ] then
               throw ''
                 The option `${lib.showOption loc}' has an mkReplaceList definition
-                and no list to replace in: ${lib.concatStringsSep ", " (attrNames replacements)}.
+                and no list to replace in: ${lib.concatStringsSep ", " labels}.
 
                 mkReplaceList patches a list that another module already defines.
                 It does not define one. Two causes give this: the list is not set
@@ -337,14 +429,51 @@ let
                 it. mkReplaceList needs no mkForce, because it replaces an element
                 rather than defining one.
               ''
-            else if any (element: !(lib.isString element)) base then
+            else if tooManyWheres != [ ] then
+              throw ''
+                The option `${lib.showOption loc}' has mkReplaceWhere labels defined
+                with a `where' more than once: ${
+                  lib.concatStringsSep ", " (map (entry: entry.label) tooManyWheres)
+                }.
+
+                Nothing compares two functions, so two predicates for one label
+                cannot be merged and neither can win. Give the two replacements
+                different labels, or keep one `where' and let the other
+                definition write `{ value = ...; }' with no `where'.
+              ''
+            else if whereless != [ ] then
+              throw ''
+                The option `${lib.showOption loc}' has mkReplaceWhere labels that
+                no definition gives a `where': ${lib.concatStringsSep ", " (map (entry: entry.label) whereless)}.
+
+                A `{ value = ...; }' entry overrides a label that another
+                definition addresses with a predicate. Here nothing does, so
+                there is nothing to match. Add the `where', or use an
+                mkReplaceList key.
+              ''
+            else if mixedKeying != [ ] then
+              throw ''
+                The option `${lib.showOption loc}' has labels that one definition
+                gives a `where' and another gives as a plain mkReplaceList key: ${
+                  lib.concatStringsSep ", " (map (entry: entry.label) mixedKeying)
+                }.
+
+                A plain key matches by the start of its own name. Taking the
+                predicate instead would silently change what that definition
+                asked for. Use one form for a given label.
+              ''
+            # Only when a label matches by its own name. A list of objects is
+            # exactly what `mkReplaceWhere` is for, so a predicate must be
+            # allowed to read one.
+            else if prefixKeyed != [ ] && any (element: !(lib.isString element)) base then
               throw ''
                 The option `${lib.showOption loc}' has an mkReplaceList definition,
                 and its list holds an element that is not a string.
 
                 mkReplaceList matches an element by the start of its own value, so
-                it only reads a list of strings. Use mkNamedList for a list of
-                objects with a `name', or mkNumberedList for one without.
+                it only reads a list of strings. Use mkReplaceWhere to match an
+                object with a predicate, mkNamedList for a list of objects with a
+                `name', or mkNumberedList for one without.
               ''
             else if unmatched != [ ] then
               throw ''
@@ -353,11 +482,17 @@ let
                   lib.concatMapStrings (
                     entry:
                     let
-                      # Forced only here, inside the throw. See `nearestElement`.
+                      # A predicate has no prefix to compare, and
+                      # `commonPrefixLength` reads a string, so an object list
+                      # would fail inside the error. Forced only here in either
+                      # case -- see `nearestElement`.
+                      explicit = (wheresFor entry.key) != [ ];
                       nearest = nearestElement entry.key base;
                     in
                     "\n  ${entry.key}${
-                      if nearest == null then
+                      if explicit then
+                        " -- no element satisfies its `where'"
+                      else if nearest == null then
                         " -- nothing in the list resembles it"
                       else
                         " -- the closest element is ${builtins.toJSON nearest}"
@@ -365,9 +500,10 @@ let
                   ) unmatched
                 }
 
-                A key is the start of the element it replaces. A key that matches
-                nothing is an error and not a no-op, because the alternative is a
-                component that looks patched and is not.
+                A key is the start of the element it replaces, or a `where' is a
+                predicate over it. One that matches nothing is an error and not a
+                no-op, because the alternative is a component that looks patched
+                and is not.
 
                 The list holds:${showList}
               ''
@@ -391,25 +527,55 @@ let
                 The list holds:${showList}
               ''
             else
+              let
+                # **The element is a definition of the entry, not something the
+                # body is pasted over.** One `mergeDefinitions` per label, with
+                # the matched element first, so the module system does the
+                # whole job: a body naming three fields of four leaves the
+                # fourth alone, two modules writing one field conflict with a
+                # message that names it, and `mkForce` on the body drops the
+                # element and takes its place whole.
+                #
+                # The element goes in leaf by leaf at `mkOptionDefault`, so the
+                # body outranks it with no `mkForce` at the call site -- which
+                # is the marker's reason to exist. Wrapping the element whole
+                # instead would let `filterOverrides` discard it entirely, and
+                # a partial body would silently lose the other three fields.
+                # A list is one leaf: a body's list replaces the element's
+                # rather than appending to it, which `listOf` would do.
+                asDefault =
+                  v: if lib.isAttrs v && !(v ? _type) then lib.mapAttrs (_: asDefault) v else lib.mkOptionDefault v;
+
+                entryEvaluation =
+                  index: label:
+                  lib.modules.mergeDefinitions (loc ++ [ label ]) elemType (
+                    [
+                      {
+                        file = (lib.head plainDefs).file;
+                        value = asDefault (lib.elemAt base index);
+                      }
+                    ]
+                    ++ bodiesFor label
+                  );
+              in
               {
                 headError = checkDefsForError check defs;
                 value = lib.imap0 (
                   index: element:
                   let
-                    key = byIndex.${toString index} or null;
+                    label = byIndex.${toString index} or null;
                   in
-                  if key == null then element else replacements.${key}
+                  if label == null then element else (entryEvaluation index label).mergedValue
                 ) base;
                 # One entry per element, the same invariant the other branches
-                # keep. A replaced element takes the metadata of the definition
-                # that replaced it, because that is the file a reader has to
-                # open to change it.
+                # keep. A replaced element takes the metadata of the merge that
+                # produced it, which names every file that contributed.
                 valueMeta.list = lib.imap0 (
                   index: meta:
                   let
-                    key = byIndex.${toString index} or null;
+                    label = byIndex.${toString index} or null;
                   in
-                  if key == null then meta else replaceEvaluation.checkedAndMerged.valueMeta.attrs.${key}
+                  if label == null then meta else (entryEvaluation index label).checkedAndMerged.valueMeta
                 ) baseEvaluation.checkedAndMerged.valueMeta.list;
               }
           else
@@ -544,7 +710,7 @@ let
     untypedType
   ];
   valueType = baseType // {
-    description = "Kubernetes-shaped JSON value (plain JSON, plus explicit mkNamedList/mkNumberedList/mkReplaceList override-by-name/index/content support)";
+    description = "Kubernetes-shaped JSON value (plain JSON, plus explicit mkNamedList/mkNumberedList/mkReplaceList/mkReplaceWhere override-by-name/index/prefix/predicate support)";
     emptyValue.value = null;
   };
 in

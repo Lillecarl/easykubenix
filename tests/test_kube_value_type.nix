@@ -407,6 +407,160 @@ let
     }
   ];
 
+  # The general form. A toleration has no `name` and no stable index, and its
+  # elements are objects, so neither of the other markers reaches it and
+  # `mkReplaceList` cannot match by content.
+  replaceWhereMatchesAnObject = evalValue [
+    {
+      value.tolerations = [
+        {
+          key = "node-role.kubernetes.io/control-plane";
+          operator = "Exists";
+          effect = "NoSchedule";
+        }
+        {
+          key = "dedicated";
+          operator = "Exists";
+        }
+      ];
+    }
+    {
+      # One field of several. The rest of the element must survive, and no
+      # `mkForce` is needed to change a field the element already sets: the
+      # element joins the merge as a default.
+      value.tolerations = lib.mkReplaceWhere {
+        control-plane = {
+          where = toleration: (toleration.key or null) == "node-role.kubernetes.io/control-plane";
+          value.effect = "NoExecute";
+        };
+      };
+    }
+  ];
+
+  # `mkForce` on the body drops the element and takes its place whole. That is
+  # the wholesale form, and it is also how a field is lost by accident, so it
+  # is pinned here rather than left to be rediscovered.
+  replaceWhereMkForceReplacesWholesale = evalValue [
+    {
+      value.tolerations = [
+        {
+          key = "cp";
+          operator = "Exists";
+          effect = "NoSchedule";
+        }
+      ];
+    }
+    {
+      value.tolerations = lib.mkReplaceWhere {
+        cp = {
+          where = toleration: (toleration.key or null) == "cp";
+          value = lib.mkForce { effect = "NoExecute"; };
+        };
+      };
+    }
+  ];
+
+  # A body may add a field the element does not have, the same as any other
+  # definition of an object.
+  replaceWhereAddsAField = evalValue [
+    {
+      value.tolerations = [
+        {
+          key = "cp";
+          operator = "Exists";
+        }
+      ];
+    }
+    {
+      value.tolerations = lib.mkReplaceWhere {
+        cp = {
+          where = toleration: (toleration.key or null) == "cp";
+          value.tolerationSeconds = 30;
+        };
+      };
+    }
+  ];
+
+  # Not object-only. A predicate reads a string too, which is what makes
+  # `mkReplaceList` a special case of this rather than a separate mechanism.
+  replaceWhereMatchesAString = evalValue [
+    {
+      value.args = [
+        "--alpha=1"
+        "--beta=2"
+      ];
+    }
+    {
+      value.args = lib.mkReplaceWhere {
+        ends-in-two = {
+          where = element: lib.hasSuffix "=2" element;
+          value = "--beta=3";
+        };
+      };
+    }
+  ];
+
+  # Both forms on one field, with distinct labels. They share one marker and
+  # one merge, so this is an ordinary attribute-set merge.
+  replaceWhereAndReplaceListCompose = evalValue [
+    {
+      value.args = [
+        "--alpha=1"
+        "--beta=2"
+      ];
+    }
+    { value.args = lib.mkReplaceList { "--alpha=" = "--alpha=9"; }; }
+    {
+      value.args = lib.mkReplaceWhere {
+        beta = {
+          where = element: lib.hasPrefix "--beta=" element;
+          value = "--beta=9";
+        };
+      };
+    }
+  ];
+
+  # A property belongs on `value`, and the module system discharges it there
+  # exactly as it does for a named-list entry.
+  replaceWhereValueTakesMkForce = evalValue [
+    {
+      value.args = [
+        "--alpha=1"
+        "--beta=2"
+      ];
+    }
+    {
+      value.args = lib.mkReplaceWhere {
+        alpha = {
+          where = element: lib.hasPrefix "--alpha=" element;
+          value = "--alpha=2";
+        };
+      };
+    }
+    {
+      # No `where': the label is already addressed by the module above, and
+      # two predicates for one label cannot be merged.
+      value.args = lib.mkReplaceWhere {
+        alpha.value = lib.mkForce "--alpha=3";
+      };
+    }
+  ];
+
+  # Two definitions of one replacement that agree merge in silence, the way
+  # two agreeing definitions of anything else do. The guard on a rewrite of
+  # this branch: it is the case that breaks if the element ever enters the
+  # merge at an ordinary priority.
+  replaceSameKeySameValueMerges = evalValue [
+    {
+      value.args = [
+        "--alpha=1"
+        "--beta=1"
+      ];
+    }
+    { value.args = lib.mkReplaceList { "--alpha=" = "--alpha=2"; }; }
+    { value.args = lib.mkReplaceList { "--alpha=" = "--alpha=2"; }; }
+  ];
+
   # `mkMerge` is the list form of the marker. The module system expands it
   # into one definition per element before this type sees them, so several
   # replacement sets compose without the marker taking a list of its own.
@@ -1124,6 +1278,107 @@ let
     { value.args = lib.mkReplaceList { "--a=" = "--a=3"; }; }
   ];
 
+  # Two predicates for one label. Nothing compares two functions, so neither
+  # can win and a silent pick is the worst answer.
+  replaceWhereTwicePredicatedThrows = evalValue [
+    {
+      value.args = [
+        "--alpha=1"
+        "--beta=2"
+      ];
+    }
+    {
+      value.args = lib.mkReplaceWhere {
+        it = {
+          where = element: lib.hasPrefix "--alpha=" element;
+          value = "--alpha=2";
+        };
+      };
+    }
+    {
+      value.args = lib.mkReplaceWhere {
+        it = {
+          where = element: lib.hasPrefix "--beta=" element;
+          value = "--beta=3";
+        };
+      };
+    }
+  ];
+
+  # One definition addresses the label with a predicate, the other writes it
+  # as a plain mkReplaceList key. The plain key means "match by the start of
+  # this name", so taking the predicate would change what it asked for.
+  replaceWhereMixedWithAPlainKeyThrows = evalValue [
+    {
+      value.args = [
+        "--alpha=1"
+        "--beta=2"
+      ];
+    }
+    {
+      value.args = lib.mkReplaceWhere {
+        "--alpha=" = {
+          where = element: lib.hasPrefix "--beta=" element;
+          value = "--beta=3";
+        };
+      };
+    }
+    { value.args = lib.mkReplaceList { "--alpha=" = "--alpha=2"; }; }
+  ];
+
+  # A value-only entry overrides a label another definition predicates. With
+  # no such definition there is nothing to match.
+  replaceWhereValueOnlyAloneThrows = evalValue [
+    {
+      value.args = [
+        "--alpha=1"
+        "--beta=2"
+      ];
+    }
+    { value.args = lib.mkReplaceWhere { alpha.value = "--alpha=2"; }; }
+  ];
+
+  # `mkReplaceList` still refuses a list of objects and now names the third
+  # exit. A predicate is what reads an object.
+  replaceListOnObjectsNamesMkReplaceWhere = evalValue [
+    { value.tolerations = [ { key = "a"; } ]; }
+    { value.tolerations = lib.mkReplaceList { "a" = "b"; }; }
+  ];
+
+  # A predicate that matches nothing says so, and offers no closest element:
+  # there is no prefix to compare.
+  replaceWhereMatchesNothingThrows = evalValue [
+    {
+      value.args = [
+        "--alpha=1"
+        "--beta=2"
+      ];
+    }
+    {
+      value.args = lib.mkReplaceWhere {
+        gamma = {
+          where = element: lib.hasPrefix "--gamma=" element;
+          value = "--gamma=1";
+        };
+      };
+    }
+  ];
+
+  mkReplaceWhereRejectsNonAttrsInput = lib.mkReplaceWhere [ { value = "x"; } ];
+  mkReplaceWhereRejectsANonFunctionWhere = lib.mkReplaceWhere {
+    a = {
+      where = "not-a-function";
+      value = "x";
+    };
+  };
+  # `mkIf` on the pair replaces it with a marker carrying no `value`.
+  mkReplaceWhereRejectsAPropertyOnThePair = lib.mkReplaceWhere {
+    a = lib.mkIf true {
+      where = element: element == "x";
+      value = "y";
+    };
+  };
+
   mkReplaceListRejectsNonAttrsInput = lib.mkReplaceList [ "--a" ];
   mkReplaceListRejectsTheEmptyKey = lib.mkReplaceList { "" = "--a"; };
 
@@ -1186,6 +1441,13 @@ in
     replaceMarkersComposeWithMkMerge
     replaceMergedWithItsOwnList
     replaceInsideMkMergeCanBeSwitchedOff
+    replaceSameKeySameValueMerges
+    replaceWhereMatchesAnObject
+    replaceWhereMkForceReplacesWholesale
+    replaceWhereAddsAField
+    replaceWhereMatchesAString
+    replaceWhereAndReplaceListCompose
+    replaceWhereValueTakesMkForce
     ;
   inherit namedListOverrideViaMkNamedList;
   inherit plainListOfNamedThingsNeverAutoConverted;
@@ -1269,6 +1531,14 @@ in
   untypedTwiceThrows = untypedTwiceThrows;
   replaceKeyMatchesNothingThrows = replaceKeyMatchesNothingThrows;
   replaceNoMatchNamesTheClosestElement = replaceNoMatchNamesTheClosestElement;
+  replaceWhereTwicePredicatedThrows = replaceWhereTwicePredicatedThrows;
+  replaceWhereMixedWithAPlainKeyThrows = replaceWhereMixedWithAPlainKeyThrows;
+  replaceWhereValueOnlyAloneThrows = replaceWhereValueOnlyAloneThrows;
+  replaceListOnObjectsNamesMkReplaceWhere = replaceListOnObjectsNamesMkReplaceWhere;
+  replaceWhereMatchesNothingThrows = replaceWhereMatchesNothingThrows;
+  mkReplaceWhereRejectsNonAttrsInput = mkReplaceWhereRejectsNonAttrsInput;
+  mkReplaceWhereRejectsANonFunctionWhere = mkReplaceWhereRejectsANonFunctionWhere;
+  mkReplaceWhereRejectsAPropertyOnThePair = mkReplaceWhereRejectsAPropertyOnThePair;
   replaceNoMatchWithNothingSimilar = replaceNoMatchWithNothingSimilar;
   replaceKeyMatchesTwoThrows = replaceKeyMatchesTwoThrows;
   replaceTwoKeysOnOneElementThrows = replaceTwoKeysOnOneElementThrows;

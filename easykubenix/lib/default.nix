@@ -194,6 +194,13 @@ self: lib: rec {
   # merge already takes. A list argument here would merge by concatenation
   # instead of by key, and thus lose the conflict two modules get today when
   # they replace one element with two different values.
+  #
+  # **Sugar over `mkReplaceWhere`, and deliberately not a call to it.** The
+  # two share one marker and one merge, where a key with no predicate takes
+  # the prefix matcher built from itself. Writing an explicit predicate here
+  # instead would give every key a `_where`, and two modules replacing one
+  # flag would then collide on the predicate before the module system ever
+  # compared their values -- losing the conflict message that names the key.
   mkReplaceList =
     attrs:
     if !lib.isAttrs attrs then
@@ -203,6 +210,86 @@ self: lib: rec {
       throw "mkReplaceList error: The empty key matches every element. Give the start of the element to replace."
     else
       attrs // { _type = replaceListType; };
+
+  # The reserved key that carries a replacement's predicate.
+  #
+  # A predicate is a function, and `ekn.lib.kubeValueType` rejects a function
+  # as a value. So a `where` cannot live in the entry beside its replacement:
+  # the entries merge through the module system, and it would reach
+  # `attrsOf`. It lives under this key instead, which the replace branch
+  # removes before it merges anything. See kubeValueType.nix.
+  replaceWhereKey = "_where";
+
+  # Mark an attribute set as a list of replacements, each one addressed by a
+  # predicate over the element it replaces.
+  #
+  #     tolerations = lib.mkReplaceWhere {
+  #       control-plane = {
+  #         where = toleration: (toleration.key or null) == "node-role.kubernetes.io/control-plane";
+  #         value = { key = "..."; operator = "Exists"; effect = "NoSchedule"; };
+  #       };
+  #     };
+  #
+  # The attribute name is a label. It names the replacement in an error, and
+  # it is what two definitions of the same replacement merge on. It is not
+  # matched against anything, unlike `mkReplaceList`'s key.
+  #
+  # **`value` merges over the element it matched, and does not simply take its
+  # place.** The element joins the merge as a default, leaf by leaf, so:
+  #
+  #   * a `value` naming three fields of a four-field object leaves the fourth
+  #     alone, the way an `mkNamedList` entry does;
+  #   * a field the element already sets is overridden, with no `mkForce` --
+  #     the element is a default, and that is the whole point of the marker;
+  #   * `value = mkForce { ... }` drops the element and takes its place whole.
+  #     **That loses every field the body does not name**, which is what makes
+  #     it the wholesale form and also the way to lose a field by accident;
+  #   * a `value` of a string replaces the string, because a string is one
+  #     leaf and the body outranks the default under it.
+  #
+  # `mkDefault` on the body still beats the element: 1000 is stronger than the
+  # element's 1500. The rule is that the body wins unless the body is itself
+  # `mkOptionDefault`.
+  #
+  # This is the general form. `mkReplaceList` is the short one for the common
+  # case, and the two share this marker and one merge: an entry with no
+  # predicate takes the prefix matcher built from its key. Both may appear on
+  # one field, with distinct labels.
+  mkReplaceWhere =
+    attrs:
+    if !lib.isAttrs attrs then
+      throw "mkReplaceWhere error: Input must be an attribute set."
+    else
+      let
+        bad = lib.filter (
+          label:
+          let
+            entry = attrs.${label};
+          in
+          !(lib.isAttrs entry) || !(entry ? value) || (entry ? where && !(lib.isFunction entry.where))
+        ) (lib.attrNames attrs);
+      in
+      if bad != [ ] then
+        throw ''
+          mkReplaceWhere error: each entry must be { where = <function>; value = <replacement>; },
+          with `where' optional when another module already gave one for that
+          label. These are not: ${lib.concatStringsSep ", " bad}.
+
+          A property belongs on the whole marker or inside `value', never on the
+          pair: `mkIf cond (mkReplaceWhere { ... })' or `value = mkForce x'. A
+          property on the pair replaces it with a marker of its own, which
+          carries no `value'.
+        ''
+      else
+        (lib.mapAttrs (_: entry: entry.value) attrs)
+        // {
+          _type = replaceListType;
+          # `null` for an entry that only overrides the value. The label still
+          # has to appear here, because that is what tells the merge this label
+          # is addressed by a predicate rather than by the start of its own
+          # name.
+          ${replaceWhereKey} = lib.mapAttrs (_: entry: entry.where or null) attrs;
+        };
 
   # Recursively traverses a data structure, applying a transformer function to each node.
   # The traversal is pre-order (top-down), meaning a node is transformed *before* its children.

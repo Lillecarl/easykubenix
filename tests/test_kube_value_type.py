@@ -720,3 +720,97 @@ class TestPrioritiesInsideAnEntry:
         # alone names a neighbour at random. Say nothing instead.
         with pytest.raises(nanopynix.NixError, match="nothing in the list resembles it"):
             await evaluate_file(NIX_TEST_FILE, "replaceNoMatchWithNothingSimilar")
+
+
+class TestReplaceWhere:
+    async def test_a_predicate_matches_an_object(self) -> None:
+        # A toleration has no `name` and no stable index, so neither other
+        # marker reaches it and a prefix cannot match an object.
+        #
+        # The body names one field of three. The other two survive, and the
+        # one it names needed no `mkForce`, because the element joins the
+        # merge as a default rather than as a rival definition.
+        result = await evaluate_file(NIX_TEST_FILE, "replaceWhereMatchesAnObject")
+        assert result == {
+            "tolerations": [
+                {
+                    "key": "node-role.kubernetes.io/control-plane",
+                    "operator": "Exists",
+                    "effect": "NoExecute",
+                },
+                {"key": "dedicated", "operator": "Exists"},
+            ]
+        }
+
+    async def test_mk_force_on_the_body_replaces_the_element_whole(self) -> None:
+        # The wholesale form, and the way to lose a field by accident: the
+        # element is dropped, so `key` and `operator` are gone.
+        result = await evaluate_file(NIX_TEST_FILE, "replaceWhereMkForceReplacesWholesale")
+        assert result == {"tolerations": [{"effect": "NoExecute"}]}
+
+    async def test_a_body_can_add_a_field_the_element_lacks(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "replaceWhereAddsAField")
+        assert result == {"tolerations": [{"key": "cp", "operator": "Exists", "tolerationSeconds": 30}]}
+
+    async def test_a_predicate_matches_a_string_too(self) -> None:
+        # Not object-only. This is what makes mkReplaceList a special case of
+        # mkReplaceWhere rather than a separate mechanism.
+        result = await evaluate_file(NIX_TEST_FILE, "replaceWhereMatchesAString")
+        assert result == {"args": ["--alpha=1", "--beta=3"]}
+
+    async def test_both_forms_compose_on_one_field(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "replaceWhereAndReplaceListCompose")
+        assert result == {"args": ["--alpha=9", "--beta=9"]}
+
+    async def test_a_value_only_entry_overrides_the_replacement(self) -> None:
+        # The override route: repeating the `where` would be two predicates
+        # for one label, which cannot merge. A bare `value` entry does it.
+        result = await evaluate_file(NIX_TEST_FILE, "replaceWhereValueTakesMkForce")
+        assert result == {"args": ["--alpha=3", "--beta=2"]}
+
+    async def test_two_predicates_for_one_label_throw(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="more than once"):
+            await evaluate_file(NIX_TEST_FILE, "replaceWhereTwicePredicatedThrows")
+
+    async def test_a_label_cannot_be_both_predicated_and_plainly_keyed(self) -> None:
+        # A plain key means "match by the start of this name". Taking the
+        # predicate instead would change what that definition asked for.
+        with pytest.raises(nanopynix.NixError, match="plain mkReplaceList key"):
+            await evaluate_file(NIX_TEST_FILE, "replaceWhereMixedWithAPlainKeyThrows")
+
+    async def test_a_value_only_entry_needs_something_to_override(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="no definition gives a `where'"):
+            await evaluate_file(NIX_TEST_FILE, "replaceWhereValueOnlyAloneThrows")
+
+    async def test_the_object_list_error_names_mk_replace_where(self) -> None:
+        # The non-string guard now fires only when a label matches by its own
+        # name, and it offers the predicate as the first exit.
+        with pytest.raises(nanopynix.NixError, match="Use mkReplaceWhere"):
+            await evaluate_file(NIX_TEST_FILE, "replaceListOnObjectsNamesMkReplaceWhere")
+
+    async def test_a_predicate_that_matches_nothing_says_so(self) -> None:
+        # No closest element for a predicate: there is no prefix to compare.
+        with pytest.raises(nanopynix.NixError, match="no element satisfies its `where'"):
+            await evaluate_file(NIX_TEST_FILE, "replaceWhereMatchesNothingThrows")
+
+    async def test_mk_replace_where_rejects_non_attrs_input(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="Input must be an attribute set"):
+            await evaluate_file(NIX_TEST_FILE, "mkReplaceWhereRejectsNonAttrsInput")
+
+    async def test_mk_replace_where_rejects_a_non_function_where(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="each entry must be"):
+            await evaluate_file(NIX_TEST_FILE, "mkReplaceWhereRejectsANonFunctionWhere")
+
+    async def test_mk_replace_where_rejects_a_property_on_the_pair(self) -> None:
+        # `mkIf` on the pair replaces it with a marker carrying no `value`,
+        # so the entry stops being a replacement at all.
+        with pytest.raises(nanopynix.NixError, match="each entry must be"):
+            await evaluate_file(NIX_TEST_FILE, "mkReplaceWhereRejectsAPropertyOnThePair")
+
+    async def test_two_agreeing_replacements_merge_quietly(self) -> None:
+        # Two definitions of one replacement that agree are not a conflict,
+        # the same as anywhere else in the module system. This is the guard
+        # on the merge: it breaks if the matched element ever enters at an
+        # ordinary priority instead of as a default.
+        result = await evaluate_file(NIX_TEST_FILE, "replaceSameKeySameValueMerges")
+        assert result == {"args": ["--alpha=2", "--beta=1"]}
