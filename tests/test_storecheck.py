@@ -102,7 +102,7 @@ class TestTheClosure:
         world = {"https://cache.nixos.org": {CACHE_ENV: {ABSENT}}}
 
         with pytest.raises(StorePathsUnavailableError, match="on no substituter"):
-            await assert_fetchable(OBJECTS, asking=(list(world), probe_from(world)))
+            await assert_fetchable(store_paths_in(OBJECTS), substituters=list(world), probe=probe_from(world))
 
     async def test_a_cycle_in_the_references_terminates(self) -> None:
         """A store path's references include itself, routinely."""
@@ -122,8 +122,9 @@ class TestTheThreeAnswersStayThree:
 
         with pytest.raises(StorePathsUnavailableError, match="could not answer") as caught:
             await assert_fetchable(
-                OBJECTS,
-                asking=(list(world), probe_from(world, broken={"https://cache.nixos.org"})),
+                store_paths_in(OBJECTS),
+                substituters=list(world),
+                probe=probe_from(world, broken={"https://cache.nixos.org"}),
             )
 
         assert "on no substituter" not in str(caught.value)
@@ -136,22 +137,28 @@ class TestTheThreeAnswersStayThree:
             "https://cache.nixos.org": {CACHE_ENV: set()},
         }
 
-        await assert_fetchable(OBJECTS, asking=(list(world), probe_from(world, broken={"https://down.example"})))
+        await assert_fetchable(
+            store_paths_in(OBJECTS),
+            substituters=list(world),
+            probe=probe_from(world, broken={"https://down.example"}),
+        )
 
     async def test_everything_fetchable_passes_quietly(self) -> None:
         world = {"https://cache.nixos.org": {CACHE_ENV: set()}}
 
-        await assert_fetchable(OBJECTS, asking=(list(world), probe_from(world)))
+        await assert_fetchable(store_paths_in(OBJECTS), substituters=list(world), probe=probe_from(world))
 
 
 class TestItFailsClosed:
-    async def test_no_substituters_refuses_rather_than_passing(self) -> None:
-        """Asking nothing passes everything, which reads as a healthy
-        cluster and is the opposite of what this guard is for."""
-        with pytest.raises(NoSubstitutersError, match="names no substituter"):
-            await assert_fetchable(OBJECTS, asking=([], probe_from({})))
+    async def test_paths_but_no_substituters_refuses_rather_than_passing(self) -> None:
+        """`ekn.assertCached = [ ]` turns the check off at the call site, so
+        reaching here with paths and no substituter is a caller's mistake.
+        Asking nothing passes everything, which reads as a healthy cluster
+        and is the opposite of what this guard is for."""
+        with pytest.raises(NoSubstitutersError, match="no substituter was named"):
+            await assert_fetchable(store_paths_in(OBJECTS), substituters=[], probe=probe_from({}))
 
     async def test_objects_naming_no_store_path_need_no_substituter(self) -> None:
-        """Nothing to assert, so an instance with no CSI-backed store does
-        not have to configure one to turn the check on."""
-        await assert_fetchable([{"kind": "ConfigMap"}], asking=([], probe_from({})))
+        """Nothing to assert. An instance whose objects name no store path
+        does not have to configure a cache to have the check on."""
+        await assert_fetchable(store_paths_in([{"kind": "ConfigMap"}]), substituters=[], probe=probe_from({}))

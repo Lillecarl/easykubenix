@@ -241,16 +241,23 @@ in
     };
 
     assertCached = lib.mkOption {
-      type = lib.types.bool;
-      default = false;
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
       description = ''
-        Ask every configured substituter, **before applying anything**,
-        whether it can serve every store path this apply names. A path on
-        none of them refuses the apply.
+        Substituters to ask, **before applying anything**, whether they can
+        serve every store path this apply names. A path on none of them
+        refuses the apply.
 
-        Off by default, which is right for an instance with no CSI-backed
-        store: there is nothing to assert and it should not pay for the
-        check.
+        Empty by default, which turns the check off. That is right for an
+        instance with no CSI-backed store: there is nothing to assert and it
+        should not pay for the check.
+
+        **Name the caches the nodes carry.** Not the ones the deploying
+        machine happens to have configured -- those are usually more, and a
+        path only the deployer can fetch passes a check and then fails to
+        mount. easykubenix knows nothing about any particular cluster, so it
+        sets nothing here; the module that deploys the store server is the
+        one that knows, and it names its own list.
 
         **What it is for.** A CSI-mounted store path can only be
         substituted -- a node cannot build it, because the volume names an
@@ -258,11 +265,8 @@ in
         node, minutes later and well away from the apply that caused it.
         Asserting first turns that into a refusal with the path named.
 
-        **The list is Nix's own `substituters` setting**, read by `ekn` at
-        apply time. It is not an option here, because a second list is a
-        list that drifts. `ekn` never consults the local store, only those
-        substituters, so a path this machine happens to have built does not
-        pass.
+        `ekn` never consults the local store, only these substituters, so a
+        path this machine happens to have built does not pass.
 
         `ekn` walks the whole closure rather than the named paths, which is
         the shape that actually bites -- a present top path whose closure
@@ -287,15 +291,15 @@ in
         That report is not simply a false positive. It is the same shape as
         the outage this guard exists for: a path whose only source is a
         workload in the cluster is available exactly as long as that
-        workload is. Adding pynixd to `nix.settings.substituters` here would
-        make the answer pass and the fragility invisible, which is why the
-        list asked should be the substituters a node can rely on *without*
-        the cluster already being healthy.
+        workload is. Naming pynixd here would make the answer pass and the
+        fragility invisible, which is why this list should be the
+        substituters a node can rely on *without* the cluster already being
+        healthy.
 
         This is the guard, not the fix. It does not push anything; see
         `ekn.cacheTo`.
       '';
-      example = true;
+      example = [ "https://nixkube.cachix.org" ];
     };
 
     cachePackage = lib.mkOption {

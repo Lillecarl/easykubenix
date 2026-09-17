@@ -14,12 +14,16 @@ mounts, so the store server could not start, and the push that would have
 fixed it goes *through* the store server. Nothing would have written a test
 for that; a precondition catches it without having to.
 
-**The check is here, and the substituters come from Nix.** It used to run
-an external program and read its exit code, with the list baked into that
-program. `ekn` already opens a store by URI through nanopynix -- see
-`push_closure_to_store` -- so the work belongs here, and Nix already knows
-which substituters it has, so nothing declares a second list that can
-drift. `ekn.assertCached` is a boolean. See issue #37.
+**The substituters come from `ekn.assertCached`, and easykubenix sets
+nothing there.** The right list is the one the *nodes* carry, and only the
+module deploying the store server knows it. nixkube's is one cache while
+the machine deploying it usually has three, so reading the deploying
+machine's own Nix settings would pass a path that no node can fetch -- the
+exact failure this guards. Empty means off.
+
+The work is here, rather than in a separate program, because `ekn` already
+opens a store by URI through nanopynix -- see `push_closure_to_store`. An
+exit code carries three states and no detail. See issue #37.
 
 The three answers a substituter can give stay three, because nanopynix
 keeps them apart:
@@ -79,14 +83,20 @@ class Verdict:
     unclear: Mapping[str, str]
 
 
-def store_paths_in(objects: Sequence[dict[str, Any]]) -> set[str]:
-    """Every store path these objects name, as `<digest>-<name>`.
+def store_paths_in_text(text: str) -> set[str]:
+    """Every store path this text names, as `<digest>-<name>`."""
+    return {match.group(1) for match in STORE_PATH.finditer(text)}
 
-    Read from the objects this apply sends, not from the rendered manifest
-    derivation: a `--target` slice is not what `ekn.cachePackage` covers,
-    and a seed rewrites an object's data before it goes out.
+
+def store_paths_in(objects: Sequence[dict[str, Any]]) -> set[str]:
+    """Every store path these objects name.
+
+    A caller with the objects in hand should use this rather than the
+    rendered manifest derivation: a `--target` slice is not what
+    `ekn.cachePackage` covers, and a seed rewrites an object's data before
+    it goes out.
     """
-    return {match.group(1) for match in STORE_PATH.finditer(json.dumps(objects))}
+    return store_paths_in_text(json.dumps(objects))
 
 
 async def walk(
@@ -142,18 +152,13 @@ async def walk(
 
 
 @asynccontextmanager
-async def nanopynix_probe() -> AsyncIterator[tuple[list[str], Probe]]:
-    """Nix's own substituters, and a `Probe` backed by them.
+async def nanopynix_probe(substituters: Sequence[str]) -> AsyncIterator[Probe]:
+    """A `Probe` backed by the given stores, each opened once.
 
-    The list is read from Nix rather than declared in easykubenix, because
-    a second list is a list that drifts.
-
-    Each store is opened once, and not per level: a store per level
-    reconnects an `ssh-ng` substituter every time.
+    Once, and not per level: a store per level reconnects an `ssh-ng`
+    substituter every time.
     """
     async with Session() as session, AsyncExitStack() as stack:
-        settings = await session.settings()
-        substituters = settings.get("substituters", "").split()
         stores = {uri: await stack.enter_async_context(session.store(uri=uri)) for uri in substituters}
 
         async def probe(uri: str, base_name: str) -> tuple[set[str] | None, str | None]:
@@ -169,67 +174,64 @@ async def nanopynix_probe() -> AsyncIterator[tuple[list[str], Probe]]:
                 return None, f"{uri}: {exc}"
             return {reference.removeprefix("/nix/store/") for reference in info.references}, None
 
-        yield substituters, probe
+        yield probe
 
 
 class NoSubstitutersError(RuntimeError):
-    """Nix names no substituter, so the check would pass everything."""
+    """No substituter was named, so the check would pass everything."""
 
 
 async def assert_fetchable(
-    objects: Sequence[dict[str, Any]],
+    roots: set[str],
     *,
+    substituters: Sequence[str],
     jobs: int = DEFAULT_JOBS,
-    asking: tuple[Sequence[str], Probe] | None = None,
+    probe: Probe | None = None,
 ) -> None:
-    """Refuse unless every store path `objects` names can be fetched.
+    """Refuse unless every path in the closure of `roots` can be fetched.
 
-    `asking` exists so the walk -- the part with the union and the
+    `probe` exists so the walk -- the part with the union and the
     three-way answer in it -- is testable without a store.
     """
-    roots = store_paths_in(objects)
     if not roots:
-        _log.info("no store paths to assert", objects=len(objects))
+        _log.info("no store paths to assert")
         return
 
-    async with AsyncExitStack() as stack:
-        if asking is None:
-            asking = await stack.enter_async_context(nanopynix_probe())
-        substituters, probe = asking
-
-        if not substituters:
-            # Fails closed. Asking nothing passes everything, which reads as
-            # a healthy cluster and is the opposite of what this guard is for.
-            raise NoSubstitutersError(
-                "refusing to apply: ekn.assertCached is on and Nix names no substituter, "
-                "so the check would pass every path without asking anything. Set "
-                "nix.settings.substituters, or turn ekn.assertCached off."
-            )
-
-        _log.info(
-            "asserting every store path is fetchable",
-            paths=len(roots),
-            substituters=list(substituters),
+    if not substituters:
+        # Fails closed. Asking nothing passes everything, which reads as a
+        # healthy cluster and is the opposite of what this check is for.
+        raise NoSubstitutersError(
+            "no substituter was named, so the check would pass every path without asking "
+            "anything. Name the caches the nodes carry, with --substituter."
         )
+
+    _log.info(
+        "asserting every store path is fetchable",
+        paths=len(roots),
+        substituters=list(substituters),
+    )
+
+    async with AsyncExitStack() as stack:
+        if probe is None:
+            probe = await stack.enter_async_context(nanopynix_probe(substituters))
         verdict = await walk(roots, substituters, probe, jobs=jobs)
 
     if verdict.unclear:
         detail = "\n".join(f"  {name}: {why}" for name, why in sorted(verdict.unclear.items())[:10])
         raise StorePathsUnavailableError(
-            f"refusing to apply: the store-path check could not answer for "
-            f"{len(verdict.unclear)} path(s).\n{detail}\n"
+            f"the store-path check could not answer for {len(verdict.unclear)} path(s).\n{detail}\n"
             f"This is a broken check rather than a missing path -- a substituter that will not "
-            f"answer needs a different fix from one that is missing a path. Applying anyway would "
-            f"be applying without the guard."
+            f"answer needs a different fix from one that is missing a path. Treating it as a pass "
+            f"would be going ahead without the guard."
         )
 
     if verdict.missing:
         detail = "\n".join(f"  /nix/store/{name}" for name in sorted(verdict.missing))
         raise StorePathsUnavailableError(
-            f"refusing to apply: {len(verdict.missing)} of {len(verdict.reachable)} paths in the "
-            f"closure are on no substituter.\n{detail}\n"
+            f"{len(verdict.missing)} of {len(verdict.reachable)} paths in the closure are on no "
+            f"substituter.\n{detail}\n"
             f"A node cannot build these -- a CSI volume names an output path, so it can only be "
-            f"substituted. Push them first (see ekn.cacheTo), then apply."
+            f"substituted. Push them first (see ekn.cacheTo)."
         )
 
     _log.info("store paths are fetchable", paths=len(verdict.reachable))

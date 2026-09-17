@@ -218,11 +218,10 @@ class KubeApplyConfigResult(BaseModel):
     #: ordinary shape for an instance with no GitOps engine; `--pause-engine`
     #: refuses rather than silently pausing nothing. See `enginepause`.
     engine_pause: list[EngineWorkload] = Field(default_factory=list, alias="enginePause")
-    #: `ekn.assertCached` -- whether to refuse an apply naming a store path
-    #: no substituter can serve. Off is right for an instance with no
-    #: CSI-backed store. The substituters come from Nix, not from here; see
-    #: `storecheck.assert_fetchable`.
-    assert_cached: bool = Field(default=False, alias="assertCached")
+    #: `ekn.assertCached` -- the substituters to ask about every store path
+    #: this apply names. Empty is off, and right for an instance with no
+    #: CSI-backed store. See `storecheck.assert_fetchable`.
+    assert_cached: list[str] = Field(default_factory=list, alias="assertCached")
     #: `deployment.unitFieldManagers` -- unit name to its `fieldManager`.
     #: Read **only while the engine is paused**; see `apply.field_manager_for`.
     unit_field_managers: dict[str, str] = Field(default_factory=dict, alias="unitFieldManagers")
@@ -1015,7 +1014,7 @@ async def evaluate_kubeapply_config(
         )
         ekn_opts = proxy.attr("ekn")
         assert_cached = (
-            await ekn_opts.attr("assertCached").to_python() if await ekn_opts.has_attr("assertCached") else False
+            await ekn_opts.attr("assertCached").to_python() if await ekn_opts.has_attr("assertCached") else []
         )
 
         return KubeApplyConfigResult.model_validate(

@@ -940,7 +940,7 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
     if cfg.assert_cached:
         sending = [spec for _group, plan in prepared for spec in plan.objects if _object_identity(spec) not in held]
         try:
-            await storecheck.assert_fetchable(sending)
+            await storecheck.assert_fetchable(storecheck.store_paths_in(sending), substituters=cfg.assert_cached)
         except (storecheck.StorePathsUnavailableError, storecheck.NoSubstitutersError) as exc:
             raise SystemExit(str(exc)) from exc
 
