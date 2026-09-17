@@ -1726,7 +1726,26 @@ def main() -> None:
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
         cache_logger_on_first_use=True,
     )
-    # Around `asyncio.run`, so the profile covers the whole command including
-    # the event loop's own frames. See `python_profile`.
+    asyncio.run(_run_profiled(command))
+
+
+async def _run_profiled(command: Command) -> None:
+    """Run the command with the profiler started inside the event loop.
+
+    **Inside the coroutine, not around `asyncio.run`.** pyinstrument records
+    which async context it started in. Started outside, every coroutine is
+    out-of-context and the whole wait lands in the loop's selector rather
+    than in the frame that issued it. Measured over ten 0.2s sleeps:
+
+      started outside   2.00s in selectors, 0.00s in the awaiting function
+      started inside    0.00s in selectors, 2.00s in the awaiting function
+
+    True whether the awaits are sequential or fanned out, so it is the
+    context and not the concurrency. `tests/test_profile.py` holds both arms.
+
+    Coverage is unchanged: `command.run()` is the whole command, and it is
+    what the profiler now wraps. cProfile is a global trace hook and does not
+    care either way; it loses only the loop's own set-up.
+    """
     with python_profile():
-        asyncio.run(command.run())
+        await command.run()

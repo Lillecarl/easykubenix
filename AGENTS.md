@@ -71,6 +71,18 @@ Three instruments, three blind spots. Pick by what you are asking.
   — per-function evaluator call counts. Deterministic under load, where a
   wall clock is not.
 
+**`pyinstrument` is not in the release build**, by design — a profiler
+belongs where you measure from, not in a closure a cluster fetches. A
+consumer repository whose shell takes `easykubenix.passthru.ekn` gets the
+"needs the `profile` extra" line; take `easykubenix.passthru.eknDevEnv`
+instead for a shell that can profile.
+
+**Start it inside the event loop.** pyinstrument records the async context it
+started in, so a profiler started around `asyncio.run` charges the whole wait
+to the loop's selector and nothing to the frame that awaited — measured 72%
+of a real `clusterdiff` in one `selectors.py:select`. `main` wraps
+`command.run()` for that reason; `tests/test_profile.py` holds both arms.
+
 **A call count is not a time.** Measured: removing ~30% of a render's
 evaluator calls bought 3.1% of the stage and 2.2% of the wall clock. State a
 saving in seconds or say "calls".
