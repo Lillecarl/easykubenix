@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import kr8s
 import structlog
@@ -200,40 +199,19 @@ async def ssa_apply(
 ) -> Manifest:
     """Server-side apply.
 
-    kr8s's `.patch()` only supports merge-patch/json-patch content types --
-    issue the PATCH ourselves with the `application/apply-patch+yaml`
-    content type `kubectl apply --server-side` uses, which the API server
-    accepts with a plain JSON body just as well as YAML.
-
     `dry_run=True` (used by `ekn clusterdiff`) asks the API server to
     compute and return the would-be-merged object without persisting
     anything -- `obj.raw` is left untouched in that case, since it isn't a
     real apply.
+
+    This used to build the PATCH by hand out of `call_api`, because kr8s's
+    `.patch()` covers merge-patch and json-patch only and had no form for
+    server-side apply at all. `APIObject.async_apply` is that form, carried
+    in the umbrella's kr8s fork for upstreaming. See issue #29.
     """
-    # kr8s.APIObject.api's property getter has no upstream return annotation
-    # (kr8s/_objects.py), so pyright can only infer a partially-Unknown union
-    # for it -- cast to the precise type its docstring/behavior guarantees.
-    api = cast("Api | None", obj.api)  # pyright: ignore[reportUnknownMemberType] -- kr8s APIObject.api getter has no upstream return annotation
-    if api is None:
-        raise RuntimeError("APIObject has no attached kr8s Api instance")
-    params = {"fieldManager": field_manager, "force": "true" if force else "false"}
-    if dry_run:
-        params["dryRun"] = "All"
-    # kr8s.Api.call_api's **kwargs has no upstream type annotation.
-    async with api.call_api(  # pyright: ignore[reportUnknownMemberType] -- kr8s Api.call_api's **kwargs has no upstream type annotation
-        "PATCH",
-        version=obj.version,
-        url=f"{obj.endpoint}/{obj.name}",
-        namespace=obj.namespace,
-        content=json.dumps(dict(obj.raw)),
-        headers={"Content-Type": "application/apply-patch+yaml"},
-        params=params,
-    ) as resp:
-        result: JsonValue = resp.json()
+    result: JsonValue = await obj.async_apply(field_manager=field_manager, force=force, dry_run=dry_run)
     if not isinstance(result, dict):
         raise TypeError(f"server-side apply response must be an object, got {type(result).__name__}")
-    if not dry_run:
-        obj.raw = result
     return result
 
 
