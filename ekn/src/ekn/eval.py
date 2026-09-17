@@ -213,6 +213,10 @@ class KubeApplyConfigResult(BaseModel):
     #: ordinary shape for an instance with no GitOps engine; `--pause-engine`
     #: refuses rather than silently pausing nothing. See `enginepause`.
     engine_pause: list[EngineWorkload] = Field(default_factory=list, alias="enginePause")
+    #: `ekn.assertCached`'s executable, or `None` when the instance declares
+    #: none -- which is right for one with no CSI-backed store. See
+    #: `storecheck.assert_fetchable`.
+    assert_cached: str | None = Field(default=None, alias="assertCached")
 
     @property
     def objects(self) -> list[dict[str, Any]]:
@@ -938,6 +942,13 @@ async def evaluate_kubeapply_config(
         engine_pause = (
             await deployment.attr("engine").attr("pause").to_python() if await deployment.has_attr("engine") else []
         )
+        # Already a string: `lib.getExe` runs on the Nix side, where the
+        # knowledge of `meta.mainProgram` lives. A store path, not built at
+        # evaluation time -- realised before it is run, like `ekn tofu`'s.
+        ekn_opts = proxy.attr("ekn")
+        assert_cached = (
+            await ekn_opts.attr("assertCachedExe").to_python() if await ekn_opts.has_attr("assertCachedExe") else None
+        )
 
         return KubeApplyConfigResult.model_validate(
             {
@@ -949,6 +960,7 @@ async def evaluate_kubeapply_config(
                 "declaredUnits": declared,
                 "apiMappings": await proxy.attr("kubernetes").attr("apiMappings").to_python(),
                 "enginePause": engine_pause,
+                "assertCached": assert_cached,
             }
         )
 

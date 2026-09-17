@@ -223,6 +223,58 @@ in
       example = 120;
     };
 
+    assertCached = lib.mkOption {
+      type = lib.types.nullOr lib.types.package;
+      default = null;
+      description = ''
+        A program `ekn` runs **before it applies anything**, given a file
+        naming every store path this apply is about to send. A non-zero exit
+        refuses the apply.
+
+        `null` disables it, which is right for an instance with no
+        CSI-backed store: there is nothing to assert and it should not pay
+        for the check.
+
+        **What it is for.** A CSI-mounted store path can only be
+        substituted -- a node cannot build it, because the volume names an
+        output path. So a path on no substituter is a mount that fails on a
+        node, minutes later and well away from the apply that caused it.
+        Asserting first turns that into a refusal with the path named.
+
+        The program must ask the substituters **the nodes carry**, not the
+        ones the deploying machine happens to have configured. A workstation
+        with the path in its own store passes a naive check while the
+        cluster still fails. nixkube's `assert-cached` is built for this and
+        bakes the list in from its own module; it walks the whole closure
+        rather than the named paths, which is the shape that actually bites
+        -- a present top path whose closure member is absent.
+
+        Exit codes are read, not just the sign: `1` means paths are missing,
+        `3` means a substituter would not answer. Both refuse, and `ekn`
+        says which, because a broken check and a missing path need different
+        fixes.
+
+        This is the guard, not the fix. It does not push anything; see
+        `ekn.cacheTo`.
+      '';
+      example = lib.literalExpression "nixkube.packages.\${system}.assert-cached";
+    };
+
+    assertCachedExe = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      readOnly = true;
+      default = if config.ekn.assertCached == null then null else lib.getExe config.ekn.assertCached;
+      defaultText = lib.literalExpression "lib.getExe ekn.assertCached";
+      description = ''
+        `ekn.assertCached`'s executable, as the string `ekn` runs.
+
+        Resolved here rather than in `ekn`, because `lib.getExe` is what
+        knows about `meta.mainProgram` and it belongs on the Nix side. A
+        store path, not built at evaluation time: `ekn` realises it before
+        running it, the same way `ekn tofu` realises `configFile`.
+      '';
+    };
+
     cachePackage = lib.mkOption {
       type = lib.types.package;
       default = config.internal.manifestJSONFile;

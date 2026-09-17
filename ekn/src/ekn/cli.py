@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, cast
@@ -21,7 +22,7 @@ from nanopynix.models import JsonValue
 from nanopynix.primops import from_yaml11_stream, from_yaml_stream, to_yaml
 from pydantic import TypeAdapter, ValidationError
 
-from ekn import enginepause, seeds
+from ekn import enginepause, seeds, storecheck
 from ekn._cli import Command, build_parser, complete, dispatch, opt, pos
 from ekn.apply import DEFAULT_DELIVERY_MANAGERS, apply_and_prune, prune_generation
 from ekn.clusterdiff import cluster_diff
@@ -852,6 +853,19 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
         seeds.report(plan.actions)
 
     held = held_by_engine_pause or set()
+
+    # After seed resolution and before the first apply. A seed rewrites an
+    # object's data, so checking earlier would assert paths this run is not
+    # the one sending -- and checking later would be checking after the
+    # damage.
+    if cfg.assert_cached is not None:
+        sending = [spec for _group, plan in prepared for spec in plan.objects if _object_identity(spec) not in held]
+        with tempfile.TemporaryDirectory(prefix="ekn-storecheck-") as scratch:
+            try:
+                await storecheck.assert_fetchable(sending, checker=cfg.assert_cached, scratch=Path(scratch))
+            except storecheck.StorePathsUnavailableError as exc:
+                raise SystemExit(str(exc)) from exc
+
     for group, plan in prepared:
         # Both halves, and neither is safe alone. Applying a paused workload
         # re-applies its replica count and wakes the engine mid-apply;
