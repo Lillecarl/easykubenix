@@ -58,16 +58,40 @@ class TofuError(RuntimeError):
     """A `tofu` invocation exited non-zero."""
 
 
-async def _run(unit: TofuUnit, workdir: Path, args: Sequence[str]) -> None:
-    """Run `tofu` with *args* in *workdir*, or raise.
+def _child_env() -> dict[str, str]:
+    """The environment `tofu` runs with: this one, plus `KUBE_CONFIG_PATH`.
 
     The environment is inherited whole and deliberately. Provider credentials
     (`AWS_PROFILE`, `GOOGLE_APPLICATION_CREDENTIALS`, ...) and `TF_VAR_*`
     reach OpenTofu that way by design, and a filtered environment would break
     every one of them.
+
+    **The one addition is two names for one file.** The `kubernetes` state
+    backend reads `KUBECONFIG`; the `kubernetes` *provider* reads
+    `KUBE_CONFIG_PATH`, because the rendered configuration leaves
+    `config_path` unset so the file is chosen at run time rather than baked
+    in. Setting only `KUBECONFIG` failed with a message naming neither:
+
+        Error: no configuration has been provided, try setting KUBERNETES_MASTER
+
+    So a `KUBECONFIG` naming a single file supplies the other. Issue #25.
+
+    `KUBECONFIG` may hold several paths separated by `os.pathsep`, which the
+    provider's single `config_path` cannot express -- OpenTofu has
+    `config_paths` for that, and picking one of the list here would choose
+    silently. A list is therefore left alone.
     """
+    env = dict(os.environ)
+    kubeconfig = env.get("KUBECONFIG", "")
+    if not env.get("KUBE_CONFIG_PATH") and kubeconfig and os.pathsep not in kubeconfig:
+        env["KUBE_CONFIG_PATH"] = kubeconfig
+    return env
+
+
+async def _run(unit: TofuUnit, workdir: Path, args: Sequence[str]) -> None:
+    """Run `tofu` with *args* in *workdir*, or raise."""
     _log.info(f"{unit.name}: tofu {' '.join(args)}")
-    process = await asyncio.create_subprocess_exec(unit.tofu, *args, cwd=str(workdir))
+    process = await asyncio.create_subprocess_exec(unit.tofu, *args, cwd=str(workdir), env=_child_env())
     code = await process.wait()
     if code != 0:
         raise TofuError(f"{unit.name}: tofu {' '.join(args)} exited {code}")
@@ -214,6 +238,7 @@ async def output(unit: TofuUnit, name: str, root: Path | None = None) -> str:
         name,
         cwd=str(workdir),
         stdout=asyncio.subprocess.PIPE,
+        env=_child_env(),
     )
     stdout, _ = await process.communicate()
     if process.returncode != 0:

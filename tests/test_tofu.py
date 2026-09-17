@@ -58,6 +58,12 @@ printf '%s %s\\n' "$(basename "$(pwd)")" "$*" >> "$TOFU_LOG"
 exit 1
 """
 
+#: Records the two kubeconfig variables the child was given, so a test can
+#: assert what reached OpenTofu rather than what this process holds.
+_ENV_RECORDER = """#!/bin/sh
+printf '%s|%s\\n' "${KUBECONFIG-unset}" "${KUBE_CONFIG_PATH-unset}" >> "$TOFU_LOG"
+exit 0
+"""
 
 #: What a real `tofu init` does when it cannot reach its backend: it creates
 #: `.terraform/`, then fails without writing a lock file.
@@ -362,6 +368,54 @@ async def test_prepare_re_inits_when_the_config_changed(
     await prepare(unit, root)
 
     assert (tmp_path / "calls").read_text().count("init") == 2
+
+
+class TestKubeConfigPath:
+    """The state backend reads `KUBECONFIG`, the `kubernetes` provider reads
+    `KUBE_CONFIG_PATH`, and setting only the first failed with a message
+    naming neither. Issue #25.
+    """
+
+    async def _child_saw(self, tmp_path: pathlib.Path) -> tuple[str, str]:
+        unit = _unit(tmp_path, "infra", _fake_tofu(tmp_path, "tofu", _ENV_RECORDER), {})
+        await prepare(unit, Path(tmp_path / "work"))
+        kubeconfig, kube_config_path = (tmp_path / "calls").read_text().splitlines()[0].split("|")
+        return kubeconfig, kube_config_path
+
+    async def test_a_single_kubeconfig_supplies_the_provider_variable(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
+        monkeypatch.setenv("KUBECONFIG", "/tmp/nixlab2.yaml")
+        monkeypatch.delenv("KUBE_CONFIG_PATH", raising=False)
+
+        assert await self._child_saw(tmp_path) == ("/tmp/nixlab2.yaml", "/tmp/nixlab2.yaml")
+
+    async def test_an_explicit_value_is_never_overwritten(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
+        monkeypatch.setenv("KUBECONFIG", "/tmp/backend.yaml")
+        monkeypatch.setenv("KUBE_CONFIG_PATH", "/tmp/provider.yaml")
+
+        assert await self._child_saw(tmp_path) == ("/tmp/backend.yaml", "/tmp/provider.yaml")
+
+    async def test_a_list_is_left_alone(self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`config_path` takes one file. Picking one of a `KUBECONFIG` list
+        here would choose a cluster silently; OpenTofu has `config_paths` for
+        that case and the operator names it."""
+        monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
+        monkeypatch.setenv("KUBECONFIG", "/tmp/a.yaml:/tmp/b.yaml")
+        monkeypatch.delenv("KUBE_CONFIG_PATH", raising=False)
+
+        assert await self._child_saw(tmp_path) == ("/tmp/a.yaml:/tmp/b.yaml", "unset")
+
+    async def test_no_kubeconfig_invents_nothing(self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
+        monkeypatch.delenv("KUBECONFIG", raising=False)
+        monkeypatch.delenv("KUBE_CONFIG_PATH", raising=False)
+
+        assert await self._child_saw(tmp_path) == ("unset", "unset")
 
 
 class TestStateLocation:
