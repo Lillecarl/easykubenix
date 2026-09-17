@@ -3,12 +3,19 @@
 #   ekn.lib.nixTransform {
 #     name = "cilium-dashboard";
 #     src = ./dashboard.json;
+#     args = { inherit absentMetrics; };
 #     transformer = # nix
 #       ''
-#         { lib, value }:
-#         value // { panelCount = builtins.length (value.panels or [ ]); }
+#         { lib, value, args }:
+#         value // {
+#           panels = builtins.filter (p: !(builtins.elem p.metric args.absentMetrics))
+#             (value.panels or [ ]);
+#         }
 #       '';
 #   }
+#
+# `transformer` also takes a list, applied left to right in the one
+# evaluation. A transform that declares no `args` is called without it.
 #
 # The transform is Nix source, not a Nix function: it is written to a file
 # and a sandboxed evaluator imports it. So a value can be carried whole
@@ -48,8 +55,9 @@ let
     let
       lib = (import <nixpkgs/lib>).extend (import (builtins.getEnv "EKN_LIB"));
       value = builtins.fromJSON (builtins.readFile (builtins.getEnv "EKN_IN"));
+      args = builtins.fromJSON (builtins.readFile (builtins.getEnv "EKN_ARGS"));
       transform = import (builtins.getEnv "EKN_TRANSFORM");
-      resolved = lib.walkWithPath lib.kubeAttrsToLists (transform { inherit lib value; });
+      resolved = lib.walkWithPath lib.kubeAttrsToLists (transform { inherit lib value args; });
     in
     if lib.hasMarker resolved then
       throw '''
@@ -63,24 +71,72 @@ let
       resolved
   '';
 
+  # One file holding every transform, folded left to right.
+  #
+  # `functionArgs` decides whether each one gets `args`: a transform written
+  # before `args` existed declares `{ lib, value }`, and calling it with a
+  # third attribute is an error rather than something it can ignore.
+  compose =
+    name: transformer:
+    let
+      sources = if builtins.isList transformer then transformer else [ transformer ];
+    in
+    builtins.toFile "${name}-transform.nix" ''
+      { lib, value, args }:
+      let
+        apply =
+          f: acc:
+          if builtins.functionArgs f ? args then
+            f { inherit lib args; value = acc; }
+          else
+            f { inherit lib; value = acc; };
+      in
+      builtins.foldl' (acc: f: apply f acc) value [
+      ${lib.concatMapStringsSep "\n" (source: "(\n${source}\n)") sources}
+      ]
+    '';
+
   transform =
     {
       # Names the derivation and the generated transform file. A throw inside
       # the transform reports that file and nothing else, so name this after
       # the option path that produced it.
       name,
-      # The input, as JSON. For a value already in Nix:
-      # `builtins.toFile "x.json" (builtins.toJSON value)`.
+      # The input, as JSON. For a value already in Nix, use
+      # `pkgs.writeText "x.json" (builtins.toJSON value)`.
+      #
+      # **Not `builtins.toFile`.** It refuses a string that carries store
+      # context, so a value naming a chart path or an image fails with
+      # "files created by builtins.toFile may not reference derivations".
+      # `writeText` takes context and is otherwise the same.
       src,
-      # Nix source for a function `{ lib, value }: ...`.
+      # Nix source for a function `{ lib, value, args }: ...`, or a list of
+      # them applied left to right. A function that declares no `args` is
+      # called without it, so `{ lib, value }: ...` still works.
+      #
+      # A list runs inside the one sandboxed evaluation, so two transforms
+      # over one value cost one derivation and one JSON round trip. The
+      # marker check runs once, at the end.
       transformer,
+      # Data the transform needs that is neither `lib` nor `value` -- a
+      # configuration it is derived from, typically. It travels as JSON and
+      # never becomes Nix source.
+      #
+      # **This is why `args` exists rather than "interpolate it into the
+      # transformer".** The obvious way to do that is wrong: `builtins.toJSON
+      # ["a" "b"]` gives `["a","b"]`, and a Nix list has no commas, so the
+      # generated file is a syntax error nothing sees until build time.
+      args ? { },
     }:
     builtins.fromJSON (
       builtins.readFile (
         pkgs.runCommand "${name}-transformed.json"
           {
             EKN_IN = src;
-            EKN_TRANSFORM = builtins.toFile "${name}-transform.nix" transformer;
+            EKN_TRANSFORM = compose name transformer;
+            # `writeText` and not `toFile`, for the reason `src` gives: a
+            # configuration can name a store path.
+            EKN_ARGS = pkgs.writeText "${name}-args.json" (builtins.toJSON args);
             EKN_LIB = eknLib;
             NIX_PATH = "nixpkgs=${nixpkgs}";
             # `pkgs.nix` costs about 0.6s to force, once per evaluation --

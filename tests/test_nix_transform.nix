@@ -88,6 +88,77 @@ in
     '';
   };
 
+  # `args` carries what is neither `lib` nor `value`. It travels as JSON, so
+  # a list stays a list -- interpolating `builtins.toJSON` into the source
+  # would emit `["a","b"]`, which is not Nix.
+  readsItsArgs = nixTransform {
+    name = "args";
+    src = dashboard;
+    args = {
+      absent = [
+        2
+        3
+      ];
+    };
+    transformer = ''
+      { lib, value, args }:
+      value // {
+        panels = builtins.filter (p: !(builtins.elem p.id args.absent)) value.panels;
+      }
+    '';
+  };
+
+  # `args` goes through `pkgs.writeText`, so it may name a store path.
+  # `builtins.toFile` refuses one: "files created by builtins.toFile may not
+  # reference derivations". A chart path or an image reference is exactly
+  # what a real configuration carries.
+  carriesAStorePathInArgs = nixTransform {
+    name = "context";
+    src = dashboard;
+    args = {
+      chart = "${pkgs.writeText "chart" "values"}";
+    };
+    transformer = ''
+      { lib, value, args }:
+      { isStorePath = lib.hasPrefix "/nix/store/" args.chart; }
+    '';
+  };
+
+  # Two transforms, one derivation, one JSON round trip. The second sees
+  # what the first produced.
+  appliesAListInOrder = nixTransform {
+    name = "chain";
+    src = dashboard;
+    args = {
+      tag = "prod";
+    };
+    transformer = [
+      ''
+        { lib, value }:
+        value // { title = "first: " + value.title; }
+      ''
+      ''
+        { lib, value, args }:
+        value // { title = value.title + " (" + args.tag + ")"; }
+      ''
+    ];
+  };
+
+  # A transform written before `args` existed declares `{ lib, value }`.
+  # Calling it with a third attribute is an error, not something it ignores,
+  # so `compose` asks each one what it takes.
+  aTransformThatIgnoresArgsStillRuns = nixTransform {
+    name = "no-args";
+    src = dashboard;
+    args = {
+      unused = true;
+    };
+    transformer = ''
+      { lib, value }:
+      { seen = builtins.attrNames value; }
+    '';
+  };
+
   # The transform reads a file, so a JSON input of any size costs the render
   # one `readFile` regardless of what the transform does to it.
   isJustAReadFileAfterwards = builtins.isAttrs (nixTransform {

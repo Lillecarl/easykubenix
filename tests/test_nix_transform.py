@@ -53,3 +53,26 @@ class TestNixTransform:
 
     async def test_the_render_side_is_one_read_file(self) -> None:
         assert await evaluate_file(NIX_TEST_FILE, "isJustAReadFileAfterwards") is True
+
+    async def test_args_reach_the_transform_as_values(self) -> None:
+        # A list stays a list. Interpolated as `builtins.toJSON` it would
+        # have been `["a","b"]`, which is a syntax error in Nix.
+        result = await evaluate_file(NIX_TEST_FILE, "readsItsArgs")
+        assert result == {"title": "Cilium Metrics", "panels": [{"id": 1}]}
+
+    async def test_args_may_name_a_store_path(self) -> None:
+        # `pkgs.writeText` and not `builtins.toFile`, which refuses a string
+        # carrying store context. A real configuration carries chart paths.
+        result = await evaluate_file(NIX_TEST_FILE, "carriesAStorePathInArgs")
+        assert result == {"isStorePath": True}
+
+    async def test_a_list_of_transforms_applies_left_to_right(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "appliesAListInOrder")
+        assert isinstance(result, dict)
+        assert result["title"] == "first: Cilium Metrics (prod)"
+
+    async def test_a_transform_that_declares_no_args_is_called_without_them(self) -> None:
+        # `{ lib, value }` predates `args`, and Nix rejects a call that
+        # passes an attribute the pattern does not declare.
+        result = await evaluate_file(NIX_TEST_FILE, "aTransformThatIgnoresArgsStillRuns")
+        assert result == {"seen": ["panels", "title"]}
