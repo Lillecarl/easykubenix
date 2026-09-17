@@ -5,6 +5,7 @@ self: lib: rec {
   # the same way it reaches `lib.mkNamedList`.
   inherit (import ./conditionalAttrsOf.nix { inherit lib; })
     conditionalAttrsOf
+    ifExistsType
     isIfExists
     mkIfExists
     mkIfExistsAtPath
@@ -63,12 +64,22 @@ self: lib: rec {
   # both, such as an entry of `kubernetes.crds`. Such a marker would reach the
   # cluster as a literal `_type` field, which is not valid Kubernetes.
   # The search stops at the first marker, because `lib.any` is lazy.
+  #
+  # One `isAttrs` and one `_type` read per node, not three and two. Calling
+  # `isMarkedList` and `isIfExists` here asked `isAttrs` twice before the
+  # `else if` asked a third time, on every node of every value this walks.
+  # The three marker names are compared inline for that reason; the
+  # predicates stay for callers with a single value to test.
   hasMarker =
     value:
-    if isMarkedList value || isIfExists value then
-      true
-    else if lib.isAttrs value then
-      lib.any hasMarker (lib.attrValues value)
+    if lib.isAttrs value then
+      let
+        marker = value._type or null;
+      in
+      marker == namedListType
+      || marker == numberedListType
+      || marker == ifExistsType
+      || lib.any hasMarker (lib.attrValues value)
     else if lib.isList value then
       lib.any hasMarker value
     else
@@ -198,17 +209,26 @@ self: lib: rec {
   # is for a value that the module system never typed. A generator and a
   # transformer both run after the merge and return such a value, and
   # `kubernetes.nix` uses this function on their output for that reason.
+  # One `isAttrs` and one `_type` read, for the same reason as `hasMarker`:
+  # `walkWithPath` calls this on every node, and `isNamedList` followed by
+  # `isNumberedList` asked both twice.
   kubeAttrsToLists =
     path: value:
-    if isNamedList value then
-      let
-        entries = stripListMarker value;
-      in
-      fromNamedAttrs (lib.attrNames entries) entries
-    else if isNumberedList value then
-      fromNumberedAttrs (stripListMarker value)
+    if !(lib.isAttrs value) then
+      value
     else
-      value;
+      let
+        marker = value._type or null;
+      in
+      if marker == namedListType then
+        let
+          entries = stripListMarker value;
+        in
+        fromNamedAttrs (lib.attrNames entries) entries
+      else if marker == numberedListType then
+        fromNumberedAttrs (stripListMarker value)
+      else
+        value;
 
   # md5 hash an attrset, useful to trigger rollouts by hashing ConfigMaps.
   hashAttrs = attrs: builtins.hashString "md5" (builtins.toJSON attrs);

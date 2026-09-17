@@ -284,4 +284,7 @@ in
     mkIfExists
     mkIfExistsAtPath
     ;
+  # `hasMarker` compares the three marker names inline, so it needs this one
+  # as a value rather than through `isIfExists`.
+  ifExistsType = markerType;
 }
