@@ -987,6 +987,33 @@ let
     { value.args = lib.mkReplaceList { "--gone=" = "--gone=1"; }; }
   ];
 
+  # The error names the closest element, so a mistyped or moved flag reads as
+  # one line instead of a scan of the list. Here the chart renders
+  # `--metrics-addr=` and the key says `--metrics-bind-address=`.
+  replaceNoMatchNamesTheClosestElement = evalValue [
+    {
+      value.args = [
+        "--leader-elect"
+        "--metrics-addr=0.0.0.0:8443"
+      ];
+    }
+    { value.args = lib.mkReplaceList { "--metrics-bind-address=" = "--x"; }; }
+  ];
+
+  # Nothing shares more than the leading dashes, so there is no closest
+  # element to name. Two characters is the floor: every long option starts
+  # with `--`, and a suggestion built on that alone names a neighbour at
+  # random.
+  replaceNoMatchWithNothingSimilar = evalValue [
+    {
+      value.args = [
+        "--alpha"
+        "--beta"
+      ];
+    }
+    { value.args = lib.mkReplaceList { "--zulu" = "--x"; }; }
+  ];
+
   # A key that matches two elements is refused as well. The same reasoning:
   # the marker must not be able to patch an element nobody named.
   replaceKeyMatchesTwoThrows = evalValue [
@@ -1241,6 +1268,8 @@ in
   mkNumberedListRejectsNonIntKeys = mkNumberedListRejectsNonIntKeys;
   untypedTwiceThrows = untypedTwiceThrows;
   replaceKeyMatchesNothingThrows = replaceKeyMatchesNothingThrows;
+  replaceNoMatchNamesTheClosestElement = replaceNoMatchNamesTheClosestElement;
+  replaceNoMatchWithNothingSimilar = replaceNoMatchWithNothingSimilar;
   replaceKeyMatchesTwoThrows = replaceKeyMatchesTwoThrows;
   replaceTwoKeysOnOneElementThrows = replaceTwoKeysOnOneElementThrows;
   replaceWithNoListThrows = replaceWithNoListThrows;

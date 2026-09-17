@@ -705,3 +705,18 @@ class TestPrioritiesInsideAnEntry:
         # entries still merge as an attribute set, keyed by the match.
         with pytest.raises(nanopynix.NixError, match=r'value\.args\."--a="'):
             await evaluate_file(NIX_TEST_FILE, "replaceMkMergeSameKeyThrows")
+
+    async def test_the_no_match_error_names_the_closest_element(self) -> None:
+        # The list can be twenty flags long. Naming the nearest one turns a
+        # scan of the list into a read of one line.
+        with pytest.raises(
+            nanopynix.NixError,
+            match=r'the closest element is "--metrics-addr=0\.0\.0\.0:8443"',
+        ):
+            await evaluate_file(NIX_TEST_FILE, "replaceNoMatchNamesTheClosestElement")
+
+    async def test_no_suggestion_when_nothing_resembles_the_key(self) -> None:
+        # Every long option starts with `--`, so a suggestion built on that
+        # alone names a neighbour at random. Say nothing instead.
+        with pytest.raises(nanopynix.NixError, match="nothing in the list resembles it"):
+            await evaluate_file(NIX_TEST_FILE, "replaceNoMatchWithNothingSimilar")

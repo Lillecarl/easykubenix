@@ -47,6 +47,41 @@ let
         }";
       };
 
+  # How many characters two strings share from the start.
+  #
+  # **Only an error message calls these two.** They are defined here, at the
+  # top of the file, so that the closure is built once at import rather than
+  # per option merge. The call site keeps them inside the `throw`, where Nix
+  # forces nothing until the error fires, so a render that matches every key
+  # never runs them at all.
+  #
+  # Measured by poisoning rather than by timing: with the body of
+  # `nearestElement` replaced by a `throw`, the suite gave 100 passed and 2
+  # failed, and the two were the only tests that reach the no-match error. A
+  # good path that forced this would have failed instead.
+  commonPrefixLength =
+    a: b:
+    let
+      limit = lib.min (lib.stringLength a) (lib.stringLength b);
+      go = n: if n >= limit || lib.substring n 1 a != lib.substring n 1 b then n else go (n + 1);
+    in
+    go 0;
+
+  # The element of `list` that shares the longest start with `key`, or null
+  # when nothing shares more than a flag's leading dashes. Two characters is
+  # the floor: every long option starts with `--`, so a shorter match names an
+  # arbitrary neighbour and reads as a real suggestion.
+  nearestElement =
+    key: list:
+    let
+      scored = map (element: {
+        inherit element;
+        score = commonPrefixLength key element;
+      }) list;
+      best = lib.foldl' (a: b: if b.score > a.score then b else a) (lib.head scored) scored;
+    in
+    if list == [ ] || best.score <= 2 then null else best.element;
+
   # A plain Kubernetes list becomes an attribute set with the `name` of each
   # element as the key. The `name` itself does not stay in the value. The key
   # is the only source of the name. `kubeAttrsToLists` uses the same rule.
@@ -314,7 +349,21 @@ let
             else if unmatched != [ ] then
               throw ''
                 The option `${lib.showOption loc}' has mkReplaceList keys that match
-                no element: ${lib.concatStringsSep ", " (map (entry: entry.key) unmatched)}.
+                no element:${
+                  lib.concatMapStrings (
+                    entry:
+                    let
+                      # Forced only here, inside the throw. See `nearestElement`.
+                      nearest = nearestElement entry.key base;
+                    in
+                    "\n  ${entry.key}${
+                      if nearest == null then
+                        " -- nothing in the list resembles it"
+                      else
+                        " -- the closest element is ${builtins.toJSON nearest}"
+                    }"
+                  ) unmatched
+                }
 
                 A key is the start of the element it replaces. A key that matches
                 nothing is an error and not a no-op, because the alternative is a
