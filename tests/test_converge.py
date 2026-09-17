@@ -329,3 +329,57 @@ class TestBarrierWalking:
         )
 
         assert seen == [2, 1]
+
+
+class TestTheRecreateRace:
+    """Delete-then-create races itself unless the delete waits.
+
+    A delete that returns when the API server accepted it lets the create
+    reach the API server first, which answers `409 AlreadyExists`. That
+    classifies as RETRY, so the run converges anyway -- which is why the
+    defect shows up as a slow barrier and a puzzling log instead of an
+    error. Named here so it reads as what it is.
+    """
+
+    IMMUTABLE = "spec.template: field is immutable"
+
+    async def test_a_409_after_the_delete_names_the_race(self) -> None:
+        calls = [0]
+
+        async def apply(_spec: Manifest) -> Any:
+            calls[0] += 1
+            if calls[0] == 1:
+                raise server_error(422, causes=[self.IMMUTABLE])
+            raise server_error(409, "object is being deleted")
+
+        async def delete(_spec: Manifest) -> None:
+            return
+
+        failures = await converge_barrier(
+            [manifest(kind="Job", name="migrate")],
+            apply=apply,
+            delete=delete,
+            allow_recreate=True,
+            settle_seconds=1.0,
+        )
+
+        assert failures[0].disposition is Disposition.TERMINAL
+        assert "raced" in failures[0].error
+        assert "poll until the object is absent" in failures[0].error
+
+    async def test_a_failed_delete_says_so(self) -> None:
+        async def apply(_spec: Manifest) -> Any:
+            raise server_error(422, causes=[self.IMMUTABLE])
+
+        async def delete(_spec: Manifest) -> None:
+            raise server_error(403, "forbidden")
+
+        failures = await converge_barrier(
+            [manifest(kind="Job", name="migrate")],
+            apply=apply,
+            delete=delete,
+            allow_recreate=True,
+            settle_seconds=1.0,
+        )
+
+        assert "deleting it for a recreate" in failures[0].error

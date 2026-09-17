@@ -92,7 +92,18 @@ class ApplyOne(Protocol):
 
 
 class DeleteOne(Protocol):
-    """Delete an object, so that `--allow-recreate` can apply it again."""
+    """Delete an object, so that `--allow-recreate` can apply it again.
+
+    **It must not return until the object is gone.** A delete that returns
+    when the API server has accepted it races the apply that follows: the
+    create can reach the API server first and come back `409 AlreadyExists`.
+    That classifies as RETRY and converges eventually, so the defect shows
+    up as a slow barrier and a confusing log rather than as an error.
+
+    Foreground propagation plus a poll until the GET is a 404 is what the
+    contract asks for. `_recreate` names the race if it happens anyway,
+    because a contract nothing checks is a comment.
+    """
 
     def __call__(self, spec: Manifest) -> Awaitable[None]: ...
 
@@ -397,14 +408,34 @@ async def _recreate(  # noqa: PLR0913 -- one caller, and every argument is state
         return Disposition.TERMINAL
     try:
         await delete(spec)
+    except Exception as exc:
+        last_error[key] = f"{exc} (deleting it for a recreate)"
+        return Disposition.TERMINAL
+    try:
         await apply(spec)
     except Exception as exc:
-        # A recreate that fails is reported, never retried: the delete may
-        # already have happened, so a second round would apply into a gap
-        # nobody asked for.
-        last_error[key] = str(exc)
+        # A recreate that fails is reported, never retried: the delete has
+        # already happened, so a second round would apply into a gap nobody
+        # asked for.
+        last_error[key] = _recreate_error(exc)
         return Disposition.TERMINAL
     return Disposition.RECREATE
+
+
+def _recreate_error(exc: BaseException) -> str:
+    """The message for an apply that failed after its delete succeeded.
+
+    `409 AlreadyExists` here is the one failure that names its own cause: the
+    delete returned before the object was gone, which `DeleteOne` says it
+    must not. Left unnamed it reads as an ordinary conflict, retries, and
+    reports a slow barrier rather than a broken delete.
+    """
+    if isinstance(exc, kr8s.ServerError) and _status_code(exc) == HTTPStatus.CONFLICT:
+        return (
+            f"{exc} (re-applying after a recreate. The delete returned before the object was gone, "
+            f"so the create raced it -- see DeleteOne, which must poll until the object is absent.)"
+        )
+    return f"{exc} (re-applying after a recreate)"
 
 
 __all__ = [
