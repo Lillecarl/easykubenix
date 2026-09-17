@@ -377,7 +377,8 @@ class CachePushCommand(AttrCommand):
         False,
         help="Log a warning and continue if the cache push fails, instead of aborting. Off by default -- "
         "CSI-mounted pods fail to start if referenced store paths were never pushed, so a failed push "
-        "should normally block.",
+        "should normally block. Covers the push only: ekn.preApplyCommand still aborts on a non-zero "
+        "exit, and reads this as EKN_CACHE_ALLOW_FAILURE to decide for itself.",
     )
 
     async def push_cache(self) -> None:
