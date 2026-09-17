@@ -23,7 +23,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from ekn import seeds
 from ekn._cli import Command, build_parser, complete, dispatch, opt, pos
-from ekn.apply import apply_and_prune, prune_generation
+from ekn.apply import DEFAULT_DELIVERY_MANAGERS, apply_and_prune, prune_generation
 from ekn.clusterdiff import cluster_diff
 from ekn.converge import DEFAULT_CONCURRENCY, DEFAULT_SETTLE_SECONDS
 from ekn.directapply import converge_direct, report_failures
@@ -753,6 +753,7 @@ async def _converge_group(  # noqa: PLR0913 -- the same state `apply_and_prune` 
             declared_units=cfg.declared_units,
             prune_kinds=cfg.api_mappings,
             protect=protect,
+            delivery_managers={*DEFAULT_DELIVERY_MANAGERS, group.field_manager},
         )
 
 

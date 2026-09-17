@@ -124,7 +124,16 @@ class FakeApi:
                 obj = cls(
                     {
                         "kind": listed_kind,
-                        "metadata": {"name": name, "namespace": ns} | self._extra_metadata.get(name, {}),
+                        # `managedFields` naming `ekn` by default: a listed
+                        # object stands for one a previous run applied, which
+                        # is the only kind a prune is entitled to delete. A
+                        # test about the manager guard overrides it.
+                        "metadata": {
+                            "name": name,
+                            "namespace": ns,
+                            "managedFields": [{"manager": "ekn"}],
+                        }
+                        | self._extra_metadata.get(name, {}),
                     },
                     api=self,  # type: ignore[arg-type]
                 )
@@ -305,6 +314,91 @@ class TestPruneLeavesOwnedObjects:
         await apply_and_prune([self.SPEC], api=api, environment="full")  # type: ignore[arg-type]
 
         assert api.deleted == [("argocd", "verticalpodautoscaler", "long-gone")]
+
+
+class TestPruneLeavesObjectsItNeverApplied:
+    """An object no delivery manager has touched is never pruned.
+
+    Measured on nixlab2 (2026-09-17): of 111 objects inside this selector,
+    14 would have been deleted by a prune that checked labels alone, and
+    none had ever been applied by `ekn` or the engine. They are
+    controller-generated children that inherit their parent's labels -- the
+    endpoints controller copies a Service's onto its Endpoints and
+    EndpointSlice. Six of those carry no `ownerReferences` at all, and one
+    of the six is `kube-system/coredns`.
+    """
+
+    SPEC: ClassVar[dict[str, Any]] = {
+        "apiVersion": "autoscaling.k8s.io/v1",
+        "kind": "VerticalPodAutoscaler",
+        "metadata": {"name": "argocd-server", "namespace": "argocd"},
+    }
+
+    async def test_a_controller_generated_child_is_not_pruned(self) -> None:
+        api = FakeApi(
+            listed=[
+                ("argocd", "verticalpodautoscaler", "argocd-server"),
+                ("argocd", "verticalpodautoscaler", "inherited"),
+            ],
+            extra_metadata={
+                # No ownerReferences, exactly like a legacy Endpoints object.
+                # `_owner` cannot save this one; only the manager check can.
+                "inherited": {"managedFields": [{"manager": "kube-controller-manager"}]},
+            },
+        )
+
+        await apply_and_prune([self.SPEC], api=api, environment="full")  # type: ignore[arg-type]
+
+        assert api.deleted == []
+
+    async def test_an_object_we_applied_is_still_pruned(self) -> None:
+        """The control, and without it the guards could be made to pass by
+        deleting nothing at all. An object `ekn` applied, carrying both
+        labels and absent from this generation, is what a prune is for."""
+        api = FakeApi(
+            listed=[
+                ("argocd", "verticalpodautoscaler", "argocd-server"),
+                ("argocd", "verticalpodautoscaler", "removed-from-config"),
+            ],
+            extra_metadata={
+                "removed-from-config": {"managedFields": [{"manager": "ekn"}]},
+            },
+        )
+
+        await apply_and_prune([self.SPEC], api=api, environment="full")  # type: ignore[arg-type]
+
+        assert api.deleted == [("argocd", "verticalpodautoscaler", "removed-from-config")]
+
+    async def test_the_units_own_field_manager_counts_as_delivery(self) -> None:
+        """A unit applies as the controller that takes its objects over, so a
+        prune that only knew `ekn` would refuse to delete anything that unit
+        had ever applied."""
+        spec = {
+            "apiVersion": "autoscaling.k8s.io/v1",
+            "kind": "VerticalPodAutoscaler",
+            "metadata": {
+                "name": "argocd-server",
+                "namespace": "argocd",
+                "labels": {"ekn.dev/deployment-unit": "bootstrap"},
+            },
+        }
+        api = FakeApi(
+            listed=[
+                ("argocd", "verticalpodautoscaler", "argocd-server"),
+                ("argocd", "verticalpodautoscaler", "gone"),
+            ],
+            extra_metadata={"gone": {"managedFields": [{"manager": "argocd-controller"}]}},
+        )
+
+        await apply_and_prune(  # type: ignore[arg-type]
+            [spec],
+            api=api,
+            environment="full",
+            unit="bootstrap",
+            field_manager="argocd-controller",
+        )
+
+        assert api.deleted == [("argocd", "verticalpodautoscaler", "gone")]
 
 
 class TestPruneWarnsAboutUndeclaredUnits:

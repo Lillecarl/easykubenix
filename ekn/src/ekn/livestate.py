@@ -187,6 +187,14 @@ def foreign_owners(
 
     `kube-controller-manager` belongs in `engine_managers` for the same
     reason ArgoCD does -- it owns fields on nearly everything, by design.
+
+    **`engine_managers` must never gate a delete.** It is a "do not report
+    this as surprising" list, and the two questions look similar enough to
+    merge by accident. `apply.DEFAULT_DELIVERY_MANAGERS` is the one that
+    decides what a prune may delete, and it is deliberately a different set:
+    the endpoints controller *is* `kube-controller-manager`, so a prune that
+    trusted this list would delete every Endpoints object in scope --
+    measured, on a live cluster, as six including `kube-system/coredns`.
     """
     ignored = {*ours, *engine_managers}
     owners: list[ForeignOwner] = []

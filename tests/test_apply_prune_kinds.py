@@ -26,7 +26,17 @@ def _fake_configmap(name: str, namespace: str = "ns") -> APIObject:
     """
     cls = get_class("ConfigMap", "v1")
     obj = cls(
-        {"kind": "ConfigMap", "apiVersion": "v1", "metadata": {"name": name, "namespace": namespace}},
+        {
+            "kind": "ConfigMap",
+            "apiVersion": "v1",
+            # Applied by `ekn`, which is what makes it prunable at all. See
+            # `apply.DEFAULT_DELIVERY_MANAGERS`.
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "managedFields": [{"manager": "ekn"}],
+            },
+        },
         api=cast("Api", SimpleNamespace(namespace=None)),
     )
     obj.delete = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue] -- instance-level override for the test

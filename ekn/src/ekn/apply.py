@@ -61,6 +61,34 @@ DEFAULT_BARRIER_PRIORITY = 1000
 # never runs again.
 DEFAULT_FIELD_MANAGER = "ekn"
 
+DEFAULT_DELIVERY_MANAGERS = frozenset({DEFAULT_FIELD_MANAGER})
+"""Field managers whose objects a prune may delete.
+
+**Deliberately not the engine-manager set, and the difference is the whole
+point.** That set decides what is *not* worth reporting as a foreign owner,
+and `kube-controller-manager` belongs in it because it owns a field on
+nearly everything. It must never gate a delete: the endpoints controller
+*is* `kube-controller-manager`, so a prune that trusted that set would
+delete every Endpoints object it could see.
+
+Measured on nixlab2 (2026-09-17), read-only. Of 111 objects inside the
+selector this module builds, **14 would have been deleted by a prune that
+checked labels alone**, and none had ever been touched by `ekn` or by the
+GitOps engine. They are controller-generated children that *inherit their
+parent's labels*: the endpoints controller copies a Service's
+`metadata.labels` onto its Endpoints and EndpointSlice, and cert-manager
+copies a Certificate's onto its CertificateRequest.
+
+Six of those fourteen carry no `ownerReferences` at all -- the legacy
+endpoints controller sets none -- and one of the six is
+`kube-system/coredns`. So this check is the load-bearing one and `_owner`
+cannot stand in for it.
+
+The number grows with what this mode does. Only 6 Services carried the
+environment label then, because only a bootstrap unit had been applied by
+`ekn`; a full apply stamps it on all 57, and every child inherits it.
+"""
+
 type Manifest = dict[str, JsonValue]
 
 
@@ -412,6 +440,10 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
         protect=protected,
         environment_label=environment_label,
         unit_label=unit_label,
+        # This apply's own manager as well as the default. A unit applies as
+        # the controller that takes its objects over, so a prune that only
+        # knew `ekn` would refuse to delete anything that unit ever applied.
+        delivery_managers={*DEFAULT_DELIVERY_MANAGERS, field_manager},
     )
 
 
@@ -427,6 +459,7 @@ async def prune_generation(  # noqa: PLR0913 -- every argument names part of a d
     protect: Collection[tuple[str, str, str]] = (),
     environment_label: str = DEFAULT_ENVIRONMENT_LABEL,
     unit_label: str = DEFAULT_UNIT_LABEL,
+    delivery_managers: Collection[str] = DEFAULT_DELIVERY_MANAGERS,
 ) -> None:
     """Delete what this environment holds and this generation does not.
 
@@ -458,6 +491,7 @@ async def prune_generation(  # noqa: PLR0913 -- every argument names part of a d
         protected=set(protect),
         declared_units=declared_units,
         unit_label=unit_label,
+        delivery_managers=delivery_managers,
     )
 
 
@@ -572,6 +606,20 @@ async def _extra_classes(
     return resolved
 
 
+def _delivered_by(obj: APIObject, delivery_managers: Collection[str]) -> bool:
+    """True when something that delivers configuration applied this object.
+
+    An object no delivery manager has ever touched was not put there by us,
+    whatever labels it carries, so removing it from the configuration cannot
+    be what its presence means.
+    """
+    metadata = obj.raw.get("metadata")
+    entries = metadata.get("managedFields") if isinstance(metadata, dict) else None
+    if not isinstance(entries, list):
+        return False
+    return any(isinstance(entry, dict) and entry.get("manager") in delivery_managers for entry in entries)
+
+
 def _unit_of(obj: APIObject, unit_label: str) -> str | None:
     metadata = obj.raw.get("metadata")
     labels = metadata.get("labels") if isinstance(metadata, dict) else None
@@ -593,6 +641,14 @@ def _owner(obj: APIObject) -> str | None:
     only because ESO does not copy `ekn.dev/environment` into what it
     materialises -- someone else's template, which can start copying it at
     any time. This guard does not depend on that one holding.
+
+    **Kept as defence in depth, not because it was shown to be necessary.**
+    Simulated against every object in scope on nixlab2 (2026-09-17), this
+    check alone left 7 of 15 candidates and `_delivered_by` alone left 1 --
+    every object this one catches, that one catches too. The case it would
+    cover on its own is an object the engine applied, and so carries a
+    delivery manager, that a controller later adopted with an
+    ownerReference. Plausible; that cluster does not contain one.
     """
     metadata = obj.raw.get("metadata")
     refs = metadata.get("ownerReferences") if isinstance(metadata, dict) else None
@@ -602,6 +658,53 @@ def _owner(obj: APIObject) -> str | None:
     if not isinstance(first, dict):
         return "<unknown>"
     return f"{first.get('kind', '<unknown>')}/{first.get('name', '<unnamed>')}"
+
+
+_NO_LIST_VERB = frozenset({404, 405})
+"""What the API server answers for a served kind that cannot be listed.
+
+Seven of them on a stock cluster, all reached through `apiMappings`:
+`Binding` and `LocalSubjectAccessReview` answer `404 NotFound`, and
+`SelfSubjectAccessReview`, `SelfSubjectReview`, `SelfSubjectRulesReview`,
+`SubjectAccessReview` and `TokenReview` answer `405 MethodNotAllowed`.
+
+`KindNotServedError` does not cover these: discovery resolves every one of
+them, so `_extra_classes` builds a class happily and the failure only
+arrives at the LIST. Measured on nixlab2, 2026-09-17.
+"""
+
+
+async def _list_for_prune(
+    api: Api,
+    target: str | type[APIObject],
+    *,
+    selector: str,
+    kind: str,
+) -> list[APIObject]:
+    """Everything of one kind inside the prune scope.
+
+    Wraps only the listing, never the deletes that follow it: a kind that
+    cannot be listed is ordinary, and a delete that fails is not.
+    """
+    try:
+        # kr8s.Api.async_get's `label_selector`/`field_selector` params and its
+        # `APIObject | dict` yield type are both bare-`dict`/unannotated
+        # upstream, so pyright can't resolve the member or the loop variable.
+        return [
+            obj
+            async for obj in api.async_get(  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType] -- kr8s Api.async_get's selector params and yield type are unannotated upstream
+                target,
+                namespace=kr8s.ALL,
+                label_selector=selector,
+            )
+            if isinstance(obj, APIObject)
+        ]
+    except kr8s.ServerError as exc:
+        response = exc.response
+        if response is not None and response.status_code in _NO_LIST_VERB:
+            _log.debug("not scanning kind with no list verb", kind=kind, status=response.status_code)
+            return []
+        raise
 
 
 async def _prune(  # noqa: PLR0913 -- one caller, and every argument is state that caller built
@@ -614,6 +717,7 @@ async def _prune(  # noqa: PLR0913 -- one caller, and every argument is state th
     protected: set[tuple[str, str, str]],
     declared_units: Collection[str] | None = None,
     unit_label: str = DEFAULT_UNIT_LABEL,
+    delivery_managers: Collection[str] = DEFAULT_DELIVERY_MANAGERS,
 ) -> None:
     """Delete objects in this run's prune scope that it did not produce.
 
@@ -641,16 +745,7 @@ async def _prune(  # noqa: PLR0913 -- one caller, and every argument is state th
         # path, so in practice every kind here has one. The string fallback
         # stays as the safe default for a caller that built `classes` itself.
         target: str | type[APIObject] = classes.get(kind, kind)
-        # kr8s.Api.async_get's `label_selector`/`field_selector` params and its
-        # `APIObject | dict` yield type are both bare-`dict`/unannotated
-        # upstream, so pyright can't resolve the member or the loop variable.
-        async for obj in api.async_get(  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType] -- kr8s Api.async_get's selector params and yield type are unannotated upstream
-            target,
-            namespace=kr8s.ALL,
-            label_selector=selector,
-        ):
-            if not isinstance(obj, APIObject):
-                continue
+        for obj in await _list_for_prune(api, target, selector=selector, kind=kind):
             # Not `_object_key(obj)`. Passing the class above keeps `.kind`
             # right for every kind this apply touched, but a `prune_kinds`
             # name still goes through `async_lookup_kind`, which reassigns its
@@ -675,6 +770,12 @@ async def _prune(  # noqa: PLR0913 -- one caller, and every argument is state th
             if owner is not None:
                 _log.info("keeping owned object", kind=kind, namespace=obj.namespace, name=obj.name, owner=owner)
                 continue
+            if not _delivered_by(obj, delivery_managers):
+                # Carries our labels and was never applied by us: a
+                # controller-generated child that inherited them from its
+                # parent. See DEFAULT_DELIVERY_MANAGERS.
+                _log.info("keeping object we never applied", kind=kind, namespace=obj.namespace, name=obj.name)
+                continue
             unit = _unit_of(obj, unit_label)
             if declared_units is not None and unit is not None and unit not in declared_units:
                 _log.warning(
@@ -690,6 +791,7 @@ async def _prune(  # noqa: PLR0913 -- one caller, and every argument is state th
 
 __all__ = [
     "DEFAULT_BARRIER_PRIORITY",
+    "DEFAULT_DELIVERY_MANAGERS",
     "DEFAULT_ENVIRONMENT_LABEL",
     "DEFAULT_FIELD_MANAGER",
     "DEFAULT_UNIT_LABEL",

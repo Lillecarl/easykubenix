@@ -134,6 +134,31 @@ they are in the desired set of every whole-instance apply, and removing one
 from the configuration now deletes it. The older not-exists clause skipped
 every labelled object, so a removed component kept running for ever.
 
+**Being in scope is necessary, not sufficient.** Three further conditions have
+to hold before `ekn` deletes anything, and each exists because a label alone
+does not mean an object is ours:
+
+| kept | why |
+| --- | --- |
+| in this generation's desired set | it is still in the configuration |
+| non-empty `ownerReferences` | a controller made it, and owns its lifecycle |
+| no delivery manager in `managedFields` | neither `ekn` nor the engine ever applied it |
+
+The third is load-bearing and was found by a read-only dry run against a live
+cluster, not by reasoning. Controllers copy their parent's labels onto the
+children they create: the endpoints controller copies a Service's onto its
+Endpoints and EndpointSlice, cert-manager copies a Certificate's onto its
+CertificateRequest. Those children carry both of our labels and were never
+applied by us. Of 111 objects in scope, 14 were in that position — and six,
+including `kube-system/coredns`, carry no `ownerReferences` either, because
+the legacy endpoints controller sets none.
+
+Note what the delivery-manager set is *not*. `kube-controller-manager` is
+ignored when reporting foreign field owners, because it owns a field on nearly
+everything. It must never be treated as a delivery manager: it is exactly what
+manages Endpoints, so one list serving both questions turns this guard into
+its opposite.
+
 `ekn` stamps the environment label at apply time, so only the objects `ekn`
 itself applies carry it. On a GitOps cluster that is the minority: nearly
 everything reaches the API server through ArgoCD, which applies the committed
