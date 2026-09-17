@@ -21,7 +21,7 @@ from nanopynix.models import JsonValue
 from nanopynix.primops import from_yaml11_stream, from_yaml_stream, to_yaml
 from pydantic import TypeAdapter, ValidationError
 
-from ekn import seeds
+from ekn import enginepause, seeds
 from ekn._cli import Command, build_parser, complete, dispatch, opt, pos
 from ekn.apply import DEFAULT_DELIVERY_MANAGERS, apply_and_prune, prune_generation
 from ekn.clusterdiff import cluster_diff
@@ -76,7 +76,7 @@ from ekn.tofu import (
 from ekn.validation import EphemeralControlPlane, exec_capture, prepare_validation_objects
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
 
     from ekn.eval import TofuUnit
 
@@ -757,13 +757,67 @@ async def _converge_group(  # noqa: PLR0913 -- the same state `apply_and_prune` 
         )
 
 
-async def _apply_groups(
+def _object_identity(spec: dict[str, Any]) -> tuple[str, str, str]:
+    """A manifest keyed the way `apply` keys a live object.
+
+    `(namespace or "none", kind, name)`. A key in any other shape matches
+    nothing, silently -- which for `protect` means protecting nothing.
+    """
+    metadata = spec.get("metadata")
+    namespace = metadata.get("namespace") if isinstance(metadata, dict) else None
+    name = metadata.get("name") if isinstance(metadata, dict) else None
+    return (
+        str(namespace) if isinstance(namespace, str) else "none",
+        str(spec.get("kind")),
+        str(name) if isinstance(name, str) else "",
+    )
+
+
+@contextlib.asynccontextmanager
+async def _engine_paused(
+    workloads: list[enginepause.Workload],
+    *,
+    api: kr8s.asyncio.Api,
+) -> AsyncIterator[set[tuple[str, str, str]]]:
+    """Stop the engine for the body, and start it again whatever happens.
+
+    Yields the object keys the body must neither apply nor prune. See
+    `enginepause.without_pause_targets` for why both.
+
+    **The resume is in a `finally`, and an exception during it is chained
+    rather than swallowed.** The apply failing and the engine staying down
+    are different problems with different urgencies, and a run that reports
+    only the first leaves a cluster with no reconciler and nobody watching.
+    """
+    paused = await enginepause.pause(workloads, api=api)
+    try:
+        yield enginepause.object_keys(workloads)
+    finally:
+        failed = await enginepause.resume(paused, api=api)
+        if failed:
+            _log.error(enginepause.resume_reminder(paused))
+            listed = "\n".join(f"  {entry}" for entry in failed)
+            msg = f"the GitOps engine was not fully resumed:\n{listed}"
+            raise EngineNotResumedError(msg)
+
+
+class EngineNotResumedError(RuntimeError):
+    """The apply finished and the engine is still scaled to zero.
+
+    Its own type because it must not read as an apply failure: the apply may
+    well have succeeded, and what needs attention is the cluster having no
+    reconciler.
+    """
+
+
+async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn kubeapply` exposes as a flag
     cfg: KubeApplyConfigResult,
     *,
     api: kr8s.asyncio.Api,
     target: str | None,
     prune: bool,
     converge: _ConvergeOptions | None = None,
+    held_by_engine_pause: set[tuple[str, str, str]] | None = None,
 ) -> None:
     """Decrypt and seed-resolve every group, then apply them in order.
 
@@ -797,20 +851,28 @@ async def _apply_groups(
     for _group, plan in prepared:
         seeds.report(plan.actions)
 
+    held = held_by_engine_pause or set()
     for group, plan in prepared:
+        # Both halves, and neither is safe alone. Applying a paused workload
+        # re-applies its replica count and wakes the engine mid-apply;
+        # skipping it without protecting it makes it absent from the desired
+        # set, which a prune answers with a delete. See
+        # `enginepause.without_pause_targets`.
+        objects = [spec for spec in plan.objects if _object_identity(spec) not in held]
+        protected = plan.protected | held
         if converge is not None and converge.enabled:
             await _converge_group(
                 group,
-                plan.objects,
+                objects,
                 api=api,
                 cfg=cfg,
                 options=converge,
                 prune=prune and group.unit == target,
-                protect=plan.protected,
+                protect=protected,
             )
             continue
         await apply_and_prune(
-            plan.objects,
+            objects,
             api=api,
             environment=cfg.environment,
             unit=group.unit,
@@ -828,9 +890,10 @@ async def _apply_groups(
             # asked about is a surprise, and `ekn kubeapply --target
             # <dependency> --prune` is right there when you want it.
             prune=prune and group.unit == target,
-            # A seed whose variable is unset is not ours to delete. See
-            # `SeedPlan.protected`.
-            protect=plan.protected,
+            # A seed whose variable is unset is not ours to delete, and nor is
+            # a workload this run has scaled to zero. See `SeedPlan.protected`
+            # and `enginepause`.
+            protect=protected,
         )
 
 
@@ -882,6 +945,12 @@ class KubeApply(AttrCommand):
         help="Let --converge delete and re-create an object whose immutable field changed (a completed Job's "
         "spec.template, a Service's clusterIP). Off by default: a recreate is a delete, and for some kinds "
         "that is data loss. Never recreates a PersistentVolumeClaim, Secret, Namespace or CRD.",
+    )
+    pause_engine: bool = opt(
+        False,
+        help="Scale the GitOps engine's reconciler to zero for the duration of this apply and restore it "
+        "afterwards, so the apply and the engine are not two writers of the same objects. Names come from "
+        "deployment.engine.pause. The engine's own workloads are neither applied nor pruned while it is down.",
     )
     confirm_context: str | None = opt(
         None,
@@ -973,12 +1042,27 @@ class KubeApply(AttrCommand):
             api = await kr8s.asyncio.api(kubeconfig=kubeconfig)
             if cfg.sops_age_identities:
                 await ensure_age_identities(cfg.sops_age_identities, api=api)
+            held: set[tuple[str, str, str]] = set()
+            if self.pause_engine:
+                if not cfg.engine_pause:
+                    raise SystemExit(
+                        "--pause-engine, but this configuration names no engine to pause.\n"
+                        "Set deployment.engine.pause to the workloads holding cluster-wide write "
+                        "permission -- for a stock ArgoCD that is the application controller alone.\n"
+                        "Refusing rather than pausing nothing, because an apply that believes the "
+                        "engine is stopped while it is running is the state this flag exists to avoid."
+                    )
+                workloads = [
+                    enginepause.Workload(namespace=w.namespace, name=w.name, kind=w.kind) for w in cfg.engine_pause
+                ]
+                held = await stack.enter_async_context(_engine_paused(workloads, api=api))
             try:
                 await _apply_groups(
                     cfg,
                     api=api,
                     target=self.target,
                     prune=self.prune,
+                    held_by_engine_pause=held,
                     converge=_ConvergeOptions(
                         enabled=self.converge,
                         concurrency=self.concurrency,

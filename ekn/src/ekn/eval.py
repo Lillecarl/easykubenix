@@ -181,6 +181,14 @@ class ApplyGroup(BaseModel):
     objects: list[dict[str, Any]]
 
 
+class EngineWorkload(BaseModel):
+    """One `deployment.engine.pause` entry -- see `ekn.enginepause`."""
+
+    namespace: _NonEmptyStr
+    name: _NonEmptyStr
+    kind: _NonEmptyStr = "Deployment"
+
+
 class KubeApplyConfigResult(BaseModel):
     groups: list[ApplyGroup]
     environment: str
@@ -200,6 +208,11 @@ class KubeApplyConfigResult(BaseModel):
     #: `kubernetes.apiMappings` -- kind to apiVersion, so a prune scans kinds
     #: this apply no longer generates. See `apply_and_prune`'s `prune_kinds`.
     api_mappings: dict[str, str] = Field(default_factory=dict, alias="apiMappings")
+    #: `deployment.engine.pause` -- the engine workloads a direct apply scales
+    #: to zero. Empty means the configuration names none, which is the
+    #: ordinary shape for an instance with no GitOps engine; `--pause-engine`
+    #: refuses rather than silently pausing nothing. See `enginepause`.
+    engine_pause: list[EngineWorkload] = Field(default_factory=list, alias="enginePause")
 
     @property
     def objects(self) -> list[dict[str, Any]]:
@@ -919,6 +932,12 @@ async def evaluate_kubeapply_config(
         declared = (
             await deployment.attr("declaredUnits").to_python() if await deployment.has_attr("declaredUnits") else None
         )
+        # `[]` and "the option does not exist" mean the same thing here, unlike
+        # for `handAppliedUnits`: both say this configuration names no engine,
+        # and `--pause-engine` refuses on either rather than pausing nothing.
+        engine_pause = (
+            await deployment.attr("engine").attr("pause").to_python() if await deployment.has_attr("engine") else []
+        )
 
         return KubeApplyConfigResult.model_validate(
             {
@@ -929,6 +948,7 @@ async def evaluate_kubeapply_config(
                 "handAppliedUnits": hand_applied,
                 "declaredUnits": declared,
                 "apiMappings": await proxy.attr("kubernetes").attr("apiMappings").to_python(),
+                "enginePause": engine_pause,
             }
         )
 

@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -629,6 +629,127 @@ class TestAWholeInstanceConvergingApply:
         await _apply_groups(self._config(), api=None, target=None, prune=False)  # type: ignore[arg-type]
 
         assert seen == {"barriers": True}
+
+
+class TestTheEnginePauseHoldsObjectsBack:
+    """A paused engine's own workloads are neither applied nor pruned.
+
+    Applying one re-applies its replica count and wakes the engine in the
+    middle of the apply that paused it; skipping it without protecting it
+    makes it absent from the desired set, which a prune answers with a
+    delete. Both halves or neither. Issue Lillecarl/easykubenix#28.
+    """
+
+    CONTROLLER: ClassVar[dict[str, Any]] = {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {"namespace": "argocd", "name": "argo-cd-argocd-application-controller"},
+        "spec": {"replicas": 1},
+    }
+    ORDINARY: ClassVar[dict[str, Any]] = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"namespace": "argocd", "name": "unrelated"},
+    }
+
+    @classmethod
+    def _config(cls) -> KubeApplyConfigResult:
+        return KubeApplyConfigResult.model_validate(
+            {
+                "groups": [{"unit": None, "field_manager": "ekn", "objects": [cls.CONTROLLER, cls.ORDINARY]}],
+                "environment": "test",
+                "resource_priority": {},
+                "sops_age_identities": [],
+                "handAppliedUnits": [],
+                "declaredUnits": [],
+            }
+        )
+
+    async def test_the_paused_workload_is_not_applied_and_is_protected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import ekn.cli as cli_module
+
+        seen: dict[str, Any] = {}
+
+        async def _apply_and_prune(objects: Any, **kwargs: Any) -> None:
+            seen["objects"] = objects
+            seen["protect"] = kwargs["protect"]
+
+        monkeypatch.setattr(cli_module, "apply_and_prune", _apply_and_prune)
+        held = {("argocd", "StatefulSet", "argo-cd-argocd-application-controller")}
+
+        await _apply_groups(
+            self._config(),
+            api=None,  # type: ignore[arg-type]
+            target=None,
+            prune=False,
+            held_by_engine_pause=held,
+        )
+
+        assert [o["metadata"]["name"] for o in seen["objects"]] == ["unrelated"]
+        assert held <= seen["protect"], "a skipped object absent from protect is one the prune deletes"
+
+    async def test_without_a_pause_everything_is_applied(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Negative control: holding objects back is what `--pause-engine`
+        buys, and must not happen without it."""
+        import ekn.cli as cli_module
+
+        seen: dict[str, Any] = {}
+
+        async def _apply_and_prune(objects: Any, **_kwargs: Any) -> None:
+            seen["objects"] = objects
+
+        monkeypatch.setattr(cli_module, "apply_and_prune", _apply_and_prune)
+
+        await _apply_groups(self._config(), api=None, target=None, prune=False)  # type: ignore[arg-type]
+
+        assert len(seen["objects"]) == 2
+
+
+class TestTheEngineIsResumedWhateverHappens:
+    """A pause that cannot be resumed is worse than no pause."""
+
+    async def test_a_failing_apply_still_resumes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The case that matters. An apply that raises must not leave the
+        cluster with no reconciler and nobody watching."""
+        import ekn.cli as cli_module
+
+        resumed: list[Any] = []
+
+        async def _pause(workloads: Any, **_kwargs: Any) -> list[Any]:
+            return [cli_module.enginepause.Paused(w, 1) for w in workloads]
+
+        async def _resume(paused: Any, **_kwargs: Any) -> list[str]:
+            resumed.extend(entry.workload for entry in paused)
+            return []
+
+        monkeypatch.setattr(cli_module.enginepause, "pause", _pause)
+        monkeypatch.setattr(cli_module.enginepause, "resume", _resume)
+        workload = cli_module.enginepause.Workload(namespace="argocd", name="c", kind="StatefulSet")
+
+        with pytest.raises(RuntimeError, match="the apply blew up"):
+            async with cli_module._engine_paused([workload], api=None):  # type: ignore[arg-type]
+                raise RuntimeError("the apply blew up")
+
+        assert resumed == [workload]
+
+    async def test_a_failed_resume_is_its_own_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Not an apply failure. The apply may have succeeded; what needs
+        attention is the cluster having no reconciler."""
+        import ekn.cli as cli_module
+
+        async def _pause(workloads: Any, **_kwargs: Any) -> list[Any]:
+            return [cli_module.enginepause.Paused(w, 1) for w in workloads]
+
+        async def _resume(_paused: Any, **_kwargs: Any) -> list[str]:
+            return ["StatefulSet argocd/c: nope"]
+
+        monkeypatch.setattr(cli_module.enginepause, "pause", _pause)
+        monkeypatch.setattr(cli_module.enginepause, "resume", _resume)
+        workload = cli_module.enginepause.Workload(namespace="argocd", name="c", kind="StatefulSet")
+
+        with pytest.raises(cli_module.EngineNotResumedError, match="not fully resumed"):
+            async with cli_module._engine_paused([workload], api=None):  # type: ignore[arg-type]
+                pass
 
 
 class TestTheExitCode:

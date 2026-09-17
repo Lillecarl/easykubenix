@@ -111,6 +111,75 @@ in
       '';
     };
 
+    engine.pause = lib.mkOption {
+      type = lib.types.listOf (
+        lib.types.submodule {
+          options = {
+            namespace = lib.mkOption {
+              type = lib.types.str;
+              description = "Namespace the workload lives in.";
+            };
+            name = lib.mkOption {
+              type = lib.types.str;
+              description = "Workload name.";
+            };
+            kind = lib.mkOption {
+              type = lib.types.enum [
+                "Deployment"
+                "StatefulSet"
+              ];
+              default = "Deployment";
+              description = "What to scale. Only these two have a replica count `ekn` can restore.";
+            };
+          };
+        }
+      );
+      default = [ ];
+      description = ''
+        Workloads `ekn kubeapply --pause-engine` scales to zero for the
+        duration of a direct apply, and restores afterwards.
+
+        A direct apply and a running GitOps engine are two writers of the
+        same objects, and whichever ran last wins -- so a full deploy against
+        a live engine is undone at the next sync, with nothing reporting it.
+
+        **Name the engine's reconciler, and nothing else.** The test is which
+        workloads hold cluster-wide write permission, not which ones belong
+        to the engine. On a stock ArgoCD install (measured on nixlab2 from
+        the ClusterRoles bound to each ServiceAccount) that is the
+        application controller alone: the repo server holds no write bindings
+        at all, so scaling it buys nothing and costs the controller its
+        target state on resume.
+
+        Two things this does not stop, both worth knowing rather than
+        working around. `argocd-server` keeps cluster-wide `delete` and
+        `patch`, so a person clicking Sync in the UI during an apply still
+        writes -- scaling it too would take away the UI people want for
+        watching. And an ApplicationSet controller regenerates Applications;
+        if you run one, it belongs in this list.
+
+        Each workload carries `ekn.dev/paused-replicas` while it is down, so
+        an `ekn` that dies mid-apply leaves the count to restore on the
+        cluster rather than in a file. A later run finds it and can finish.
+
+        These objects are **excluded from the apply set** while paused, and
+        protected from its prune. They are usually in `kubernetes.generated`
+        themselves, declaring `replicas: 1`, so applying them would wake the
+        engine in the middle of the apply that paused it. The cost is that
+        this mode can never update the engine's own reconciler; `ekn` says so
+        rather than passing over it.
+      '';
+      example = lib.literalExpression ''
+        [
+          {
+            namespace = "argocd";
+            name = "argo-cd-argocd-application-controller";
+            kind = "StatefulSet";
+          }
+        ]
+      '';
+    };
+
     tofuUnits = lib.mkOption {
       type = lib.types.anything;
       readOnly = true;
