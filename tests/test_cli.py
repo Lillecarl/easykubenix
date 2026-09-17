@@ -752,6 +752,50 @@ class TestTheEngineIsResumedWhateverHappens:
                 pass
 
 
+class TestTheCachePushIsSharedNotCopied:
+    """`ekn deploy` and `ekn kubeapply` push for the same reason, so they
+    declare it once. Two copies of a flag drift: one grows a default the
+    other lacks, and the help text stops agreeing with the behaviour.
+    """
+
+    def test_both_commands_offer_the_same_switches(self) -> None:
+        from ekn.cli import Deploy, KubeApply
+
+        for cls in (Deploy, KubeApply):
+            assert "cache_push" in cls.specs, cls.__name__
+            assert "cache_allow_failure" in cls.specs, cls.__name__
+
+    def test_both_commands_hold_the_same_declaration_object(self) -> None:
+        """Identity, not equality, and that is the point of the test.
+
+        Equality passes a verbatim copy, which is the thing being forbidden
+        -- a copy is fine on the day it is made and drifts afterwards.
+        Identity fails the moment either command redeclares the flag in its
+        own body, whatever it writes there.
+        """
+        from ekn.cli import Deploy, KubeApply
+
+        for name in ("cache_push", "cache_allow_failure"):
+            assert Deploy.specs[name] is KubeApply.specs[name], name
+
+    def test_commit_does_not_push(self) -> None:
+        """Negative control. `ekn commit` writes branches and pushes nothing
+        to a store, so inheriting the flag would offer a switch that does
+        nothing."""
+        from ekn.cli import Commit
+
+        assert "cache_push" not in Commit.specs
+        assert "cache_allow_failure" not in Commit.specs
+
+    def test_deploy_still_has_everything_commit_declares(self) -> None:
+        """`Deploy(CachePushCommand, Commit)` is multiple inheritance, and
+        the option collection walks the MRO -- so this asserts the second
+        base did not fall out of it."""
+        from ekn.cli import Commit, Deploy
+
+        assert not set(Commit.specs) - set(Deploy.specs)
+
+
 class TestTheExitCode:
     """A command that fails must not report success.
 

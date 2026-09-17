@@ -348,6 +348,44 @@ async def _finalize_commit(  # noqa: PLR0913 -- tracked complexity/arg-count deb
         await _git_push(remote, deploy_branch, source_branch)
 
 
+class CachePushCommand(AttrCommand):
+    """A command that puts store paths on `ekn.cacheTo` before it acts.
+
+    `ekn deploy` and `ekn kubeapply` need exactly the same thing for exactly
+    the same reason, so they declare it once here: a CSI-mounted store path
+    can only be substituted -- the volume names an output path, so a node
+    cannot build it -- and a path that was never pushed is a pod that fails
+    to start. `deploy` needs it before the branch moves, because an engine
+    may sync the instant it does; `kubeapply` needs it before the apply,
+    because there is no engine in front of it at all.
+
+    **Declared once and inherited**, the same way `NixCommand` declares
+    `--file`. Two copies of a flag drift: one grows a default the other
+    lacks, and the help text stops agreeing with the behaviour.
+    """
+
+    cache_push: bool = opt(
+        True,
+        negatable=True,
+        help="Push ekn.cachePackage's closure to ekn.cacheTo first. A no-op when ekn.cacheTo is null. "
+        "On by default: a CSI-mounted store path that was never pushed is a pod that fails to start.",
+    )
+    cache_allow_failure: bool = opt(
+        False,
+        help="Log a warning and continue if the cache push fails, instead of aborting. Off by default -- "
+        "CSI-mounted pods fail to start if referenced store paths were never pushed, so a failed push "
+        "should normally block.",
+    )
+
+    async def push_cache(self) -> None:
+        """Run the push this command's flags ask for, timed and labelled."""
+        if not self.cache_push:
+            _log.info("--no-cache-push: not pushing to ekn.cacheTo")
+            return
+        with timed_stage(f"{self.cli_name or type(self).__name__.lower()}: cache-push (total, incl. network copy)"):
+            await _push_ekn_cache(self.file, self.flake, self.attr, allow_failure=self.cache_allow_failure)
+
+
 class Commit(AttrCommand):
     """Render manifests and write them to the GitOps deploy (and paired
     source) branch."""
@@ -524,7 +562,7 @@ class Validate(AttrCommand):
             _log.info("Your manifests are as valid as they can be against Kubernetes %s", c.kubernetes.package.version)
 
 
-class Deploy(Commit):
+class Deploy(CachePushCommand, Commit):
     """Verify, push the pre-deploy cache, commit, and push -- the whole
     release in one command.
 
@@ -547,12 +585,6 @@ class Deploy(Commit):
     no_verify: bool = opt(
         False,
         help="Skip temporary API-server and kubeconform verification.",
-    )
-    cache_allow_failure: bool = opt(
-        False,
-        help="Log a warning and continue if the pre-deploy cache push fails, instead of aborting. "
-        "Off by default -- CSI-mounted pods will fail to start if referenced store paths were "
-        "never pushed, so a failed push should normally block the deploy.",
     )
     verbosity: LogLevel = opt(
         "error",
@@ -591,8 +623,7 @@ class Deploy(Commit):
             if not self.no_verify:
                 with timed_stage("deploy: validate (total)"):
                     await Validate.run(cast("Validate", self))
-            with timed_stage("deploy: cache-push (total, incl. network copy)"):
-                await _push_ekn_cache(self.file, self.flake, self.attr, allow_failure=self.cache_allow_failure)
+            await self.push_cache()
             with timed_stage("deploy: commit (total, incl. git push)"):
                 await _finalize_commit(
                     deploy_branch,
@@ -943,7 +974,7 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
         )
 
 
-class KubeApply(AttrCommand):
+class KubeApply(CachePushCommand):
     """Apply Kubernetes objects directly against the current kubeconfig
     context: server-side apply in barrier order, with optional pruning.
 
@@ -991,19 +1022,6 @@ class KubeApply(AttrCommand):
         help="Let --converge delete and re-create an object whose immutable field changed (a completed Job's "
         "spec.template, a Service's clusterIP). Off by default: a recreate is a delete, and for some kinds "
         "that is data loss. Never recreates a PersistentVolumeClaim, Secret, Namespace or CRD.",
-    )
-    cache_push: bool = opt(
-        True,
-        negatable=True,
-        help="Push ekn.cachePackage's closure to ekn.cacheTo before applying, as `ekn deploy` does. "
-        "A no-op when ekn.cacheTo is null. On by default: a CSI-mounted store path that was never "
-        "pushed is a pod that fails to start, and a direct apply has no engine in front of it to "
-        "absorb the gap.",
-    )
-    cache_allow_failure: bool = opt(
-        False,
-        help="Log a warning and continue if the pre-apply cache push fails, instead of aborting. "
-        "Off by default, for the same reason as on `ekn deploy`.",
     )
     pause_engine: bool = opt(
         False,
@@ -1099,9 +1117,7 @@ class KubeApply(AttrCommand):
         # can fetch them. A leg whose only substituter is the workload it is
         # needed to start -- pynixd's own environment -- passes the push and
         # fails the assertion, which is the right way round.
-        if self.cache_push:
-            with timed_stage("kubeapply: cache-push (total, incl. network copy)"):
-                await _push_ekn_cache(self.file, self.flake, self.attr, allow_failure=self.cache_allow_failure)
+        await self.push_cache()
 
         # `AsyncExitStack` rather than two code paths: the kubeconfig is a
         # temporary file that must outlive the apply and not outlive the
