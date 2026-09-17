@@ -822,6 +822,39 @@ let
       image = "x";
     };
   };
+
+  # A value carried whole: one definition unwraps to its content, and nothing
+  # of the marker survives into the output.
+  untypedCarriesTheValueWhole = evalValue [
+    {
+      value = lib.mkUntyped {
+        panels = [ { id = 1; } ];
+        nested.deep = "x";
+      };
+    }
+  ];
+
+  # The guard on `objectType`. Without it the attribute map accepts the
+  # marker -- its own check is only `isAttrs` -- merges it as a plain object,
+  # and `_type` and `content` reach the rendered manifest. Found by a
+  # differing leaf count rather than by reading the code.
+  untypedNestedInsideAnObject = evalValue [
+    {
+      value.metadata.name = "cm";
+      value.data.dashboard = lib.mkUntyped {
+        _type = "not-a-marker";
+        content = "a field genuinely called content";
+      };
+    }
+  ];
+
+  # Two definitions are an error, not a merge: nothing looks inside, so
+  # nothing can merge them. This is the difference from `types.anything`,
+  # which deep-merges the second silently.
+  untypedTwiceThrows = evalValue [
+    { value = lib.mkUntyped { a = 1; }; }
+    { value = lib.mkUntyped { a = 2; }; }
+  ];
 in
 {
   usesV2Merge = kubeValueType.merge ? v2 && kubeValueType.check.isV2MergeCoherent;
@@ -904,4 +937,7 @@ in
   mkNamedListRejectsNonAttrsInput = mkNamedListRejectsNonAttrsInput;
   mkNamedListRejectsNonAttrsValues = mkNamedListRejectsNonAttrsValues;
   mkNumberedListRejectsNonIntKeys = mkNumberedListRejectsNonIntKeys;
+  untypedTwiceThrows = untypedTwiceThrows;
+
+  inherit untypedCarriesTheValueWhole untypedNestedInsideAnObject;
 }

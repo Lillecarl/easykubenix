@@ -17,6 +17,7 @@ let
     conditionalAttrsOf
     isNamedList
     isNumberedList
+    isUntyped
     stripListMarker
     # Both directions back to a list are shared with `kubeAttrsToLists`, the
     # pass kubernetes.nix runs over generator and transformer output. See
@@ -218,9 +219,40 @@ let
   # A module can then patch `spec.replicas` only when that field is already
   # there. `conditionalAttrsOf` rejects a bare `mkIfExists` marker itself, for
   # the same reason this guard rejects the two list markers.
+  # `isUntyped` is in this guard for the same reason as the two list markers,
+  # and it was found the same way the comment above predicts -- by a differing
+  # leaf count (37,455 against 37,416), not by reading. Without it the
+  # attribute map accepts an untyped marker, merges it as a plain object, and
+  # `_type` and `content` reach the rendered manifest.
   objectType = types.addCheck (conditionalAttrsOf valueType) (
-    x: !(isNamedList x) && !(isNumberedList x)
+    x: !(isNamedList x) && !(isNumberedList x) && !(isUntyped x)
   );
+
+  # A value carried whole. See `lib.mkUntyped`.
+  #
+  # **Two definitions are an error, not a merge.** Nothing looks inside, so
+  # nothing can merge them, and saying so is the whole difference from
+  # `types.anything` -- which measures identically here and silently
+  # deep-merges the second definition.
+  #
+  # A legacy `merge` is correct here rather than an oversight: `either` handles
+  # a branch without `merge.v2` by calling `merge loc defs` and computing
+  # `headError` from `check`. There is no metadata to preserve, because the
+  # value is never walked.
+  untypedType = mkOptionType {
+    name = "untypedValue";
+    description = "a value carried whole, never walked";
+    check = isUntyped;
+    merge =
+      loc: defs:
+      if builtins.length defs == 1 then
+        (builtins.head defs).value.content
+      else
+        throw (
+          "The option `${lib.showOption loc}` is untyped and has ${toString (builtins.length defs)} "
+          + "definitions. An untyped value is taken whole, so it can be set once."
+        );
+  };
 
   # `types.nullOr` still uses the legacy merge protocol, so it returns no
   # metadata. It sits at the outermost boundary of this recursive type, so
@@ -263,6 +295,12 @@ let
     # check, so an object still falls through to `objectType`.
     (namedListOf valueType)
     objectType
+    # **Last, and measured rather than chosen.** On a 269,929-node tree with
+    # no untyped values in it at all -- pure tax -- the branch costs +8% first
+    # and +2% last. An untyped value is found a few hundred times in a whole
+    # render, so the checks it then pays do not signify, while every ordinary
+    # value is untouched by a branch it never reaches.
+    untypedType
   ];
   valueType = baseType // {
     description = "Kubernetes-shaped JSON value (plain JSON, plus explicit mkNamedList/mkNumberedList override-by-name/index support)";

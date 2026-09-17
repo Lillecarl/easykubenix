@@ -241,6 +241,48 @@ class TestKubeValueType:
             await evaluate_file(NIX_TEST_FILE, "mkNumberedListRejectsNonIntKeys")
 
 
+class TestUntypedValues:
+    """A value carried whole, never walked.
+
+    For something large and opaque that nobody merges field by field -- a
+    CRD's OpenAPI schema, a Grafana dashboard. Typed, 39 dashboards cost
+    0.740s; carried, 0.158s. Issue Lillecarl/easykubenix#32.
+    """
+
+    async def test_one_definition_unwraps_to_its_content(self) -> None:
+        """Nothing of the marker survives: no `_type`, no `content`."""
+        result = await evaluate_file(NIX_TEST_FILE, "untypedCarriesTheValueWhole")
+
+        assert result == {"panels": [{"id": 1}], "nested": {"deep": "x"}}
+
+    async def test_the_object_map_does_not_eat_the_marker(self) -> None:
+        """The guard on `objectType`, and the reason it is needed.
+
+        That type's check is `isAttrs` plus a guard against the list markers,
+        so without naming this one too it accepts an untyped marker, merges
+        it as a plain object, and leaves `_type` and `content` in the
+        rendered manifest. It surfaced as a differing leaf count -- 37,455
+        against 37,416 -- rather than by reading the code.
+
+        The content here deliberately *contains* the words `_type` and
+        `content`, so a value that merely looks like a marker still comes
+        through untouched.
+        """
+        result = await evaluate_file(NIX_TEST_FILE, "untypedNestedInsideAnObject")
+
+        assert result == {
+            "metadata": {"name": "cm"},
+            "data": {"dashboard": {"_type": "not-a-marker", "content": "a field genuinely called content"}},
+        }
+
+    async def test_two_definitions_are_an_error_not_a_merge(self) -> None:
+        """The difference from `types.anything`, which measures identically
+        and deep-merges the second definition silently -- invisible until the
+        day somebody sets the value twice. The message names the option."""
+        with pytest.raises(nanopynix.NixError, match="is untyped and has 2 definitions"):
+            await evaluate_file(NIX_TEST_FILE, "untypedTwiceThrows")
+
+
 class TestBranchSelection:
     """Which branch of `oneOf` takes a definition.
 

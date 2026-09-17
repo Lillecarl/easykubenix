@@ -36,9 +36,11 @@ self: lib: rec {
   # a Kubernetes object that is an attribute set.
   namedListType = "namedList";
   numberedListType = "numberedList";
+  untypedType = "untyped";
 
   isNamedList = value: lib.isAttrs value && (value._type or null) == namedListType;
   isNumberedList = value: lib.isAttrs value && (value._type or null) == numberedListType;
+  isUntyped = value: lib.isAttrs value && (value._type or null) == untypedType;
   isMarkedList = value: isNamedList value || isNumberedList value;
   # Remove the marker. This gives the bare attribute set of entries.
   stripListMarker = value: lib.removeAttrs value [ "_type" ];
@@ -76,6 +78,24 @@ self: lib: rec {
       throw "mkNamedList error: All values in the attribute set must themselves be attribute sets."
     else
       attrs // { _type = namedListType; };
+
+  # Mark a value as carried whole, never walked.
+  #
+  # For a value that is large, opaque and that **nobody merges field by
+  # field**: a CustomResourceDefinition's OpenAPI schema, a Grafana
+  # dashboard, an imported blob. `kubeValueType` walks every leaf of an
+  # ordinary value through nixpkgs' merge machinery, and for these that work
+  # buys nothing -- 39 dashboards cost 0.740s typed and 0.158s carried.
+  #
+  # **Set once.** Nothing looks inside, so nothing can merge two of them, and
+  # the branch says so rather than picking one. That is the whole difference
+  # from `lib.types.anything`, which measures the same here and silently
+  # deep-merges a second definition -- invisible until the day someone sets
+  # the value twice.
+  mkUntyped = content: {
+    _type = untypedType;
+    inherit content;
+  };
 
   # Mark an attribute set as a numbered list.
   # A numbered list is a short form to override a list field by index.
