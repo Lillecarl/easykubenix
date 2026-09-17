@@ -1233,6 +1233,84 @@ def ssh_opts_for_push(uri: str, current: str | None, *, accept_new_host_keys: bo
     return f"{current or ''} -o StrictHostKeyChecking=accept-new".strip()
 
 
+_SSH_PROBE_SECONDS = 5
+
+#: Lower-cased fragments of OpenSSH's own stderr. Matching the text is what
+#: there is: ssh exits 255 for every one of these.
+_CHANGED_KEY_SIGN = "remote host identification has changed"
+_UNKNOWN_KEY_SIGNS = ("host key verification failed", "host key is known")
+_UNREACHABLE_SIGNS = (
+    "connection refused",
+    "connection timed out",
+    "could not resolve hostname",
+    "name or service not known",
+    "no route to host",
+    "network is unreachable",
+    "operation timed out",
+)
+
+
+def _classify_ssh_stderr(stderr: str, target: str, port: int | None) -> str | None:
+    at_port = f" -p {port}" if port else ""
+    lowered = stderr.lower()
+    if _CHANGED_KEY_SIGN in lowered:
+        host = target.partition("@")[2] or target
+        return (
+            f"{target}'s host key changed since this machine recorded it. "
+            f"Check why, then `ssh-keygen -R {host}` to drop the old one."
+        )
+    if any(sign in lowered for sign in _UNKNOWN_KEY_SIGNS):
+        return (
+            f"{target}'s host key is not trusted here, and that is enough to fail the push. "
+            f"`ssh -o StrictHostKeyChecking=accept-new{at_port} {target}` accepts it, "
+            f"and `ekn.cacheAcceptNewHostKeys` does the same on every push."
+        )
+    if any(sign in lowered for sign in _UNREACHABLE_SIGNS):
+        return f"{target} did not answer ssh, so the host key is not the problem: {stderr.strip().splitlines()[-1]}"
+    return None
+
+
+async def ssh_failure_hint(uri: str) -> str | None:
+    """Why a push to *uri* failed, said in the terms Nix does not use.
+
+    Nix reports `failed to start SSH connection to '<host>'` for an unknown
+    host key, a refused connection and a rejected login alike, and those need
+    different answers. One ssh of our own, after the failure, separates them:
+    it reads the same `ssh_config` and the same `known_hosts` files as the
+    ssh Nix started, including `/etc/ssh/ssh_known_hosts`, which
+    `ssh-keygen -F` never looks at. Issue #18.
+
+    `StrictHostKeyChecking=yes`, never `accept-new`: a diagnosis must not
+    change what the machine trusts, and `ekn.cacheAcceptNewHostKeys` has
+    already had its turn by the time this runs.
+
+    `None` where there is nothing to add -- a non-ssh destination, no ssh on
+    `PATH`, or a host that answered and refused the login.
+    """
+    split = ssh_destination(uri)
+    if split is None:
+        return None
+    target = f"{split.username}@{split.hostname}" if split.username else str(split.hostname)
+    argv = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"ConnectTimeout={_SSH_PROBE_SECONDS}",
+        *(["-p", str(split.port)] if split.port else []),
+        target,
+        "exit",
+    ]
+    try:
+        with anyio.fail_after(_SSH_PROBE_SECONDS * 3):
+            result = await anyio.run_process(argv, check=False)
+    except (OSError, TimeoutError):
+        return None
+    return _classify_ssh_stderr(result.stderr.decode(errors="replace"), target, split.port)
+
+
 @contextmanager
 def _pushing_ssh_opts(uri: str, *, accept_new_host_keys: bool) -> Generator[None]:
     """Hold `ssh_opts_for_push`'s answer in the environment, then restore it.

@@ -45,6 +45,7 @@ from ekn.eval import (
     push_closure_to_store,
     python_profile,
     realise_attr,
+    ssh_failure_hint,
     timed_stage,
     verbose_session,
 )
@@ -477,6 +478,10 @@ async def _push_ekn_cache(file: _Path | None, flake: str | None, attr: str | Non
         )
 
 
+def _with_ssh_hint(message: str, hint: str | None) -> str:
+    return message if hint is None else f"{message}\n{hint}"
+
+
 async def _push_one_cache(
     cache_package_out: str,
     cache_to: str,
@@ -497,21 +502,25 @@ async def _push_one_cache(
             accept_new_host_keys=accept_new_host_keys,
         )
     except NixError as exc:
+        # Before the report, not after: `_report_nix_error` exits, and Nix's
+        # own `failed to start SSH connection to '<host>'` is the message
+        # this exists to explain. Issue #18.
+        detail = _with_ssh_hint(exc.msg_without_ansi, await ssh_failure_hint(cache_to))
         if allow_failure:
-            _log.warning(
-                f"cache push to {cache_to} failed, continuing anyway (--cache-allow-failure)\n{exc.msg_without_ansi}"
-            )
+            _log.warning(f"cache push to {cache_to} failed, continuing anyway (--cache-allow-failure)\n{detail}")
             return
-        _report_nix_error(exc)
+        _log.error(detail)
+        raise SystemExit(1) from exc
     except TimeoutError:
         # A timeout is a failure of the push like any other, so
         # `--cache-allow-failure` covers it too. Said with the setting's
         # name, because the reason a deploy stopped here is a number
         # somebody chose and can change.
-        reason = (
+        reason = _with_ssh_hint(
             f"cache push to {cache_to} did not finish within "
             f"ekn.cacheTimeoutSec ({timeout_sec:g}s). The host may be "
-            f"routed but not listening, which ssh waits out in silence."
+            f"routed but not listening, which ssh waits out in silence.",
+            await ssh_failure_hint(cache_to),
         )
         if allow_failure:
             _log.warning(f"{reason} Continuing anyway (--cache-allow-failure).")
