@@ -134,23 +134,23 @@ async def discover(api: Api, kind: str, api_version: str) -> tuple[str, bool]:
     """The plural name and the namespaced-ness of one kind, from the API
     server's own discovery document.
 
-    **Not `api.async_lookup_kind`.** That takes a `"Kind.group"` string, puts
-    it through kr8s' `parse_kind` -- which lowercases it -- and then matches
-    the result against each resource's plural, its Kind, its singular and its
-    short names. A CustomResourceDefinition whose singular is not simply the
-    Kind in lower case matches none of the four:
-    `NetworkAttachmentDefinition` becomes `networkattachmentdefinition`, while
-    the resource offers `network-attachment-definitions`,
-    `NetworkAttachmentDefinition` and `network-attachment-definition`. The
-    apply then dies with `ValueError: Kind networkattachmentdefinition not
-    found`, seconds after waiting for that very CRD to become Established.
+    **Not `api.async_lookup_kind`.** A manifest carries `kind` and
+    `apiVersion`, which identify a resource exactly, so this matches on those
+    two and changes neither one's case. `async_lookup_kind` takes a single
+    `"Kind.group"` string, lowercases it, and then tries each resource's
+    plural, Kind, singular and short names in turn -- a fuzzier question than
+    the caller is asking, and it answers `ValueError: Kind ... not found`
+    where a failure here can say which kind in which version and what to do
+    about it.
 
-    Most CRDs name their singular as the lowercased Kind -- `prometheusrule`,
-    `verticalpodautoscaler` -- which is why this went unseen for so long. A
-    hyphenated singular is legal and common in the CNI ecosystem.
-
-    A manifest carries the two fields that identify a resource exactly, so
-    those are what this matches on, and nothing here changes their case.
+    This used to exist because that lookup was also *wrong*: it compared a
+    lowercased name against the CamelCase `kind`, so a CRD whose singular is
+    not the lowercased Kind matched none of the four.
+    `NetworkAttachmentDefinition` is none of
+    `network-attachment-definitions`, `network-attachment-definition` or
+    `networkattachmentdefinition`, so an apply died seconds after waiting for
+    that very CRD to become Established. Fixed in the umbrella's kr8s fork,
+    which folds case there; see issue #29.
 
     The second read is the other half. kr8s caches discovery for six hours,
     because kubectl does, and a CRD an earlier barrier of this same apply
