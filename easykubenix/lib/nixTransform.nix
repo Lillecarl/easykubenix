@@ -106,9 +106,19 @@ let
 
   transform =
     {
-      # Names the derivation and the generated transform file. A throw inside
-      # the transform reports that file and nothing else, so name this after
-      # the option path that produced it.
+      # Names the derivation and the generated transform file.
+      #
+      # **Every error from inside the transform names this file and nothing
+      # else**, so it is the only thing that says which value failed. Nix
+      # reports the line and the caret and, for a misspelled attribute, a
+      # suggestion -- all against `<name>-transform.nix` in the store:
+      #
+      #   error: attribute 'absentMetricz' missing
+      #   at /nix/store/...-cilium-dashboard-transform.nix:26:50:
+      #   Did you mean absentMetrics?
+      #
+      # So name it after the value, not after the caller: a prefix the value
+      # already carries reads as `cilium-cilium-dashboard`.
       name,
       # The input, as JSON. For a value already in Nix, use
       # `pkgs.writeText "x.json" (builtins.toJSON value)`.
