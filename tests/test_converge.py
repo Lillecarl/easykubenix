@@ -25,6 +25,7 @@ from ekn.converge import (
     Disposition,
     classify,
     converge_barrier,
+    converge_objects,
     may_recreate,
     object_key,
     settled,
@@ -262,3 +263,69 @@ class TestRecreate:
     def test_the_opt_out_annotation_keeps_recreate_away(self) -> None:
         assert may_recreate(manifest(kind="Job"))
         assert not may_recreate(manifest(kind="Job", annotations={RECREATE_OPT_OUT_ANNOTATION: "true"}))
+
+
+class TestBarrierWalking:
+    """Barriers are an ordering, so an unfinished one is a decision point."""
+
+    async def test_an_unfinished_barrier_stops_the_run(self) -> None:
+        """Without `--keep-going`. Carrying on applies objects whose
+        prerequisites are known to be missing, and the second wave of
+        failures says nothing about the first."""
+        attempted: list[str] = []
+
+        async def apply(spec: Manifest) -> Any:
+            name = object_key(spec)[2]
+            attempted.append(name)
+            if name == "first":
+                raise server_error(403)
+            return object()
+
+        failures = await converge_objects(
+            [[manifest(name="first")], [manifest(name="second")]],
+            apply=apply,
+            settle_seconds=1.0,
+        )
+
+        assert attempted == ["first"]
+        assert [f.key[2] for f in failures] == ["first"]
+
+    async def test_keep_going_reaches_the_later_barriers(self) -> None:
+        attempted: list[str] = []
+
+        async def apply(spec: Manifest) -> Any:
+            name = object_key(spec)[2]
+            attempted.append(name)
+            if name == "first":
+                raise server_error(403)
+            return object()
+
+        failures = await converge_objects(
+            [[manifest(name="first")], [manifest(name="second")]],
+            apply=apply,
+            keep_going=True,
+            settle_seconds=1.0,
+        )
+
+        assert attempted == ["first", "second"]
+        assert [f.key[2] for f in failures] == ["first"]
+
+    async def test_the_hook_sees_what_the_barrier_applied(self) -> None:
+        """`after_barrier` is how a caller waits for CRDs to be Established
+        without this module knowing what a CRD is."""
+        seen: list[int] = []
+        sentinel = object()
+
+        async def apply(_spec: Manifest) -> Any:
+            return sentinel
+
+        async def after_barrier(applied: Any) -> None:
+            seen.append(len(applied))
+
+        await converge_objects(
+            [[manifest(name="a"), manifest(name="b")], [manifest(name="c")]],
+            apply=apply,
+            after_barrier=after_barrier,
+        )
+
+        assert seen == [2, 1]

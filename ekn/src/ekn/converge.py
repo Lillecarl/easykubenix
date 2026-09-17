@@ -315,6 +315,63 @@ async def converge_barrier(  # noqa: PLR0913 -- every argument is an injected se
     return [*terminal.values(), *stuck]
 
 
+async def converge_objects(  # noqa: PLR0913 -- every argument is an injected seam; see the Protocols above
+    tiers: Sequence[Sequence[Manifest]],
+    *,
+    apply: ApplyOne,
+    delete: DeleteOne | None = None,
+    after_barrier: Callable[[Sequence[APIObject]], Awaitable[None]] | None = None,
+    settle_seconds: float = DEFAULT_SETTLE_SECONDS,
+    allow_recreate: bool = False,
+    keep_going: bool = False,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+) -> list[Failure]:
+    """Converge every barrier in order, and report what never applied.
+
+    `after_barrier` receives the objects that barrier applied, so a caller
+    can wait for the CRDs among them to become Established. This module
+    knows nothing about kr8s, and that hook is why it does not have to: the
+    wait needs an `APIObject` and the policy here needs none.
+
+    Without `keep_going`, a barrier that stops making progress ends the run.
+    The barriers are an ordering, so carrying on past an unfinished one
+    applies objects whose prerequisites are known to be missing -- which
+    produces a second wave of failures that say nothing about the first.
+    """
+    failures: list[Failure] = []
+    for index, tier in enumerate(tiers, start=1):
+        _log.info("converging", barrier=f"{index}/{len(tiers)}", objects=len(tier))
+        applied: list[APIObject] = []
+
+        async def record(spec: Manifest, _applied: list[APIObject] = applied) -> APIObject:
+            obj = await apply(spec)
+            _applied.append(obj)
+            return obj
+
+        tier_failures = await converge_barrier(
+            tier,
+            apply=record,
+            delete=delete,
+            settle_seconds=settle_seconds,
+            allow_recreate=allow_recreate,
+            clock=clock,
+            sleep=sleep,
+        )
+        failures.extend(tier_failures)
+        if after_barrier is not None:
+            await after_barrier(applied)
+        if tier_failures and not keep_going:
+            _log.error(
+                "barrier did not finish; stopping",
+                barrier=f"{index}/{len(tiers)}",
+                failed=len(tier_failures),
+                remaining_barriers=len(tiers) - index,
+            )
+            break
+    return failures
+
+
 async def _recreate(  # noqa: PLR0913 -- one caller, and every argument is state that caller holds
     spec: Manifest,
     *,
@@ -358,6 +415,7 @@ __all__ = [
     "Failure",
     "classify",
     "converge_barrier",
+    "converge_objects",
     "may_recreate",
     "object_key",
     "settled",
