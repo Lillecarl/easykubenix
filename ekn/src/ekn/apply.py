@@ -296,50 +296,26 @@ def with_environment_label(spec: Manifest, label: str, value: str) -> Manifest:
 
 
 async def _wait_established(crd: APIObject, seconds: float) -> None:
-    """Wait for one CRD to report Established, tolerating a status that is not there yet.
+    """Wait for one CRD to report Established, and name it if it never does.
 
-    `kr8s`' own `wait` reads `.status.conditions` and hands it to
-    `list_dict_unpack`, which iterates its argument. A CRD the API server
-    has accepted but not yet given a status has no `conditions` at all, so
-    that argument is `None` and the call raises::
-
-        TypeError: 'NoneType' object is not iterable
-
-    A race, and a narrow one -- the apiextensions controller fills the
-    status in well under a second -- so it passes almost every time and
-    then kills a bootstrap that happens to lose it. Seen against a
-    freshly-created `applicationsets.argoproj.io`, mid-apply, with the
-    barriers before it already in the cluster.
-
-    Retrying is the whole fix: the next read finds a status. Only
-    `TypeError` is swallowed, and only until the deadline, so a CRD that
-    genuinely never establishes still fails rather than spinning.
-
-    **`asyncio.timeout`, and not a `timeout=` argument.** This used to do the
-    arithmetic itself -- a deadline, and what is left of it on each turn --
-    and hand the remainder to `kr8s`' `wait`. One context manager bounds the
-    whole loop instead, the sleeps between the retries as well as the watch
-    inside them. It also keeps a float away from that `wait`, which annotates
-    its own `timeout` as `int | None` although the `async_wait` under it takes
+    **`asyncio.timeout`, and not a `timeout=` argument.** The context
+    manager keeps a float away from `kr8s`' `wait`, which annotates its own
+    `timeout` as `int | None` although the `async_wait` under it takes
     `int | float | None`.
 
     *seconds*, and not *timeout*: the value is the argument of the context
     manager below, not a deadline this function passes on to something else.
     `ASYNC109` reads the name, and the name it warns about means the second
     thing.
+
+    This used to retry around a `kr8s` race as well: a CRD the API server
+    had accepted but not yet given conditions made `wait` raise
+    `TypeError: 'NoneType' object is not iterable`. The fork fixes that in
+    `kr8s`, so an empty status now reads as a condition not met.
     """
     try:
         async with asyncio.timeout(seconds):
-            while True:
-                try:
-                    await crd.wait("condition=Established")
-                except TypeError:
-                    # No status yet. Let the controller get there rather than
-                    # hammering the API server, then look again.
-                    _log.debug("CRD has no status yet, retrying", name=crd.name)
-                    await asyncio.sleep(0.5)
-                    continue
-                return
+            await crd.wait("condition=Established")
     except TimeoutError as exc:
         msg = f"CRD {crd.name} did not become Established within {seconds}s"
         raise TimeoutError(msg) from exc
