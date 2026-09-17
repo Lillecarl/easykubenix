@@ -609,12 +609,16 @@ in
 
   config.deployment.declaredUnits = lib.attrNames config.deployment.units;
 
-  config.deployment.unitFieldManagers = lib.mapAttrs (_name: unit: unit.fieldManager) config.deployment.units;
+  config.deployment.unitFieldManagers = lib.mapAttrs (
+    _name: unit: unit.fieldManager
+  ) config.deployment.units;
 
   # The same discriminator `kubernetes.nix` uses to decide what reaches
   # `kubernetes.generated`, inverted. See the option's description.
   config.deployment.handAppliedUnits = lib.attrNames (
-    lib.filterAttrs (_name: unit: !(unit.class == "kubernetes" && unit.modules == [ ])) config.deployment.units
+    lib.filterAttrs (
+      _name: unit: !(unit.class == "kubernetes" && unit.modules == [ ])
+    ) config.deployment.units
   );
 
   config.deployment.tofuUnits = lib.mapAttrs (name: unit: {
