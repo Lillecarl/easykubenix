@@ -27,6 +27,8 @@ import anyio
 import kr8s
 import structlog
 
+from .apply import KindNotServedError
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
@@ -157,42 +159,86 @@ def _status_code(exc: kr8s.ServerError) -> int | None:
     return None if response is None else response.status_code
 
 
-def _causes(exc: kr8s.ServerError) -> list[str]:
-    """Every `causes[].message` of a `Status` body, plus its own message.
+IMMUTABLE_PHRASES = (
+    "immutable",
+    "may not be changed",
+    "may not change once set",
+)
+"""How the API server says "this cannot change", in the words it uses.
+
+Three wordings, all measured against a live cluster rather than guessed:
+
+    Job         spec.template     ": field is immutable"
+    Service     spec.clusterIPs   ": may not change once set"
+
+`may not change once set` is not `may not be changed`, and a table that
+carries only the second misses every Service -- 57 of them in one render.
+"""
+
+FORBIDDEN_UPDATE_PHRASE = "updates to"
+"""What makes a `FieldValueForbidden` an immutability error rather than a
+schema one.
+
+The StatefulSet case says `updates to statefulset spec for fields other than
+'replicas', ... are forbidden`, and contains neither phrase above.
+
+**Narrower than "every FieldValueForbidden".** That reason also covers a
+field that may not be set at all, which is a configuration error: the answer
+is to fix the manifest, not to delete the object. A recreate is a delete, so
+the two mistakes are not symmetric -- missing an immutability error reports
+it as terminal with the server's own message, and inventing one destroys
+data. This errs at the safe end deliberately.
+"""
+
+
+def _causes(exc: kr8s.ServerError) -> list[tuple[str, str]]:
+    """Every `(reason, message)` of a `Status` body, plus its own message.
 
     The API server puts the useful half of a 422 in `details.causes`, and
-    `str(exc)` carries only the summary line.
+    `str(exc)` carries only the summary line. The reason matters as much as
+    the message: `FieldValueForbidden` is how an immutability error arrives
+    when the message says neither "immutable" nor "may not change".
     """
     response = exc.response
-    messages = [str(exc)]
+    causes: list[tuple[str, str]] = [("", str(exc))]
     if response is None:
-        return messages
+        return causes
     try:
         body = response.json()
     except ValueError:
-        return messages
+        return causes
     if not isinstance(body, dict):
-        return messages
+        return causes
     details = body.get("details")
     if not isinstance(details, dict):
-        return messages
-    causes = details.get("causes")
-    if not isinstance(causes, list):
-        return messages
-    messages.extend(str(cause.get("message", "")) for cause in causes if isinstance(cause, dict))
-    return messages
+        return causes
+    listed = details.get("causes")
+    if not isinstance(listed, list):
+        return causes
+    causes.extend(
+        (str(cause.get("reason", "")), str(cause.get("message", ""))) for cause in listed if isinstance(cause, dict)
+    )
+    return causes
 
 
 def _is_immutable_error(exc: kr8s.ServerError) -> bool:
     """True for the 422 that means "this field cannot be changed".
 
     The case that forces this rung to exist is a completed Job:
-    `spec.template` is immutable, so every apply after the first fails
-    forever and a converging run can never reach a clean queue. The API
-    server words it `field is immutable`; several controllers word their own
-    version `may not be changed`.
+    `spec.template` is immutable, so every apply after the first fails for
+    ever and a converging run can never reach a clean queue.
+
+    Three shapes, all captured from a live API server rather than guessed --
+    a Job, a Service and a StatefulSet. The third carries no phrase at all
+    and is recognised by its cause reason instead. See `IMMUTABLE_PHRASES`
+    and `FORBIDDEN_UPDATE_PHRASE`, which says why that check is narrow.
     """
-    return any("immutable" in message or "may not be changed" in message for message in _causes(exc))
+    for reason, message in _causes(exc):
+        if any(phrase in message for phrase in IMMUTABLE_PHRASES):
+            return True
+        if reason == "FieldValueForbidden" and FORBIDDEN_UPDATE_PHRASE in message:
+            return True
+    return False
 
 
 def classify(exc: BaseException) -> Disposition:
@@ -202,7 +248,16 @@ def classify(exc: BaseException) -> Disposition:
     refusal and a schema error do not become true by waiting, and retrying
     either for the whole settle window turns a clear failure into a slow
     one -- which is the failure mode this classification exists to prevent.
+
+    **`KindNotServedError` is checked first, and it is not an HTTP error at all.**
+    Discovery answers 200 and lacks the kind, so the apply never reaches a
+    PATCH and no status code exists to classify. Left to the fall-through it
+    lands on TERMINAL -- which would make the single most common retryable
+    condition of a 188-CRD converge the one thing never retried, while its
+    own message says a CRD "has to be applied first".
     """
+    if isinstance(exc, KindNotServedError):
+        return Disposition.RETRY
     if isinstance(exc, kr8s.ServerError):
         status = _status_code(exc)
         if status == HTTPStatus.UNPROCESSABLE_ENTITY:
@@ -220,10 +275,52 @@ def classify(exc: BaseException) -> Disposition:
     return Disposition.TERMINAL
 
 
+def _keeps_its_volumes(spec: Manifest) -> bool:
+    """True when deleting this StatefulSet is known not to delete its volumes.
+
+    A StatefulSet with `volumeClaimTemplates` owns PersistentVolumeClaims,
+    and `persistentVolumeClaimRetentionPolicy.whenDeleted` decides what
+    happens to them. The API default is `Retain`, so a recreate loses nothing
+    today -- but it is a default, and a chart bump can set `Delete` without
+    anyone reading the diff. Measured on one live cluster: 3 of 5
+    StatefulSets declare volume claim templates and one states a policy.
+
+    So this asks for the policy to be written down rather than inferred. An
+    explicit `Retain` allows the recreate; anything else, including saying
+    nothing, refuses it.
+    """
+    spec_value = spec.get("spec") or {}
+    if not isinstance(spec_value, dict):
+        return True
+    templates = spec_value.get("volumeClaimTemplates")
+    if not isinstance(templates, list) or not templates:
+        return True
+    policy = spec_value.get("persistentVolumeClaimRetentionPolicy") or {}
+    if not isinstance(policy, dict):
+        return False
+    return policy.get("whenDeleted") == "Retain"
+
+
+def _why_not_recreated(spec: Manifest) -> str:
+    """The refusal, in terms of what the operator can do about it."""
+    _, kind, _ = object_key(spec)
+    if kind in RECREATE_DENY_KINDS:
+        return f"immutable, and a {kind} is never recreated because the delete loses data"
+    if kind == "StatefulSet" and not _keeps_its_volumes(spec):
+        return (
+            "immutable, and this StatefulSet has volumeClaimTemplates with no explicit "
+            "spec.persistentVolumeClaimRetentionPolicy.whenDeleted = Retain, so a recreate "
+            "may delete its PersistentVolumeClaims"
+        )
+    return "immutable, and this object carries " + RECREATE_OPT_OUT_ANNOTATION
+
+
 def may_recreate(spec: Manifest) -> bool:
     """True when `--allow-recreate` is allowed to delete this object first."""
     _, kind, _ = object_key(spec)
     if kind in RECREATE_DENY_KINDS:
+        return False
+    if kind == "StatefulSet" and not _keeps_its_volumes(spec):
         return False
     metadata_value = spec.get("metadata") or {}
     metadata = metadata_value if isinstance(metadata_value, dict) else {}
@@ -413,7 +510,7 @@ async def _recreate(  # noqa: PLR0913 -- one caller, and every argument is state
         last_error[key] = f"{last_error[key]} (immutable; pass --allow-recreate to delete and re-apply)"
         return Disposition.TERMINAL
     if not may_recreate(spec):
-        last_error[key] = f"{last_error[key]} (immutable, and this kind is never recreated)"
+        last_error[key] = f"{last_error[key]} ({_why_not_recreated(spec)})"
         return Disposition.TERMINAL
     try:
         await delete(spec)

@@ -86,6 +86,21 @@ def barriers(
     return [grouped[priority] for priority in sorted(grouped)]
 
 
+class KindNotServedError(ValueError):
+    """The API server serves no such kind, so nothing can be applied to it.
+
+    Raised by `discover`, which never reaches a PATCH: discovery answers
+    200 and simply lacks the kind. A converging apply has to tell this from
+    a real failure, because it is the ordinary state of a custom kind whose
+    CustomResourceDefinition is in a later part of the same run.
+
+    **A `ValueError` and not a `LookupError`.** `clusterdiff` already
+    catches `ValueError` from `build_object` for precisely this case, and
+    reports it per object rather than aborting the diff. A new base class
+    would silently stop that working.
+    """
+
+
 async def discover(api: Api, kind: str, api_version: str) -> tuple[str, bool]:
     """The plural name and the namespaced-ness of one kind, from the API
     server's own discovery document.
@@ -123,7 +138,7 @@ async def discover(api: Api, kind: str, api_version: str) -> tuple[str, bool]:
         f"the API server serves no {kind} in {api_version}. "
         "A CustomResourceDefinition that establishes it has to be applied first."
     )
-    raise ValueError(msg)
+    raise KindNotServedError(msg)
 
 
 async def build_object(spec: Manifest, api: Api) -> APIObject:

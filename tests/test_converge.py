@@ -20,6 +20,7 @@ import httpx
 import kr8s
 import pytest
 
+from ekn.apply import KindNotServedError
 from ekn.converge import (
     RECREATE_OPT_OUT_ANNOTATION,
     Disposition,
@@ -45,6 +46,20 @@ def server_error(status: int, message: str = "nope", causes: list[str] | None = 
     body: dict[str, Any] = {"kind": "Status", "message": message}
     if causes is not None:
         body["details"] = {"causes": [{"message": cause} for cause in causes]}
+    return kr8s.ServerError(
+        message,
+        response=httpx.Response(status_code=status, json=body, request=httpx.Request("PATCH", "http://api/x")),
+    )
+
+
+def server_error_with_reasons(status: int, message: str, causes: list[tuple[str, str]]) -> kr8s.ServerError:
+    """A `Status` whose causes carry a `reason`, which is how an immutable
+    StatefulSet update arrives -- its message holds no telling phrase."""
+    body: dict[str, Any] = {
+        "kind": "Status",
+        "message": message,
+        "details": {"causes": [{"reason": reason, "message": text} for reason, text in causes]},
+    }
     return kr8s.ServerError(
         message,
         response=httpx.Response(status_code=status, json=body, request=httpx.Request("PATCH", "http://api/x")),
@@ -383,3 +398,126 @@ class TestTheRecreateRace:
         )
 
         assert "deleting it for a recreate" in failures[0].error
+
+
+class TestTheCorpus:
+    """The shapes a real API server actually returns.
+
+    Captured from a live cluster by solid-kubernetes rather than invented
+    here, because the first version of this table was invented and three of
+    these did not match it. Issue Lillecarl/easykubenix#28.
+    """
+
+    def test_a_kind_the_server_does_not_serve_is_retried(self) -> None:
+        """The most common retryable condition of a 188-CRD converge, and it
+        is not an HTTP error: discovery answers 200 and lacks the kind, so
+        the apply never reaches a PATCH. It used to land on TERMINAL."""
+        exc = KindNotServedError(
+            "the API server serves no CiliumNetworkPolicy in cilium.io/v2. "
+            "A CustomResourceDefinition that establishes it has to be applied first.",
+        )
+
+        assert classify(exc) is Disposition.RETRY
+
+    def test_an_ordinary_value_error_is_still_terminal(self) -> None:
+        """`KindNotServedError` is a ValueError, so the narrow check matters."""
+        assert classify(ValueError("a bug in ekn")) is Disposition.TERMINAL
+
+    def test_a_service_cluster_ip_is_immutable(self) -> None:
+        """ "may not change once set" is not "may not be changed". 57 Services
+        in one render, so a table carrying only the second misses them all."""
+        exc = server_error(
+            422,
+            'Service "traefik" is invalid',
+            causes=['spec.clusterIPs[0]: Invalid value: []string{"10.43.0.1"}: may not change once set'],
+        )
+
+        assert classify(exc) is Disposition.RECREATE
+
+    def test_a_statefulset_forbidden_update_is_immutable(self) -> None:
+        """Carries neither phrase, and is recognised by its cause reason."""
+        exc = server_error_with_reasons(
+            422,
+            'StatefulSet.apps "pynixd" is invalid',
+            [
+                (
+                    "FieldValueForbidden",
+                    "spec: Forbidden: updates to statefulset spec for fields other than 'replicas', "
+                    "'ordinals', 'template', 'updateStrategy', 'persistentVolumeClaimRetentionPolicy' "
+                    "and 'minReadySeconds' are forbidden",
+                ),
+            ],
+        )
+
+        assert classify(exc) is Disposition.RECREATE
+
+    def test_a_forbidden_field_that_is_not_an_update_is_terminal(self) -> None:
+        """Narrower than "every FieldValueForbidden" on purpose. That reason
+        also covers a field that may not be set at all, which is a
+        configuration error -- and a wrong RECREATE is a delete."""
+        exc = server_error_with_reasons(
+            422,
+            'Pod "web" is invalid',
+            [("FieldValueForbidden", "spec.nodeName: Forbidden: may not be set for this Pod")],
+        )
+
+        assert classify(exc) is Disposition.TERMINAL
+
+    def test_the_job_message_is_matched_inside_a_long_go_dump(self) -> None:
+        """The real `causes[0].message` for a Job is 2365 bytes of Go struct
+        dump with the phrase at the end. A short fixture does not represent
+        what the substring search runs over."""
+        dump = "spec.template: Invalid value: core.PodTemplateSpec{" + ("Field:nil, " * 200) + "}: field is immutable"
+        assert len(dump) > 2000
+        exc = server_error(422, 'Job.batch "migrate" is invalid', causes=[dump])
+
+        assert classify(exc) is Disposition.RECREATE
+
+
+class TestStatefulSetVolumes:
+    """A StatefulSet's PVCs outlive it only if something says so."""
+
+    def statefulset(self, *, templates: bool, when_deleted: str | None = None) -> Manifest:
+        spec: dict[str, Any] = {}
+        if templates:
+            spec["volumeClaimTemplates"] = [{"metadata": {"name": "data"}}]
+        if when_deleted is not None:
+            spec["persistentVolumeClaimRetentionPolicy"] = {"whenDeleted": when_deleted}
+        return {
+            "apiVersion": "apps/v1",
+            "kind": "StatefulSet",
+            "metadata": {"name": "db", "namespace": "default"},
+            "spec": spec,
+        }
+
+    def test_no_volume_claim_templates_is_allowed(self) -> None:
+        assert may_recreate(self.statefulset(templates=False))
+
+    def test_an_explicit_retain_is_allowed(self) -> None:
+        assert may_recreate(self.statefulset(templates=True, when_deleted="Retain"))
+
+    def test_saying_nothing_is_refused(self) -> None:
+        """The API default is Retain, so nothing is lost today. It is a
+        default, and a chart bump can set Delete with nobody reading the
+        diff -- so the policy has to be written down, not inferred."""
+        assert not may_recreate(self.statefulset(templates=True))
+
+    def test_delete_is_refused(self) -> None:
+        assert not may_recreate(self.statefulset(templates=True, when_deleted="Delete"))
+
+    async def test_the_refusal_says_what_to_do(self) -> None:
+        async def apply(_spec: Manifest) -> Any:
+            raise server_error(422, causes=["spec: field is immutable"])
+
+        async def delete(_spec: Manifest) -> None:
+            return
+
+        failures = await converge_barrier(
+            [self.statefulset(templates=True)],
+            apply=apply,
+            delete=delete,
+            allow_recreate=True,
+            settle_seconds=1.0,
+        )
+
+        assert "whenDeleted = Retain" in failures[0].error
