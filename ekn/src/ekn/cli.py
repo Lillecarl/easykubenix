@@ -1504,6 +1504,50 @@ class PushCache(NixCommand):
         )
 
 
+class AssertCached(Command):
+    """Refuse a manifest naming a store path no substituter serves.
+
+    A nixkube node fetches what a manifest names; it can never build it. A
+    path on no substituter is a mount that fails on the node, well away from
+    whatever forgot to push it, and it surfaces as
+    `MountVolume.SetUp failed ... Failed to build store path`.
+
+    **It walks the whole closure, not the paths the manifest names.** The
+    shape that bites is a top path present on one cache with a member only
+    on another, or present with a member absent entirely. Checking the roots
+    alone passes both.
+
+    **Name the caches the nodes carry, not the ones this machine has.** The
+    machine running the check is not the machine that fetches: CI's
+    `nix.conf` names more caches than a node does, so reading the local
+    settings asks a superset and passes a path no node can get. That is the
+    failure this exists to catch, and it fails open.
+
+    For the same reason, do not name a substituter that only exists inside
+    the cluster. A path served by pynixd alone is not fetchable by the node
+    that has to mount pynixd's own store before pynixd runs.
+    """
+
+    manifests: list[_Path] = pos(help="Manifest files to scan. JSON or YAML; the text is read for store paths.")
+    substituter: list[str] = opt(
+        help="Substituter to ask, repeatable. These are the caches a node carries.",
+    )
+
+    async def run(self) -> None:
+        paths: set[str] = set()
+        for manifest in self.manifests:
+            paths |= storecheck.store_paths_in_text(await Path(str(manifest)).read_text())
+        # No explicit "--substituter is required" check. `assert_fetchable`
+        # already refuses paths with nothing to ask, and passes a manifest
+        # naming no store path at all -- which needs no cache configured and
+        # would fail a check made before the paths were read.
+        _log.info("checking store paths", roots=len(paths), substituters=len(self.substituter))
+        try:
+            await storecheck.assert_fetchable(paths, substituters=self.substituter)
+        except (storecheck.StorePathsUnavailableError, storecheck.NoSubstitutersError) as exc:
+            raise SystemExit(str(exc)) from exc
+
+
 class SplitManifest(Command):
     """Split a JSON manifest list into a namespace/kind/name.yaml directory tree.
 
@@ -1675,6 +1719,7 @@ class Ekn(AttrCommand):
         Secrets,
         ClusterDiff,
         PushCache,
+        AssertCached,
         SplitManifest,
         ApplyManifest,
         YamlToJson,
