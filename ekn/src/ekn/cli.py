@@ -108,10 +108,9 @@ def _report_validation_error(context: str, exc: ValidationError) -> NoReturn:
 def _report_server_error(action: str, exc: kr8s.ServerError) -> NoReturn:
     """Log a kr8s.ServerError with its response body and exit(1).
 
-    kr8s only extracts the JSON `message` field for 4xx errors (see
-    kr8s._api.Api.call_api) -- for 5xx it falls back to str(httpx
-    exception), which omits the API server's actual response body. Surface
-    it ourselves since that body is usually the only clue for a 500.
+    The exception message is the API server's `message` field, for a 5xx as
+    well as a 4xx. The body around it carries `reason`, `details` and
+    `code`, which name the failing field on a rejected apply.
     """
     body = exc.response.text if exc.response is not None else None
     _log.error("%s failed\n%s\nresponse body: %s", action, exc, body)
