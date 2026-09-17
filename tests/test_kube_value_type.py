@@ -618,7 +618,7 @@ class TestPrioritiesInsideAnEntry:
     async def test_a_replace_key_that_matches_nothing_is_an_error(self) -> None:
         # The whole point of the marker. `mkNumberedList` cannot do this: an
         # index always matches something, just not the element you meant.
-        with pytest.raises(nanopynix.NixError, match="keys that match\n *no element"):
+        with pytest.raises(nanopynix.NixError, match=r"keys that match\n *no element"):
             await evaluate_file(NIX_TEST_FILE, "replaceKeyMatchesNothingThrows")
 
     async def test_the_no_match_error_shows_the_list(self) -> None:
