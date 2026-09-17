@@ -19,7 +19,6 @@ failure slowly instead of quickly. Issue Lillecarl/easykubenix#28.
 from __future__ import annotations
 
 import enum
-import time
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Protocol
@@ -259,7 +258,7 @@ async def converge_barrier(  # noqa: PLR0913 -- every argument is an injected se
     delete: DeleteOne | None = None,
     settle_seconds: float = DEFAULT_SETTLE_SECONDS,
     allow_recreate: bool = False,
-    clock: Callable[[], float] = time.monotonic,
+    clock: Callable[[], float] = anyio.current_time,
     sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
 ) -> list[Failure]:
     """Apply every object of one barrier, retrying what has not caught up.
@@ -268,7 +267,17 @@ async def converge_barrier(  # noqa: PLR0913 -- every argument is an injected se
     An empty list means the barrier is clean.
 
     `clock` and `sleep` are arguments so that a test of the settle timer
-    costs no wall time. Nothing else injects them.
+    costs no wall time. Nothing else injects them. `anyio.current_time` and
+    not `time.monotonic`: it is the event loop's own clock, the one anyio's
+    timeouts measure against, so a future `fail_after` around this loop
+    agrees with the settle timer rather than drifting from it.
+
+    **The applies are serial, and a barrier is where concurrency belongs
+    when it arrives.** Objects within one barrier are independent by
+    construction -- that is what the barrier means -- so an
+    `anyio.create_task_group` over this inner loop is the shape. Two pieces
+    of state need moving first: `last_progress`, which several tasks would
+    write, and `retry_next`, which they would append to.
     """
     pending = list(specs)
     terminal: dict[tuple[str, str, str], Failure] = {}
@@ -335,7 +344,7 @@ async def converge_objects(  # noqa: PLR0913 -- every argument is an injected se
     settle_seconds: float = DEFAULT_SETTLE_SECONDS,
     allow_recreate: bool = False,
     keep_going: bool = False,
-    clock: Callable[[], float] = time.monotonic,
+    clock: Callable[[], float] = anyio.current_time,
     sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
 ) -> list[Failure]:
     """Converge every barrier in order, and report what never applied.
