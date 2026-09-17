@@ -128,7 +128,11 @@ these repositories drive.
   `Session()`, `session.store(uri=...)`, `store.is_valid_path`,
   `store.query_path_info`, `store.copy_closure`, `session.settings()`. See
   `eval.py`'s `push_closure_to_store` and `storecheck.py` for the shape.
-- **Kubernetes: kr8s.** No raw HTTP.
+- **Kubernetes: kr8s.** No raw HTTP. It is the umbrella's fork, which takes
+  only changes meant for upstreaming (issue #29). Nothing here runs kr8s' own
+  suite -- it needs a pip venv and a kind cluster -- so run it before landing
+  a change to the fork. A change that passes these 568 tests can still be
+  wrong: server-side apply was.
 
 A CLI answers in exit codes and text you have to parse, loses the detail that
 makes an error actionable, and needs the binary on `PATH` at run time. A
@@ -140,11 +144,19 @@ Grep the dependency list before concluding there is no binding.
 # Do not declare an option for what the tool can read
 
 A Nix option that restates something `ekn` can find at run time is a second
-copy that drifts. Nix knows its own `substituters`; `ekn` reads them. The
-option is the switch -- `ekn.assertCached` is a `bool` -- not the data.
+copy that drifts. Ask: could the program find this itself when it runs? Then
+it should.
 
-Ask: could the program find this itself when it runs? Then it should, and the
-option only says whether to.
+**Unless what it can read is not what you mean.** `ekn.assertCached` is a
+`listOf str`, not a `bool` over the substituters `ekn` could read from Nix,
+and the reason is the point of the rule rather than an exception to it: the
+machine that deploys is not the machine that fetches. CI's `nix.conf` names
+three caches; a node carries one. Reading the deployer's list asks a superset
+and passes a path no node can fetch -- the exact failure the check exists to
+catch, and it fails open.
+
+So: the tool reads what describes *itself*. Anything describing another
+machine is data, and data belongs in an option.
 
 # Test Failure Discipline
 
