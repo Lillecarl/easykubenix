@@ -36,6 +36,25 @@ let
                 };
               };
 
+              # Objects with no `name` and no stable index. The module below
+              # picks one of the three with a predicate.
+              tolerations = [
+                {
+                  key = "dedicated";
+                  operator = "Exists";
+                }
+                {
+                  key = "node-role.kubernetes.io/control-plane";
+                  operator = "Exists";
+                  effect = "NoSchedule";
+                }
+                {
+                  key = "node.kubernetes.io/unreachable";
+                  operator = "Exists";
+                  tolerationSeconds = 30;
+                }
+              ];
+
               # A plain list keeps its order. Use `mkNumberedList` to override
               # one entry of it by index.
               initContainers = [
@@ -91,6 +110,19 @@ let
             {
               main.args = pkgs.lib.mkReplaceList {
                 "--metrics-addr=" = "--metrics-addr=:8443";
+              };
+            };
+
+        # `mkReplaceWhere` for a list a prefix cannot read. The predicate runs
+        # against each toleration and must pick exactly one. The body names
+        # one field, so `key` and `operator` survive and the other two
+        # tolerations are untouched.
+        kubernetes.objects.default.Deployment.namedlist-demo.spec.template.spec.tolerations =
+          pkgs.lib.mkReplaceWhere
+            {
+              control-plane = {
+                where = toleration: (toleration.key or null) == "node-role.kubernetes.io/control-plane";
+                value.effect = "NoExecute";
               };
             };
       }

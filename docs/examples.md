@@ -55,21 +55,43 @@ args = lib.mkMerge [
 
 A prefix only reads a string. For a list of objects with neither a `name` nor a
 stable index — `tolerations` is the usual one — `lib.mkReplaceWhere` addresses
-an element with a function:
+an element with a function.
+
+Say the chart renders three of them, and only the second is wrong:
+
+```nix
+tolerations = [
+  { key = "dedicated";                            operator = "Exists"; }
+  { key = "node-role.kubernetes.io/control-plane"; operator = "Exists"; effect = "NoSchedule"; }
+  { key = "node.kubernetes.io/unreachable";        operator = "Exists"; tolerationSeconds = 30; }
+];
+```
+
+`where` runs against each element in turn and must pick exactly one:
 
 ```nix
 tolerations = lib.mkReplaceWhere {
   control-plane = {
     where = toleration:
       (toleration.key or null) == "node-role.kubernetes.io/control-plane";
-    value = {
-      key = "node-role.kubernetes.io/control-plane";
-      operator = "Exists";
-      effect = "NoExecute";
-    };
+    value.effect = "NoExecute";
   };
 };
 ```
+
+The render keeps all three, in order, with one field of the second changed:
+
+```nix
+tolerations = [
+  { key = "dedicated";                            operator = "Exists"; }
+  { key = "node-role.kubernetes.io/control-plane"; operator = "Exists"; effect = "NoExecute"; }
+  { key = "node.kubernetes.io/unreachable";        operator = "Exists"; tolerationSeconds = 30; }
+];
+```
+
+`operator` survived because the body did not name it, and `effect` changed with
+no `mkForce`. A `where` that matches none of the three, or two of them, is an
+error naming the option and printing the list.
 
 The attribute name is a label. It names the replacement in an error, and it is
 what two definitions of the same replacement merge on; it is not matched against

@@ -223,12 +223,18 @@ self: lib: rec {
   # Mark an attribute set as a list of replacements, each one addressed by a
   # predicate over the element it replaces.
   #
+  # `where` runs against each element of the list the other definitions give,
+  # and must pick exactly one of them:
+  #
   #     tolerations = lib.mkReplaceWhere {
   #       control-plane = {
   #         where = toleration: (toleration.key or null) == "node-role.kubernetes.io/control-plane";
-  #         value = { key = "..."; operator = "Exists"; effect = "NoSchedule"; };
+  #         value.effect = "NoExecute";
   #       };
   #     };
+  #
+  # Every other toleration the chart rendered keeps its place and its fields,
+  # and so does every field of the one this picks.
   #
   # The attribute name is a label. It names the replacement in an error, and
   # it is what two definitions of the same replacement merge on. It is not
