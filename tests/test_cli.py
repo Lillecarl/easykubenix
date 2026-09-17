@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -547,6 +548,87 @@ class TestAWholeInstancePruneNeedsItsExclusionSet:
         the exclusion set, so an old configuration can still use it -- which
         is what the refusal message offers as the way forward."""
         await _apply_groups(self._config(None), api=None, target="bootstrap", prune=True)  # type: ignore[arg-type]
+
+
+class TestAWholeInstanceConvergingApply:
+    """`ekn kubeapply --converge`, with no `--target`, converges everything.
+
+    The question this answers is "which targets are stale?", and the answer
+    has to be "none, by construction" rather than a clusterdiff per target.
+    A whole-instance apply is one group with `unit: None` holding the entire
+    `kubernetes.generated` set, so this is the path that covers every routed
+    unit in one run.
+    """
+
+    @staticmethod
+    def _config() -> KubeApplyConfigResult:
+        return KubeApplyConfigResult.model_validate(
+            {
+                "groups": [
+                    {
+                        "unit": None,
+                        "field_manager": "ekn",
+                        "objects": [
+                            {
+                                "apiVersion": "v1",
+                                "kind": "ConfigMap",
+                                "metadata": {"name": "a", "namespace": "default"},
+                            }
+                        ],
+                    }
+                ],
+                "environment": "test",
+                "resource_priority": {},
+                "sops_age_identities": [],
+                "handAppliedUnits": ["bootstrap"],
+                "declaredUnits": ["bootstrap"],
+            }
+        )
+
+    async def test_it_converges_instead_of_walking_barriers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import ekn.cli as cli_module
+
+        seen: dict[str, Any] = {}
+
+        async def _converge_direct(objects: Any, **kwargs: Any) -> Any:
+            seen["objects"] = objects
+            seen["field_manager"] = kwargs["field_manager"]
+            from ekn.converge import ConvergeReport
+
+            return ConvergeReport(applied=len(objects), skipped=0, failures=[]), {}
+
+        async def _apply_and_prune(*_args: Any, **_kwargs: Any) -> None:
+            seen["barriers"] = True
+
+        monkeypatch.setattr(cli_module, "converge_direct", _converge_direct)
+        monkeypatch.setattr(cli_module, "apply_and_prune", _apply_and_prune)
+
+        await _apply_groups(
+            self._config(),
+            api=None,  # type: ignore[arg-type]
+            target=None,
+            prune=False,
+            converge=cli_module._ConvergeOptions(enabled=True),
+        )
+
+        assert "barriers" not in seen, "converge mode must not fall through to the barrier apply"
+        assert [o["metadata"]["name"] for o in seen["objects"]] == ["a"]
+
+    async def test_without_the_flag_it_still_walks_barriers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Negative control: the converging path is opt-in, so an existing
+        `ekn kubeapply` keeps the behaviour it had."""
+        import ekn.cli as cli_module
+
+        seen: dict[str, Any] = {}
+
+        async def _apply_and_prune(*_args: Any, **_kwargs: Any) -> None:
+            seen["barriers"] = True
+
+        monkeypatch.setattr(cli_module, "apply_and_prune", _apply_and_prune)
+
+        await _apply_groups(self._config(), api=None, target=None, prune=False)  # type: ignore[arg-type]
+
+        assert seen == {"barriers": True}
 
 
 class TestTheExitCode:
