@@ -114,7 +114,10 @@ let
   # of `sys.path` and shadows it, so the tests read the working tree either
   # way. `pynix` is deliberately absent -- nothing here imports it.
   eknDevEnv = eknPythonSet.mkVirtualEnv "easykubenix-dev-env" {
-    ekn = [ ];
+    # `profile` brings pyinstrument, for `EKN_PROFILE=pyinstrument`. Here and
+    # not in the release `ekn`: a profiler belongs in the environment someone
+    # measures from, not in the closure a cluster fetches.
+    ekn = [ "profile" ];
     nanopynix = [ "test" ];
     nanopynix-helpers = [ ];
     pytest-agent = [ ];

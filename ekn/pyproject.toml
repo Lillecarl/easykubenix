@@ -33,6 +33,15 @@ dependencies = [
   "pydantic-core",
 ]
 
+# `EKN_PROFILE=pyinstrument` only. Optional because a release `ekn` should not
+# carry a profiler, and `eval.py` imports it inside the toggle rather than at
+# module scope, so its absence costs a message rather than a traceback. The
+# dev environment enables this extra; see `eknDevEnv` in ../default.nix.
+[project.optional-dependencies]
+profile = [
+  "pyinstrument",
+]
+
 [project.scripts]
 ekn = "ekn.cli:main"
 

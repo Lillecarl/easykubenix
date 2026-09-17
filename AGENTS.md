@@ -55,6 +55,34 @@ runtime except pydantic. That is why `TC001`/`TC002` are selected and why
 `["pydantic.BaseModel"]` — without it those rules will happily move a live
 model field type into an `if TYPE_CHECKING:` block and break imports.
 
+# Profiling
+
+Three instruments, three blind spots. Pick by what you are asking.
+
+- `EKN_PROFILE=pyinstrument ekn kubeapply ...` — wall clock, sampled,
+  async-aware. The only one that says what a command is *waiting for*: it
+  keeps an `await` in the frame that issued it. Use for `kubeapply`, `deploy`,
+  anything network-bound. `EKN_PROFILE_FILE` (default `ekn.profile.html`),
+  `EKN_PROFILE_INTERVAL` (default 0.001 — raise it for a long run).
+- `EKN_PROFILE=1` — cProfile, deterministic, `pstats`. Call counts for
+  CPU-bound Python. It has one frame for every wait: measured `epoll.poll` at
+  8.108s of an 11.039s render, which is honest and useless for a deploy.
+- `NIX_COUNT_CALLS=1 NIX_SHOW_STATS=1 NIX_SHOW_STATS_PATH=x.json nix eval ...`
+  — per-function evaluator call counts. Deterministic under load, where a
+  wall clock is not.
+
+**A call count is not a time.** Measured: removing ~30% of a render's
+evaluator calls bought 3.1% of the stage and 2.2% of the wall clock. State a
+saving in seconds or say "calls".
+
+**Neither Python profiler sees the evaluator.** nanopynix runs it in a worker
+process, so time inside a `to_python` call is marshalling and waiting. About
+2.8s of an 8.2s stage is attributed by nothing — primops included, YAML
+parsing among them.
+
+Measure on a warm store, or a first import-from-derivation build lands inside
+the number and reads as evaluation.
+
 # Issues
 
 Issues go to the GitHub issue tracker, `gh issue create --repo

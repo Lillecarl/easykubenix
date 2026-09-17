@@ -8,6 +8,7 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from os import PathLike
+from pathlib import Path as _SyncPath
 from typing import TYPE_CHECKING, Annotated, Any
 
 import anyio
@@ -397,6 +398,17 @@ def python_profile() -> Generator[None]:
     because a bare `pstats` file needs another tool to read and the point is
     to see the answer.
 
+    **Two backends, and the choice is about waiting.** `EKN_PROFILE=1` is
+    cProfile, which counts calls. `EKN_PROFILE=pyinstrument` samples the wall
+    clock and keeps an `await` in the frame that issued it, which is the only
+    one of the two that can say anything useful about a command that spends
+    its time waiting on an API server. Use it for `kubeapply` and `deploy`;
+    use cProfile when the question is what runs too often. See
+    `_cprofile_profile` and `_pyinstrument_profile`.
+
+    It wraps `asyncio.run(command.run())` in `cli.py`, so it covers whichever
+    command is running rather than evaluation alone.
+
     **It profiles this process only.** nanopynix runs the evaluator in its
     own worker, so the time this attributes to a `to_python` call is the
     marshalling and the waiting, not the evaluation inside it.
@@ -412,10 +424,27 @@ def python_profile() -> Generator[None]:
     import-from-derivation build lands inside the number and reads as
     evaluation.
     """
-    if not os.environ.get("EKN_PROFILE"):
+    backend = os.environ.get("EKN_PROFILE")
+    if not backend:
         yield
         return
+    if backend == "pyinstrument":
+        with _pyinstrument_profile():
+            yield
+        return
+    with _cprofile_profile():
+        yield
 
+
+@contextmanager
+def _cprofile_profile() -> Generator[None]:
+    """Deterministic profile: every call counted, `pstats` written.
+
+    Right for the question "what does this do too much of". Wrong for a
+    command that mostly waits: it traces each call, which weighs on a hot
+    Python loop, and it has nowhere to put an `await` except the event loop's
+    own frame.
+    """
     profiler = cProfile.Profile()
     profiler.enable()
     try:
@@ -430,6 +459,64 @@ def python_profile() -> Generator[None]:
         # costs the wall clock", and an await that spends its time in a
         # child frame has no total time of its own at all.
         stats.sort_stats("cumulative").print_stats(PROFILE_TOP_N)
+        sys.stderr.write(f"[EKN_PROFILE] full profile written to {destination}\n")
+
+
+@contextmanager
+def _pyinstrument_profile() -> Generator[None]:
+    """Sampling profile that keeps `await` in the frame that awaited.
+
+    **Why a second backend rather than a better use of the first.** cProfile
+    has one frame for every wait: measured on a render, `epoll.poll` was
+    8.108s of an 11.039s profile. That is honest and useless -- it says the
+    command waited, not what for. `ekn kubeapply` is almost entirely
+    concurrent waiting on an API server, so cProfile would put nearly all of
+    a deploy in that one line.
+
+    pyinstrument samples the wall clock and is async-aware, so the wait is
+    attributed to the frame that issued it. The same 8s becomes whichever
+    apply, prune or discovery call is holding it.
+
+    Sampling also costs a few percent where tracing costs much more, which
+    matters when the thing being measured is a deploy that cannot be repeated
+    cheaply.
+
+    `EKN_PROFILE_INTERVAL` sets the sampling interval in seconds, default
+    0.001. Raise it for a long deploy: the output shrinks with it, and a
+    stage that only shows up below a millisecond is not the one costing the
+    run.
+
+    **It profiles this process only, exactly like the other backend.** The
+    evaluator runs in a nanopynix worker, so time inside a `to_python` call
+    is the marshalling and the waiting rather than the evaluation. Neither
+    backend closes that gap; see the note on `python_profile`.
+
+    Imported here rather than at module scope so the dependency is optional
+    and the release build carries no profiler.
+    """
+    try:
+        from pyinstrument import Profiler
+    except ImportError:  # pragma: no cover -- the dev environment has it
+        sys.stderr.write(
+            "[EKN_PROFILE] EKN_PROFILE=pyinstrument needs the `profile` extra; "
+            "the dev shell has it, a release build does not.\n"
+        )
+        yield
+        return
+
+    interval = float(os.environ.get("EKN_PROFILE_INTERVAL", "0.001"))
+    profiler = Profiler(interval=interval, async_mode="enabled")
+    profiler.start()
+    try:
+        yield
+    finally:
+        profiler.stop()
+        # `_SyncPath`, because `Path` in this module is `anyio.Path` and its
+        # `write_text` is a coroutine. This runs in a sync context manager.
+        destination = _SyncPath(os.environ.get("EKN_PROFILE_FILE", "ekn.profile.html"))
+        sys.stderr.write(f"\n[EKN_PROFILE] wall-clock profile, {interval}s interval\n")
+        sys.stderr.write(profiler.output_text(unicode=True, color=True))
+        destination.write_text(profiler.output_html())
         sys.stderr.write(f"[EKN_PROFILE] full profile written to {destination}\n")
 
 
