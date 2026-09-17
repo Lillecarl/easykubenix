@@ -184,9 +184,7 @@ in
     };
 
     cacheTo = lib.mkOption {
-      type = lib.types.nullOr (
-        lib.types.either lib.types.str (lib.types.listOf lib.types.str)
-      );
+      type = lib.types.nullOr (lib.types.either lib.types.str (lib.types.listOf lib.types.str));
       default = null;
       description = ''
         Destination Nix store URI (e.g. "ssh-ng://user@host:2222"), or a
@@ -243,16 +241,16 @@ in
     };
 
     assertCached = lib.mkOption {
-      type = lib.types.nullOr lib.types.package;
-      default = null;
+      type = lib.types.bool;
+      default = false;
       description = ''
-        A program `ekn` runs **before it applies anything**, given a file
-        naming every store path this apply is about to send. A non-zero exit
-        refuses the apply.
+        Ask every configured substituter, **before applying anything**,
+        whether it can serve every store path this apply names. A path on
+        none of them refuses the apply.
 
-        `null` disables it, which is right for an instance with no
-        CSI-backed store: there is nothing to assert and it should not pay
-        for the check.
+        Off by default, which is right for an instance with no CSI-backed
+        store: there is nothing to assert and it should not pay for the
+        check.
 
         **What it is for.** A CSI-mounted store path can only be
         substituted -- a node cannot build it, because the volume names an
@@ -260,53 +258,44 @@ in
         node, minutes later and well away from the apply that caused it.
         Asserting first turns that into a refusal with the path named.
 
-        The program must ask the substituters **the nodes carry**, not the
-        ones the deploying machine happens to have configured. A workstation
-        with the path in its own store passes a naive check while the
-        cluster still fails. nixkube's `assert-cached` is built for this and
-        bakes the list in from its own module; it walks the whole closure
-        rather than the named paths, which is the shape that actually bites
-        -- a present top path whose closure member is absent.
+        **The list is Nix's own `substituters` setting**, read by `ekn` at
+        apply time. It is not an option here, because a second list is a
+        list that drifts. `ekn` never consults the local store, only those
+        substituters, so a path this machine happens to have built does not
+        pass.
 
-        Exit codes are read, not just the sign: `1` means paths are missing,
-        `3` means a substituter would not answer. Both refuse, and `ekn`
-        says which, because a broken check and a missing path need different
-        fixes.
+        `ekn` walks the whole closure rather than the named paths, which is
+        the shape that actually bites -- a present top path whose closure
+        member is absent.
 
-        **A static substituter list cannot express a runtime-injected one,
-        and that is a property of the cluster rather than of the checker.**
-        nixkube injects pynixd as a substituter on a node when `nix store
-        ping` answers, so a path held only by pynixd is reachable while
-        pynixd is up and unreachable while it is not. A checker asking a
-        fixed list reports such a path as missing.
+        A path is *missing* when every substituter said so, and the check is
+        *broken* when one could not answer at all. `ekn` refuses either way
+        and says which, because a cache that is down and a path that was
+        never pushed need different fixes.
+
+        Any store URI works -- `https`, `ssh-ng`, `s3`, `file` -- because
+        the query goes through nanopynix rather than a scheme-specific
+        fetcher. See issue #37.
+
+        **A configured substituter list cannot express a runtime-injected
+        one, and that is a property of the cluster rather than of the
+        check.** nixkube injects pynixd as a substituter on a node when `nix
+        store ping` answers, so a path held only by pynixd is reachable
+        while pynixd is up and unreachable while it is not. This check
+        reports such a path as missing.
 
         That report is not simply a false positive. It is the same shape as
         the outage this guard exists for: a path whose only source is a
         workload in the cluster is available exactly as long as that
-        workload is. Teaching the checker to ask pynixd would make the
-        answer pass and the fragility invisible, which is why the list it
-        asks should be the substituters a node can rely on *without* the
-        cluster already being healthy.
+        workload is. Adding pynixd to `nix.settings.substituters` here would
+        make the answer pass and the fragility invisible, which is why the
+        list asked should be the substituters a node can rely on *without*
+        the cluster already being healthy.
 
         This is the guard, not the fix. It does not push anything; see
         `ekn.cacheTo`.
       '';
-      example = lib.literalExpression "nixkube.packages.\${system}.assert-cached";
-    };
-
-    assertCachedExe = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      readOnly = true;
-      default = if config.ekn.assertCached == null then null else lib.getExe config.ekn.assertCached;
-      defaultText = lib.literalExpression "lib.getExe ekn.assertCached";
-      description = ''
-        `ekn.assertCached`'s executable, as the string `ekn` runs.
-
-        Resolved here rather than in `ekn`, because `lib.getExe` is what
-        knows about `meta.mainProgram` and it belongs on the Nix side. A
-        store path, not built at evaluation time: `ekn` realises it before
-        running it, the same way `ekn tofu` realises `configFile`.
-      '';
+      example = true;
     };
 
     cachePackage = lib.mkOption {

@@ -5,7 +5,6 @@ import contextlib
 import json
 import logging
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, cast
@@ -938,13 +937,12 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
     # object's data, so checking earlier would assert paths this run is not
     # the one sending -- and checking later would be checking after the
     # damage.
-    if cfg.assert_cached is not None:
+    if cfg.assert_cached:
         sending = [spec for _group, plan in prepared for spec in plan.objects if _object_identity(spec) not in held]
-        with tempfile.TemporaryDirectory(prefix="ekn-storecheck-") as scratch:
-            try:
-                await storecheck.assert_fetchable(sending, checker=cfg.assert_cached, scratch=Path(scratch))
-            except storecheck.StorePathsUnavailableError as exc:
-                raise SystemExit(str(exc)) from exc
+        try:
+            await storecheck.assert_fetchable(sending)
+        except (storecheck.StorePathsUnavailableError, storecheck.NoSubstitutersError) as exc:
+            raise SystemExit(str(exc)) from exc
 
     for group, plan in prepared:
         # Both halves, and neither is safe alone. Applying a paused workload
