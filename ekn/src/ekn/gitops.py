@@ -103,8 +103,43 @@ def flatten_manifests(  # noqa: C901 -- tracked complexity/arg-count debt, see T
         path = base / namespace / kind / f"{name}.yaml"
         # CSafeDumper (libyaml-backed) instead of the pure-Python Dumper:
         # benchmarked ~7.5x faster (5.0s -> 0.67s for a 371-object render,
-        # dominated by CRDs' multi-hundred-KB bodies) with identical output
-        # for plain JSON-like data.
+        # dominated by CRDs' multi-hundred-KB bodies).
+        #
+        # **`CSafeDumper` is `CEmitter` + the pure-Python `SafeRepresenter`.**
+        # Only emission is C; the walk that turns objects into a node tree is
+        # not, and it becomes the dominant cost once the emitter goes. Measured
+        # over 200 CRD-shaped objects:
+        #
+        #   SafeDumper    5.483s   emitter.py 67.1%, representer.py  2.0%
+        #   CSafeDumper   0.237s   emitter.py absent, representer.py 69.5%
+        #
+        # So a profile of this path showing `yaml/representer.py` at the top is
+        # evidence that libyaml is already in use, not that it is missing.
+        # Switching dumper cannot remove that time; only not using PyYAML's
+        # representer could. Do not read those frames as a missed 7x.
+        #
+        # On the text: with these settings the two dumpers agree on plain
+        # scalars and disagree on long double-quoted ones, where they break the
+        # line in different places and `width` does not reconcile them. Both
+        # parse equal. Neither case was measured against a real deploy tree, so
+        # read that as "they can differ" rather than as a survey of where.
+        #
+        # It is recorded because these files are committed. Changing what emits
+        # them reflows the tree once, which is a review cost rather than a
+        # correctness one, and it is the reason to leave this dumper alone
+        # absent a better motive than speed.
+        #
+        # The representer cost is per node, so it falls on whatever is largest
+        # -- CRDs and chart output, which arrived as text from disk and were
+        # never touched in Nix. Re-deriving them here walks bytes that were
+        # already correct on the way in. That is the output-side half of the
+        # argument in #35: data from disk should be parsed once in a sandbox
+        # and carried as cached JSON, rather than round-tripped through Nix
+        # values at both ends. Replacing this representer treats the symptom.
+        #
+        # It is not the git half. `pygit2` takes the finished `(path,
+        # content)` pairs, and `_resolve_gitops` builds them once for `diff`
+        # and `commit` together, so nothing here is serialised twice.
         yaml_content = yaml.dump(
             manifest,
             default_flow_style=False,
