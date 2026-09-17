@@ -20,6 +20,12 @@ let
                 main = {
                   image = "nginx:alpine";
                   ports = [ { containerPort = 80; } ];
+                  # A plain list of bare strings, as a chart renders it. The
+                  # module below patches one of these by content.
+                  args = [
+                    "--metrics-addr=0.0.0.0:8443"
+                    "--enable-leader-election"
+                  ];
                   env = pkgs.lib.mkNamedList {
                     FOO.value = "bar";
                     MODE.value = "test";
@@ -73,6 +79,20 @@ let
             ];
           };
         };
+      }
+      # A second module, the way a patch of a rendered chart is written: it
+      # names the container, and addresses one of its `args` by the start of
+      # the flag. An index would move with the next chart version, and a bare
+      # string has no `name` to address. A key that matches no element is an
+      # error, so the patch cannot stop applying in silence.
+      {
+        kubernetes.objects.default.Deployment.namedlist-demo.spec.template.spec.containers =
+          pkgs.lib.mkNamedList
+            {
+              main.args = pkgs.lib.mkReplaceList {
+                "--metrics-addr=" = "--metrics-addr=:8443";
+              };
+            };
       }
     ];
   };

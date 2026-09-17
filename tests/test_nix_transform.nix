@@ -88,6 +88,17 @@ in
     '';
   };
 
+  # `mkReplaceList` is the other marker that needs a list to merge against,
+  # and a transform result has none. `hasMarker` must see it.
+  refusesAReplaceMarker = nixTransform {
+    name = "replace";
+    src = dashboard;
+    transformer = ''
+      { lib, value }:
+      { args = lib.mkReplaceList { "--a" = "--A"; }; }
+    '';
+  };
+
   # `args` carries what is neither `lib` nor `value`. It travels as JSON, so
   # a list stays a list -- interpolating `builtins.toJSON` into the source
   # would emit `["a","b"]`, which is not Nix.

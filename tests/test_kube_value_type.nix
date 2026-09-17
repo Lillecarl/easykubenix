@@ -344,6 +344,131 @@ let
     }
   ];
 
+  # A chart's `args`: bare strings, no `name` to address and no index that
+  # survives the next chart version. The key is the start of the element, and
+  # the replacement takes its place. No `mkForce`, because the marker replaces
+  # an element rather than defining one.
+  replaceOverrideOfScalarList = evalValue [
+    {
+      value.args = [
+        "--metrics-addr=0.0.0.0:8443"
+        "--enable-leader-election"
+        "--health-probe-addr=:8081"
+      ];
+    }
+    { value.args = lib.mkReplaceList { "--metrics-addr=" = "--metrics-addr=:8443"; }; }
+  ];
+
+  # A whole element is a prefix of itself, so an exact key needs no separate
+  # match mode.
+  replaceWithAnExactKey = evalValue [
+    {
+      value.args = [
+        "--a"
+        "--b"
+      ];
+    }
+    { value.args = lib.mkReplaceList { "--b" = "--B"; }; }
+  ];
+
+  # Two modules patch two elements of one list. Both apply, and each one keeps
+  # its own position.
+  replaceFromTwoModules = evalValue [
+    {
+      value.args = [
+        "--a=1"
+        "--b=1"
+        "--c=1"
+      ];
+    }
+    { value.args = lib.mkReplaceList { "--a=" = "--a=2"; }; }
+    { value.args = lib.mkReplaceList { "--c=" = "--c=2"; }; }
+  ];
+
+  # The real call site: a container addressed by name, and its `args` patched
+  # by content. See `nestedNamedListOverride` for the same shape with two
+  # named lists.
+  replaceNestedInANamedList = evalValue [
+    {
+      value.containers = [
+        {
+          name = "manager";
+          args = [
+            "--metrics-addr=0.0.0.0:8443"
+            "--leader-elect"
+          ];
+        }
+      ];
+    }
+    {
+      value.containers = lib.mkNamedList {
+        manager.args = lib.mkReplaceList { "--metrics-addr=" = "--metrics-addr=:8443"; };
+      };
+    }
+  ];
+
+  # `mkMerge` is the list form of the marker. The module system expands it
+  # into one definition per element before this type sees them, so several
+  # replacement sets compose without the marker taking a list of its own.
+  replaceMarkersComposeWithMkMerge = evalValue [
+    {
+      value.args = [
+        "--a=1"
+        "--b=1"
+        "--c=1"
+      ];
+    }
+    {
+      value.args = lib.mkMerge [
+        (lib.mkReplaceList { "--a=" = "--a=2"; })
+        (lib.mkReplaceList { "--c=" = "--c=2"; })
+      ];
+    }
+  ];
+
+  # One module, holding both the list and the patch of it. `mkMerge` makes
+  # them two definitions, which is exactly what the merge branch expects.
+  replaceMergedWithItsOwnList = evalValue [
+    {
+      value.args = lib.mkMerge [
+        [
+          "--a=1"
+          "--b=1"
+        ]
+        (lib.mkReplaceList { "--b=" = "--b=2"; })
+      ];
+    }
+  ];
+
+  # `mkIf` inside `mkMerge` still resolves before the merge, so a switched-off
+  # member contributes nothing and does not have to match.
+  replaceInsideMkMergeCanBeSwitchedOff = evalValue [
+    {
+      value.args = [
+        "--a=1"
+        "--b=1"
+      ];
+    }
+    {
+      value.args = lib.mkMerge [
+        (lib.mkReplaceList { "--a=" = "--a=2"; })
+        (lib.mkIf false (lib.mkReplaceList { "--gone=" = "--gone=1"; }))
+      ];
+    }
+  ];
+
+  # `mkIf false` drops the whole marker before the merge sees it, so a
+  # conditional patch that is switched off is not a key that matches nothing.
+  replaceSwitchedOffLeavesTheList = evalValue [
+    {
+      value.args = [
+        "--a"
+        "--b"
+      ];
+    }
+    { value.args = lib.mkIf false (lib.mkReplaceList { "--nothing" = "--x"; }); }
+  ];
+
   # A whole value that is only `null`. `types.nullOr` is still a legacy type,
   # so this type carries its own null branch instead. See kubeValueType.nix.
   topLevelNull = evalValue [ { value = null; } ];
@@ -677,6 +802,25 @@ let
     ];
   };
 
+  # The same invariant on the replace branch. A replacement keeps the length
+  # of the list, and the replaced element takes the metadata of the definition
+  # that replaced it -- that is the file a reader has to open to change it.
+  replaceMetadataEvaluation = lib.evalModules {
+    modules = [
+      {
+        options.value = lib.mkOption {
+          type = kubeValueType;
+          default = null;
+        };
+        config.value.args = [
+          "--a=1"
+          "--b=1"
+        ];
+      }
+      { value.args = lib.mkReplaceList { "--b=" = "--b=2"; }; }
+    ];
+  };
+
   numberedEntryMkDefaultLoses = evalValue [
     {
       value.initContainers = [
@@ -830,6 +974,132 @@ let
     { value.containers = lib.mkNamedList { early = lib.mkBefore { image = "e"; }; }; }
   ];
 
+  # The property the marker exists for. An index is not the identity of a
+  # flag, so `mkNumberedList` cannot tell a list that grew an entry from a
+  # list that did not. A key that matches nothing stops the build.
+  replaceKeyMatchesNothingThrows = evalValue [
+    {
+      value.args = [
+        "--a"
+        "--b"
+      ];
+    }
+    { value.args = lib.mkReplaceList { "--gone=" = "--gone=1"; }; }
+  ];
+
+  # A key that matches two elements is refused as well. The same reasoning:
+  # the marker must not be able to patch an element nobody named.
+  replaceKeyMatchesTwoThrows = evalValue [
+    {
+      value.args = [
+        "--a=1"
+        "--a=2"
+      ];
+    }
+    { value.args = lib.mkReplaceList { "--a=" = "--a=3"; }; }
+  ];
+
+  # Two keys that both resolve to one element. One element takes one
+  # replacement, so this is an error and not a race between the two keys.
+  replaceTwoKeysOnOneElementThrows = evalValue [
+    {
+      value.args = [
+        "--metrics-addr=0.0.0.0:8443"
+        "--leader-elect"
+      ];
+    }
+    {
+      value.args = lib.mkReplaceList {
+        "--metrics" = "--metrics-addr=:1";
+        "--metrics-addr=" = "--metrics-addr=:2";
+      };
+    }
+  ];
+
+  # The marker patches a list that another module defines. Alone, it has
+  # nothing to replace in. `mkForce` gives the same error, because it drops
+  # the plain definition before this type sees it -- and the marker needs no
+  # `mkForce`.
+  replaceWithNoListThrows = evalValue [
+    { value.args = lib.mkReplaceList { "--a" = "--A"; }; }
+  ];
+
+  replaceUnderMkForceThrows = evalValue [
+    {
+      value.args = [
+        "--a"
+        "--b"
+      ];
+    }
+    { value.args = lib.mkForce (lib.mkReplaceList { "--a" = "--A"; }); }
+  ];
+
+  # Matching by content reads a string. A list of objects belongs to
+  # `mkNamedList`, and the error says so rather than reporting no match.
+  replaceOnAListOfObjectsThrows = evalValue [
+    { value.containers = [ { name = "a"; } ]; }
+    { value.containers = lib.mkReplaceList { "a" = "b"; }; }
+  ];
+
+  # One field cannot use two markers, whichever two. `mixedNamedAndNumberedThrows`
+  # is the same rule on the other pair.
+  mixedNumberedAndReplaceThrows = evalValue [
+    {
+      value.args = [
+        "--a"
+        "--b"
+      ];
+    }
+    { value.args = lib.mkNumberedList { "0" = lib.mkForce "--A"; }; }
+    { value.args = lib.mkReplaceList { "--b" = "--B"; }; }
+  ];
+
+  # A replacement takes the position of the element it replaces, so an order
+  # property on an entry does nothing. Refuse it, as both other branches do.
+  mkOrderOnReplaceEntryThrows = evalValue [
+    {
+      value.args = [
+        "--a"
+        "--b"
+      ];
+    }
+    { value.args = lib.mkReplaceList { "--a" = lib.mkBefore "--A"; }; }
+  ];
+
+  # The conflict below reaches an `mkMerge` too. Composing with `mkMerge`
+  # does not buy a way to write one element twice.
+  replaceMkMergeSameKeyThrows = evalValue [
+    {
+      value.args = [
+        "--a=1"
+        "--b=1"
+      ];
+    }
+    {
+      value.args = lib.mkMerge [
+        (lib.mkReplaceList { "--a=" = "--a=2"; })
+        (lib.mkReplaceList { "--a=" = "--a=3"; })
+      ];
+    }
+  ];
+
+  # Two modules that replace the same element with different values conflict
+  # with the module system's own message, because the entries merge as an
+  # attribute set. `mkForce` on one of them resolves it.
+  replaceConflictingValuesThrows = evalValue [
+    {
+      value.args = [
+        "--a=1"
+        "--b=1"
+      ];
+    }
+    { value.args = lib.mkReplaceList { "--a=" = "--a=2"; }; }
+    { value.args = lib.mkReplaceList { "--a=" = "--a=3"; }; }
+  ];
+
+  mkReplaceListRejectsNonAttrsInput = lib.mkReplaceList [ "--a" ];
+  mkReplaceListRejectsTheEmptyKey = lib.mkReplaceList { "" = "--a"; };
+
   mkNamedListRejectsNonAttrsInput = lib.mkNamedList [ { name = "a"; } ];
   mkNamedListRejectsNonAttrsValues = lib.mkNamedList { a = "not-an-attrset"; };
   mkNumberedListRejectsNonIntKeys = lib.mkNumberedList {
@@ -880,6 +1150,16 @@ in
     lib.length metadataEvaluation.options.value.valueMeta.attrs.args.list == 2;
   inherit topLevelNull;
   inherit conditionalFieldInsideObject;
+  inherit
+    replaceOverrideOfScalarList
+    replaceWithAnExactKey
+    replaceFromTwoModules
+    replaceNestedInANamedList
+    replaceSwitchedOffLeavesTheList
+    replaceMarkersComposeWithMkMerge
+    replaceMergedWithItsOwnList
+    replaceInsideMkMergeCanBeSwitchedOff
+    ;
   inherit namedListOverrideViaMkNamedList;
   inherit plainListOfNamedThingsNeverAutoConverted;
   inherit ownerReferencesWithDuplicateNamesPreserved;
@@ -939,6 +1219,12 @@ in
     metaLength = lib.length metadataTracksTheValueEvaluation.options.value.valueMeta.attrs.containers.list;
   };
 
+  # The same, on the replace branch.
+  replaceMetadataTracksTheValue = {
+    value = replaceMetadataEvaluation.config.value.args;
+    metaLength = lib.length replaceMetadataEvaluation.options.value.valueMeta.attrs.args.list;
+  };
+
   # Forcing these must throw -- each is exposed as a thunk so the test can
   # assert on the error without eagerly evaluating it above.
   namedEntryConflictThrows = namedEntryConflictThrows;
@@ -954,6 +1240,18 @@ in
   mkNamedListRejectsNonAttrsValues = mkNamedListRejectsNonAttrsValues;
   mkNumberedListRejectsNonIntKeys = mkNumberedListRejectsNonIntKeys;
   untypedTwiceThrows = untypedTwiceThrows;
+  replaceKeyMatchesNothingThrows = replaceKeyMatchesNothingThrows;
+  replaceKeyMatchesTwoThrows = replaceKeyMatchesTwoThrows;
+  replaceTwoKeysOnOneElementThrows = replaceTwoKeysOnOneElementThrows;
+  replaceWithNoListThrows = replaceWithNoListThrows;
+  replaceUnderMkForceThrows = replaceUnderMkForceThrows;
+  replaceOnAListOfObjectsThrows = replaceOnAListOfObjectsThrows;
+  replaceConflictingValuesThrows = replaceConflictingValuesThrows;
+  replaceMkMergeSameKeyThrows = replaceMkMergeSameKeyThrows;
+  mixedNumberedAndReplaceThrows = mixedNumberedAndReplaceThrows;
+  mkOrderOnReplaceEntryThrows = mkOrderOnReplaceEntryThrows;
+  mkReplaceListRejectsNonAttrsInput = mkReplaceListRejectsNonAttrsInput;
+  mkReplaceListRejectsTheEmptyKey = mkReplaceListRejectsTheEmptyKey;
 
   inherit untypedCarriesTheValueWhole untypedNestedInsideAnObject;
 }

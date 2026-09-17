@@ -100,8 +100,8 @@ let
       }
     else
       object;
-  # `ekn.lib.kubeValueType` resolves an `mkNamedList` or `mkNumberedList` marker
-  # when it merges an option. Thus no marker from `kubernetes.objects` reaches
+  # `ekn.lib.kubeValueType` resolves an `mkNamedList`, `mkNumberedList` or
+  # `mkReplaceList` marker when it merges an option. Thus no marker from `kubernetes.objects` reaches
   # the pipeline below, and the pipeline does not need a pass to convert one.
   #
   # A generator and a transformer both run after the merge. Each one is a plain
@@ -160,7 +160,8 @@ let
   #
   # `kubernetes.crds` is `listOf attrs`, so it also goes around
   # `ekn.lib.kubeValueType` and `lib.conditionalAttrsOf`. Nothing resolves an
-  # `mkNamedList`, `mkNumberedList` or `mkIfExists` marker in a CRD. Such a
+  # `mkNamedList`, `mkNumberedList`, `mkReplaceList` or `mkIfExists` marker in a
+  # CRD. Such a
   # marker would reach the cluster as a literal `_type` field. Find it here and
   # stop, instead of writing a manifest that is not valid Kubernetes. The
   # search is lazy and stops at the first marker.
@@ -176,8 +177,8 @@ let
     (lib.throwIf (lib.hasMarker crd) ''
       The CustomResourceDefinition "${
         crd.metadata.name or "<unnamed>"
-      }" in `kubernetes.crds' uses lib.mkNamedList, lib.mkNumberedList or
-      lib.mkIfExists.
+      }" in `kubernetes.crds' uses lib.mkNamedList, lib.mkNumberedList,
+      lib.mkReplaceList or lib.mkIfExists.
 
       `kubernetes.crds' goes around ekn.lib.kubeValueType on purpose, for speed.
       Thus nothing resolves the marker, and it becomes a literal `_type' field

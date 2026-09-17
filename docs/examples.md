@@ -20,8 +20,9 @@ The generated manifest will contain 5 items with `apiVersion`, `kind`, and
 
 ## Named Lists
 
-Demonstrates the `mkNamedList` and `mkNumberedList` helpers for overriding
-container lists and environment variables by name instead of positional index.
+Demonstrates the `mkNamedList`, `mkNumberedList` and `mkReplaceList` helpers for
+overriding container lists, environment variables and flags without writing the
+whole list again.
 
 ```{literalinclude} ./examples/namedlists/default.nix
 :language: nix
@@ -29,8 +30,26 @@ container lists and environment variables by name instead of positional index.
 
 `initContainers` use `mkNumberedList`, which addresses an entry by its index.
 Regular `containers` and `env` entries use `mkNamedList`, which addresses an
-entry by its `name` attribute. Both helpers keep the order of the entries that
-a plain list already defines.
+entry by its `name` attribute. The container's `args` use `mkReplaceList`, which
+addresses an element by the start of its own value. All three keep the order of
+the entries that a plain list already defines.
+
+`mkReplaceList` is for a list whose elements have neither a `name` nor an index
+that survives the next chart version, which is what a container's `args` is. The
+key is the start of the element, and the value takes the whole element. A key
+that matches no element is an error, and so is a key that matches more than one.
+A replacement needs no `mkForce`: it replaces an element rather than defining
+one.
+
+`mkReplaceList` takes an attribute set. Use `lib.mkMerge` to compose several of
+them, or to hold a list and a patch of it in one definition:
+
+```nix
+args = lib.mkMerge [
+  (lib.mkReplaceList { "--metrics-addr=" = "--metrics-addr=:8443"; })
+  (lib.mkIf cfg.debug (lib.mkReplaceList { "--v=" = "--v=4"; }))
+];
+```
 
 ---
 
@@ -85,8 +104,16 @@ kubernetes.objects.default.Deployment.my-chart.spec.template.spec.containers =
 
 The type merges the two definitions by name. An entry keeps the position it had
 in the chart output. An attribute name that the chart does not use adds a new
-entry at the end. Use `mkNumberedList` to address an entry by index instead,
-for example a list of scalars such as `args`.
+entry at the end. Use `mkNumberedList` to address an entry by index instead, and
+`mkReplaceList` to address one element of a list of strings by the start of its
+own value:
+
+```nix
+kubernetes.objects.default.Deployment.my-chart.spec.template.spec.containers =
+  lib.mkNamedList {
+    main.args = lib.mkReplaceList { "--metrics-addr=" = "--metrics-addr=:8443"; };
+  };
+```
 
 ---
 

@@ -51,6 +51,12 @@ class TestNixTransform:
         with pytest.raises(nanopynix.NixError, match="still holds a marker"):
             await evaluate_file(NIX_TEST_FILE, "refusesAnUnconvertibleMarker")
 
+    async def test_a_replace_marker_fails_the_build(self) -> None:
+        # `mkReplaceList` needs a list to merge against, and a transform
+        # result has none. `hasMarker` has to know the marker for this.
+        with pytest.raises(nanopynix.NixError, match="still holds a marker"):
+            await evaluate_file(NIX_TEST_FILE, "refusesAReplaceMarker")
+
     async def test_the_render_side_is_one_read_file(self) -> None:
         assert await evaluate_file(NIX_TEST_FILE, "isJustAReadFileAfterwards") is True
 

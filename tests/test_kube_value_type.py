@@ -219,7 +219,7 @@ class TestKubeValueType:
     async def test_mixed_named_and_numbered_markers_rejected(self) -> None:
         # Previously the named branch won in silence and left the other
         # marker's literal `true` behind as a list element.
-        with pytest.raises(nanopynix.NixError, match="both an mkNamedList"):
+        with pytest.raises(nanopynix.NixError, match="mkNamedList, mkNumberedList"):
             await evaluate_file(NIX_TEST_FILE, "mixedNamedAndNumberedThrows")
 
     async def test_mk_order_on_named_entry_rejected(self) -> None:
@@ -581,3 +581,127 @@ class TestPrioritiesInsideAnEntry:
         # `showOption` quotes an index, since `0` is not an identifier.
         with pytest.raises(nanopynix.NixError, match=r'value\.initContainers\."0"\.image'):
             await evaluate_file(NIX_TEST_FILE, "numberedEntryConflictThrows")
+
+    async def test_replace_patches_a_scalar_list_by_content(self) -> None:
+        # The case the marker exists for: a chart's `args`, where an element
+        # has no `name` and its index moves with the next chart version.
+        result = await evaluate_file(NIX_TEST_FILE, "replaceOverrideOfScalarList")
+        assert result == {
+            "args": [
+                "--metrics-addr=:8443",
+                "--enable-leader-election",
+                "--health-probe-addr=:8081",
+            ]
+        }
+
+    async def test_an_exact_key_replaces_too(self) -> None:
+        # A whole element is a prefix of itself, so prefix matching covers
+        # the exact case and needs no second match mode.
+        result = await evaluate_file(NIX_TEST_FILE, "replaceWithAnExactKey")
+        assert result == {"args": ["--a", "--B"]}
+
+    async def test_two_modules_replace_two_elements(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "replaceFromTwoModules")
+        assert result == {"args": ["--a=2", "--b=1", "--c=2"]}
+
+    async def test_replace_works_inside_a_named_list_entry(self) -> None:
+        # The real call site: the container by name, its args by content.
+        result = await evaluate_file(NIX_TEST_FILE, "replaceNestedInANamedList")
+        assert result == {"containers": [{"name": "manager", "args": ["--metrics-addr=:8443", "--leader-elect"]}]}
+
+    async def test_a_switched_off_replace_marker_leaves_the_list(self) -> None:
+        # `mkIf false` drops the marker before the merge, so a key that would
+        # match nothing is not an error when the patch is switched off.
+        result = await evaluate_file(NIX_TEST_FILE, "replaceSwitchedOffLeavesTheList")
+        assert result == {"args": ["--a", "--b"]}
+
+    async def test_a_replace_key_that_matches_nothing_is_an_error(self) -> None:
+        # The whole point of the marker. `mkNumberedList` cannot do this: an
+        # index always matches something, just not the element you meant.
+        with pytest.raises(nanopynix.NixError, match="keys that match\n *no element"):
+            await evaluate_file(NIX_TEST_FILE, "replaceKeyMatchesNothingThrows")
+
+    async def test_the_no_match_error_shows_the_list(self) -> None:
+        with pytest.raises(nanopynix.NixError, match=r'The list holds:\n *"--a"'):
+            await evaluate_file(NIX_TEST_FILE, "replaceKeyMatchesNothingThrows")
+
+    async def test_a_replace_key_that_matches_twice_is_an_error(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="more than one element"):
+            await evaluate_file(NIX_TEST_FILE, "replaceKeyMatchesTwoThrows")
+
+    async def test_two_replace_keys_on_one_element_is_an_error(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="match the same element"):
+            await evaluate_file(NIX_TEST_FILE, "replaceTwoKeysOnOneElementThrows")
+
+    async def test_a_replace_marker_alone_has_nothing_to_replace(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="no list to replace in"):
+            await evaluate_file(NIX_TEST_FILE, "replaceWithNoListThrows")
+
+    async def test_mk_force_drops_the_list_the_marker_needs(self) -> None:
+        # `mkForce` removes the plain definitions before the type sees them,
+        # so it turns the marker into the case above. The error says so,
+        # because `mkForce` is the habit this marker replaces.
+        with pytest.raises(nanopynix.NixError, match="needs no mkForce"):
+            await evaluate_file(NIX_TEST_FILE, "replaceUnderMkForceThrows")
+
+    async def test_replace_refuses_a_list_of_objects(self) -> None:
+        # Matching by content reads a string. Point at `mkNamedList` instead
+        # of reporting that the key matched nothing.
+        with pytest.raises(nanopynix.NixError, match="not a string"):
+            await evaluate_file(NIX_TEST_FILE, "replaceOnAListOfObjectsThrows")
+
+    async def test_mixed_numbered_and_replace_markers_rejected(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="mkNumberedList, mkReplaceList"):
+            await evaluate_file(NIX_TEST_FILE, "mixedNumberedAndReplaceThrows")
+
+    async def test_an_order_property_on_a_replace_entry_is_rejected(self) -> None:
+        # A replacement takes the position of the element it replaces, so an
+        # order property on it does nothing.
+        with pytest.raises(nanopynix.NixError, match=r"mkReplaceList entries: --a"):
+            await evaluate_file(NIX_TEST_FILE, "mkOrderOnReplaceEntryThrows")
+
+    async def test_two_replacements_of_one_element_conflict(self) -> None:
+        # The entries merge as an attribute set, so the module system reports
+        # the conflict itself and names the key.
+        with pytest.raises(nanopynix.NixError, match=r'value\.args\."--a="'):
+            await evaluate_file(NIX_TEST_FILE, "replaceConflictingValuesThrows")
+
+    async def test_mk_replace_list_rejects_non_attrs_input(self) -> None:
+        with pytest.raises(nanopynix.NixError, match="Input must be an attribute set"):
+            await evaluate_file(NIX_TEST_FILE, "mkReplaceListRejectsNonAttrsInput")
+
+    async def test_mk_replace_list_rejects_the_empty_key(self) -> None:
+        # An empty key is a prefix of every element, so it can never resolve
+        # to one. Refuse it where it is written, not at the merge.
+        with pytest.raises(nanopynix.NixError, match="empty key matches every element"):
+            await evaluate_file(NIX_TEST_FILE, "mkReplaceListRejectsTheEmptyKey")
+
+    async def test_replace_metadata_is_one_entry_per_element(self) -> None:
+        # The invariant `metadataTracksTheValue` keeps on the named branch.
+        result = await evaluate_file(NIX_TEST_FILE, "replaceMetadataTracksTheValue")
+        assert result["value"] == ["--a=1", "--b=2"]
+        assert result["metaLength"] == 2
+
+    async def test_replace_markers_compose_with_mk_merge(self) -> None:
+        # `mkMerge` is the list form. The module system expands it into one
+        # definition per element, so the marker needs no list shape of its
+        # own -- which would merge by concatenation instead of by key and
+        # lose the conflict report below.
+        result = await evaluate_file(NIX_TEST_FILE, "replaceMarkersComposeWithMkMerge")
+        assert result == {"args": ["--a=2", "--b=1", "--c=2"]}
+
+    async def test_one_module_can_hold_the_list_and_its_patch(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "replaceMergedWithItsOwnList")
+        assert result == {"args": ["--a=1", "--b=2"]}
+
+    async def test_a_member_of_an_mk_merge_can_be_switched_off(self) -> None:
+        # `mkIf` resolves before the merge, so a switched-off member never
+        # has to match an element.
+        result = await evaluate_file(NIX_TEST_FILE, "replaceInsideMkMergeCanBeSwitchedOff")
+        assert result == {"args": ["--a=2", "--b=1"]}
+
+    async def test_mk_merge_does_not_allow_one_element_twice(self) -> None:
+        # Composing with `mkMerge` is not a way around the conflict: the
+        # entries still merge as an attribute set, keyed by the match.
+        with pytest.raises(nanopynix.NixError, match=r'value\.args\."--a="'):
+            await evaluate_file(NIX_TEST_FILE, "replaceMkMergeSameKeyThrows")

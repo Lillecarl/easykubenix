@@ -37,10 +37,12 @@ self: lib: rec {
   # a Kubernetes object that is an attribute set.
   namedListType = "namedList";
   numberedListType = "numberedList";
+  replaceListType = "replaceList";
   untypedType = "untyped";
 
   isNamedList = value: lib.isAttrs value && (value._type or null) == namedListType;
   isNumberedList = value: lib.isAttrs value && (value._type or null) == numberedListType;
+  isReplaceList = value: lib.isAttrs value && (value._type or null) == replaceListType;
   isUntyped = value: lib.isAttrs value && (value._type or null) == untypedType;
   # Asks `isAttrs` once and reads `_type` once, rather than letting the two
   # predicates each do both. Measured at 238,025 duplicate `isAttrs` calls in
@@ -52,13 +54,13 @@ self: lib: rec {
       let
         marker = value._type or null;
       in
-      marker == namedListType || marker == numberedListType
+      marker == namedListType || marker == numberedListType || marker == replaceListType
     );
   # Remove the marker. This gives the bare attribute set of entries.
   stripListMarker = value: lib.removeAttrs value [ "_type" ];
 
-  # Search a value for any of the three markers: `mkNamedList`,
-  # `mkNumberedList` and `mkIfExists`.
+  # Search a value for any of the four markers: `mkNamedList`,
+  # `mkNumberedList`, `mkReplaceList` and `mkIfExists`.
   # `ekn.lib.kubeValueType` and `conditionalAttrsOf` resolve a marker when they
   # merge an option. Thus a marker can only stay in a value that goes around
   # both, such as an entry of `kubernetes.crds`. Such a marker would reach the
@@ -68,8 +70,8 @@ self: lib: rec {
   # One `isAttrs` and one `_type` read per node, not three and two. Calling
   # `isMarkedList` and `isIfExists` here asked `isAttrs` twice before the
   # `else if` asked a third time, on every node of every value this walks.
-  # The three marker names are compared inline for that reason; the
-  # predicates stay for callers with a single value to test.
+  # The marker names are compared inline for that reason; the predicates stay
+  # for callers with a single value to test.
   #
   # Measured on a real render (39 grafana dashboards, both arms from pinned
   # umbrellas, output byte-identical). Five frames per node became two:
@@ -102,6 +104,7 @@ self: lib: rec {
       in
       marker == namedListType
       || marker == numberedListType
+      || marker == replaceListType
       || marker == ifExistsType
       || lib.any hasMarker (lib.attrValues value)
     else if lib.isList value then
@@ -166,6 +169,40 @@ self: lib: rec {
         throw "mkNumberedList error: All keys in the attribute set must be integer strings."
       else
         attrs // { _type = numberedListType; };
+
+  # Mark an attribute set as a list of replacements, keyed by the start of the
+  # element each one replaces.
+  #
+  # A short form to override a list whose elements have neither a `name` nor a
+  # stable index. A container's `args` is the case: the elements are bare
+  # strings, and a chart bump adds a flag in front of the one you patch.
+  #
+  #     args = lib.mkReplaceList { "--metrics-addr=" = "--metrics-addr=:8443"; };
+  #
+  # The key matches an element by prefix, and the value takes the whole
+  # element. An exact element is a prefix of itself, so an exact key works too.
+  # Every other element and every position stay as the plain list definitions
+  # wrote them.
+  #
+  # A key that matches no element is an error, and so is a key that matches
+  # more than one. That is the property `mkNumberedList` cannot give: an index
+  # is not the identity of a flag, so a list that grows an entry at the front
+  # moves the override onto its neighbour and still renders.
+  #
+  # The input is an attribute set, and only that. `lib.mkMerge` is the list
+  # form: it gives the option one definition per member, which is what the
+  # merge already takes. A list argument here would merge by concatenation
+  # instead of by key, and thus lose the conflict two modules get today when
+  # they replace one element with two different values.
+  mkReplaceList =
+    attrs:
+    if !lib.isAttrs attrs then
+      throw "mkReplaceList error: Input must be an attribute set."
+    # An empty key is a prefix of every element, so it can never match one.
+    else if lib.elem "" (lib.attrNames attrs) then
+      throw "mkReplaceList error: The empty key matches every element. Give the start of the element to replace."
+    else
+      attrs // { _type = replaceListType; };
 
   # Recursively traverses a data structure, applying a transformer function to each node.
   # The traversal is pre-order (top-down), meaning a node is transformed *before* its children.
