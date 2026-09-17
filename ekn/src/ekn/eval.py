@@ -9,6 +9,7 @@ from os import PathLike
 from typing import TYPE_CHECKING, Annotated, Any
 
 import anyio
+import structlog
 from anyio import Path
 from nanopynix import NixError, NixEvalSettings, NixSettings
 from nanopynix.primops import yaml_primops
@@ -50,6 +51,7 @@ _SESSION_SETTINGS = NixSettings()
 # -- was discarded inside Nix and could not be recovered on this side at any
 # price. `_print_evaluation_warning` is what prints them once they arrive.
 # Everything above warn is still suppressed, so this adds no progress chatter.
+_log = structlog.get_logger()
 _VERBOSITY: ContextVar[LogLevelInput] = ContextVar("_verbosity", default="warn")
 _PRINT_BUILD_LOGS: ContextVar[bool] = ContextVar("_print_build_logs", default=False)
 
@@ -971,6 +973,32 @@ async def realise_attr(
         return await proxy.realise_string()
 
 
+_MIB = 1024 * 1024
+
+
+async def _closure_size(source: Any, paths: list[str]) -> tuple[int, int]:
+    """How many paths the copy covers, and their NAR size, read from *source*.
+
+    **The whole closure, and not the part the destination lacks.** The count
+    a reader wants is "3 of 19", and nanopynix's `Store` has no batch
+    valid-path query: asking the destination would be one round trip for each
+    path of the closure, over the same link the copy is about to use. A report
+    that costs a round trip per path can be slower than the silence it
+    replaces, so this reads the source alone. easykubenix issue #26 holds the
+    missing half, and it needs `query_valid_paths` on the `Store` protocol.
+
+    `compute_fs_closure` and `query_path_info` both read the local store, so
+    the whole function is SQLite reads and no network.
+    """
+    closure: set[str] = set()
+    for path in paths:
+        closure.update(str(member) for member in await source.compute_fs_closure(path))
+    nar_bytes = 0
+    for member in closure:
+        nar_bytes += (await source.query_path_info(member)).nar_size
+    return len(closure), nar_bytes
+
+
 async def push_closure_to_store(
     paths: list[str],
     to: str,
@@ -1007,11 +1035,26 @@ async def push_closure_to_store(
             session.store() as source,
             session.store(uri=to) as dest,
         ):
+            count, nar_bytes = await _closure_size(source, paths)
+            _log.info(
+                "copying closure",
+                paths=count,
+                mib=round(nar_bytes / _MIB, 1),
+                to=to,
+            )
+            started = time.monotonic()
             await source.copy_closure(
                 paths,
                 dest,
                 substitute=substitute_on_destination,
                 check_sigs=check_sigs,
+            )
+            _log.info(
+                "copied closure",
+                paths=count,
+                mib=round(nar_bytes / _MIB, 1),
+                seconds=round(time.monotonic() - started, 1),
+                to=to,
             )
 
 
