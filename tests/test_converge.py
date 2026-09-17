@@ -14,8 +14,10 @@ Issue Lillecarl/easykubenix#28.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
+import anyio
+import anyio.lowlevel
 import httpx
 import kr8s
 import pytest
@@ -24,12 +26,16 @@ from ekn.apply import KindNotServedError
 from ekn.converge import (
     RECREATE_OPT_OUT_ANNOTATION,
     Disposition,
+    _wait_before_retrying,
     classify,
     converge_barrier,
     converge_objects,
+    converge_queue,
+    diagnose,
     may_recreate,
     object_key,
     settled,
+    sort_for_apply,
 )
 
 if TYPE_CHECKING:
@@ -60,6 +66,33 @@ def server_error_with_reasons(status: int, message: str, causes: list[tuple[str,
         "message": message,
         "details": {"causes": [{"reason": reason, "message": text} for reason, text in causes]},
     }
+    return kr8s.ServerError(
+        message,
+        response=httpx.Response(status_code=status, json=body, request=httpx.Request("PATCH", "http://api/x")),
+    )
+
+
+def server_error_with_fields(
+    status: int,
+    message: str,
+    *,
+    reason: str | None = None,
+    causes: list[tuple[str, str, str]] | None = None,
+    retry_after: int | None = None,
+) -> kr8s.ServerError:
+    """A `Status` with everything the API server can attach to a failure:
+    its machine-readable reason, per-cause field paths, and how long it is
+    asking us to wait."""
+    details: dict[str, Any] = {}
+    if causes is not None:
+        details["causes"] = [
+            {"reason": cause_reason, "field": field_path, "message": text} for cause_reason, field_path, text in causes
+        ]
+    if retry_after is not None:
+        details["retryAfterSeconds"] = retry_after
+    body: dict[str, Any] = {"kind": "Status", "status": "Failure", "message": message, "details": details}
+    if reason is not None:
+        body["reason"] = reason
     return kr8s.ServerError(
         message,
         response=httpx.Response(status_code=status, json=body, request=httpx.Request("PATCH", "http://api/x")),
@@ -521,3 +554,199 @@ class TestStatefulSetVolumes:
         )
 
         assert "whenDeleted = Retain" in failures[0].error
+
+
+class TestTheQueue:
+    """Helm order, N at a time, and what a failure carries with it."""
+
+    PRIORITY: ClassVar[dict[str, int]] = {"Namespace": 10, "CustomResourceDefinition": 20, "Deployment": 100}
+
+    def test_it_sorts_by_helm_order(self) -> None:
+        specs = [
+            manifest(kind="Deployment", name="web"),
+            manifest(kind="Namespace", name="ns"),
+            manifest(kind="CustomResourceDefinition", name="crd"),
+        ]
+
+        order = [object_key(spec)[1] for spec in sort_for_apply(specs, self.PRIORITY)]
+
+        assert order == ["Namespace", "CustomResourceDefinition", "Deployment"]
+
+    def test_an_unnumbered_kind_is_not_last(self) -> None:
+        """`DEFAULT_BARRIER_PRIORITY` is 1000 and sits above Helm's range but
+        below the webhook configurations. See that constant for the six
+        minutes of stalled apply that bought the rule."""
+        specs = [
+            manifest(kind="ValidatingWebhookConfiguration", name="hook"),
+            manifest(kind="CiliumNetworkPolicy", name="cnp"),
+        ]
+        priority = {"ValidatingWebhookConfiguration": 1010}
+
+        order = [object_key(spec)[1] for spec in sort_for_apply(specs, priority)]
+
+        assert order == ["CiliumNetworkPolicy", "ValidatingWebhookConfiguration"]
+
+    async def test_it_applies_several_at_once(self) -> None:
+        in_flight = [0]
+        peak = [0]
+
+        async def apply(_spec: Manifest) -> Any:
+            in_flight[0] += 1
+            peak[0] = max(peak[0], in_flight[0])
+            await anyio.lowlevel.checkpoint()
+            in_flight[0] -= 1
+            return object()
+
+        report = await converge_queue(
+            [manifest(name=f"cm{i}") for i in range(20)],
+            apply=apply,
+            concurrency=4,
+        )
+
+        assert report.applied == 20
+        assert report.ok
+        assert peak[0] > 1, "nothing ran concurrently"
+        assert peak[0] <= 4
+
+    async def test_concurrency_of_one_is_serial(self) -> None:
+        peak = [0]
+        in_flight = [0]
+
+        async def apply(_spec: Manifest) -> Any:
+            in_flight[0] += 1
+            peak[0] = max(peak[0], in_flight[0])
+            await anyio.lowlevel.checkpoint()
+            in_flight[0] -= 1
+            return object()
+
+        await converge_queue([manifest(name=f"cm{i}") for i in range(5)], apply=apply, concurrency=1)
+
+        assert peak[0] == 1
+
+
+class TestFastMode:
+    """The skip check, which is the whole of `--assume-unchanged` here."""
+
+    async def test_an_unchanged_object_is_not_applied(self) -> None:
+        applied: list[str] = []
+
+        async def apply(spec: Manifest) -> Any:
+            applied.append(object_key(spec)[2])
+            return object()
+
+        async def should_skip(spec: Manifest) -> bool:
+            return object_key(spec)[2] == "same"
+
+        report = await converge_queue(
+            [manifest(name="same"), manifest(name="changed")],
+            apply=apply,
+            should_skip=should_skip,
+        )
+
+        assert applied == ["changed"]
+        assert report.skipped == 1
+        assert report.applied == 1
+
+    async def test_without_a_skip_check_everything_is_applied(self) -> None:
+        applied: list[str] = []
+
+        async def apply(spec: Manifest) -> Any:
+            applied.append(object_key(spec)[2])
+            return object()
+
+        report = await converge_queue([manifest(name="a"), manifest(name="b")], apply=apply)
+
+        assert sorted(applied) == ["a", "b"]
+        assert report.skipped == 0
+
+
+class TestTheDiagnosis:
+    """What a failed apply can be asked, beyond its message."""
+
+    def test_it_names_the_offending_field(self) -> None:
+        """The single most useful fact in a rejected manifest, and the one
+        thing that stops a person going back to the cluster to ask."""
+        exc = server_error_with_fields(
+            422,
+            'Deployment.apps "web" is invalid',
+            reason="Invalid",
+            causes=[("FieldValueInvalid", "spec.replicas", "must be greater than or equal to 0")],
+        )
+
+        found = diagnose(exc)
+
+        assert found.status_code == 422
+        assert found.reason == "Invalid"
+        assert found.causes[0].field_path == "spec.replicas"
+        assert "field=spec.replicas" in found.summary()
+        assert "reason=Invalid" in found.summary()
+
+    def test_it_reads_the_servers_own_retry_delay(self) -> None:
+        """`retryAfterSeconds` comes with a 429 and with a 503 from a
+        Timeout. It is the API server saying how long it needs."""
+        exc = server_error_with_fields(429, "too many requests", reason="TooManyRequests", retry_after=7)
+
+        assert diagnose(exc).retry_after == 7.0
+
+    def test_a_plain_exception_still_diagnoses(self) -> None:
+        found = diagnose(ValueError("a bug in ekn"))
+
+        assert found.message == "a bug in ekn"
+        assert found.status_code is None
+        assert found.causes == ()
+
+    async def test_the_failure_carries_it(self) -> None:
+        async def apply(_spec: Manifest) -> Any:
+            raise server_error_with_fields(
+                422,
+                'Deployment.apps "web" is invalid',
+                reason="Invalid",
+                causes=[("FieldValueInvalid", "spec.replicas", "must be >= 0")],
+            )
+
+        report = await converge_queue([manifest(kind="Deployment", name="web")], apply=apply, settle_seconds=1.0)
+
+        failure = report.failures[0]
+        assert failure.diagnosis is not None
+        assert failure.diagnosis.causes[0].field_path == "spec.replicas"
+        assert "field=spec.replicas" in failure.error
+
+    async def test_it_counts_the_attempts(self) -> None:
+        """A report saying an object failed once and one saying it failed
+        eleven times are different reports."""
+        now = [0.0]
+
+        async def apply(_spec: Manifest) -> Any:
+            raise server_error(503, "still starting")
+
+        async def sleep(seconds: float) -> None:
+            now[0] += seconds
+
+        report = await converge_queue(
+            [manifest()],
+            apply=apply,
+            settle_seconds=10.0,
+            clock=lambda: now[0],
+            sleep=sleep,
+        )
+
+        assert report.failures[0].attempts > 1
+
+
+class TestTheRetryDelay:
+    """The server's own answer beats our backoff curve."""
+
+    def test_the_curve_is_used_when_the_server_says_nothing(self) -> None:
+        assert _wait_before_retrying(0, None) == 1.0
+        assert _wait_before_retrying(1, None) == 2.0
+
+    def test_the_server_wins_when_it_asks_for_longer(self) -> None:
+        assert _wait_before_retrying(0, 30.0) == 30.0
+
+    def test_the_curve_wins_when_it_is_longer(self) -> None:
+        assert _wait_before_retrying(4, 2.0) == 15.0
+
+    def test_the_cap_does_not_apply_to_an_instruction(self) -> None:
+        """`MAX_BACKOFF_SECONDS` caps our guess. Capping the API server's
+        instruction is just ignoring it more politely."""
+        assert _wait_before_retrying(0, 120.0) == 120.0

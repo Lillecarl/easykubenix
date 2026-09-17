@@ -19,7 +19,8 @@ failure slowly instead of quickly. Issue Lillecarl/easykubenix#28.
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field, replace
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Protocol
 
@@ -27,19 +28,28 @@ import anyio
 import kr8s
 import structlog
 
-from .apply import KindNotServedError
+# `Manifest` is a runtime import, not a type-only one: the memory object
+# stream is parameterised with it, and that subscript is evaluated.
+from .apply import DEFAULT_BARRIER_PRIORITY, KindNotServedError, Manifest
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 
+    from anyio.streams.memory import MemoryObjectReceiveStream
     from kr8s.asyncio.objects import APIObject
-
-    from .apply import Manifest
 
 _log = structlog.get_logger()
 
 DEFAULT_SETTLE_SECONDS = 60.0
 """How long a barrier may make no progress before this gives up on it."""
+
+DEFAULT_CONCURRENCY = 8
+"""How many objects are applied at once.
+
+Also the width of the ordering window. Workers pull from a queue sorted by
+Helm order, so this many adjacent objects are attempted together and the
+ordering holds only between windows, not inside one. See `converge_queue`.
+"""
 
 INITIAL_BACKOFF_SECONDS = 1.0
 MAX_BACKOFF_SECONDS = 15.0
@@ -73,12 +83,82 @@ class Disposition(enum.Enum):
 
 
 @dataclass(frozen=True)
+class Cause:
+    """One `Status.details.causes` entry: which field, and what about it."""
+
+    reason: str
+    field_path: str
+    message: str
+
+
+@dataclass(frozen=True)
+class Diagnosis:
+    """A failed apply, as much of it as the API server was willing to say."""
+
+    message: str
+    status_code: int | None = None
+    reason: str | None = None
+    causes: tuple[Cause, ...] = ()
+    retry_after: float | None = None
+
+    def summary(self) -> str:
+        """One line for the report, with the field path if there is one.
+
+        The field path is what turns "Deployment/web is invalid" into
+        something a person can act on without going back to the cluster.
+        """
+        fields = ", ".join(cause.field_path for cause in self.causes if cause.field_path)
+        parts = [self.message]
+        if self.reason:
+            parts.append(f"reason={self.reason}")
+        if fields:
+            parts.append(f"field={fields}")
+        return " ".join(parts)
+
+
+@dataclass(frozen=True)
 class Failure:
-    """One object that did not apply, and the last reason it gave."""
+    """One object that did not apply, and everything known about why."""
 
     key: tuple[str, str, str]
     disposition: Disposition
     error: str
+    diagnosis: Diagnosis | None = None
+    attempts: int = 1
+
+
+@dataclass(frozen=True)
+class ConvergeReport:
+    """What a run did, and what it could not do.
+
+    `failures` is the interface. A converging run reports partial success by
+    design, so its caller has nothing else to decide an exit code from.
+    """
+
+    applied: int
+    skipped: int
+    failures: list[Failure]
+
+    @property
+    def ok(self) -> bool:
+        return not self.failures
+
+
+def sort_for_apply(specs: Iterable[Manifest], resource_priority: Mapping[str, int]) -> list[Manifest]:
+    """Objects in the order Helm would install them.
+
+    The same numbers `barriers` groups by, flattened into one queue: a kind
+    with a lower number comes first, and a kind nobody numbered sorts at
+    `DEFAULT_BARRIER_PRIORITY`, which is deliberately not last. See that
+    constant in `apply.py` for the six minutes of stalled apply that bought
+    the rule.
+
+    Stable, so objects of one kind keep the order the render gave them.
+    """
+    return sorted(
+        specs,
+        key=lambda spec: resource_priority.get(object_key(spec)[1], DEFAULT_BARRIER_PRIORITY),
+    )
 
 
 class ApplyOne(Protocol):
@@ -90,6 +170,18 @@ class ApplyOne(Protocol):
     """
 
     def __call__(self, spec: Manifest) -> Awaitable[APIObject]: ...
+
+
+class SkipCheck(Protocol):
+    """Decide whether an object is already what it should be.
+
+    Injected, because reading live state has two shapes whose costs differ by
+    more than an order of magnitude -- one LIST per kind against one GET per
+    object -- and the choice belongs to whoever owns the `Api`. `livestate`
+    holds the decision this is usually built from.
+    """
+
+    def __call__(self, spec: Manifest) -> Awaitable[bool]: ...
 
 
 class DeleteOne(Protocol):
@@ -191,37 +283,67 @@ data. This errs at the safe end deliberately.
 """
 
 
-def _causes(exc: kr8s.ServerError) -> list[tuple[str, str]]:
-    """Every `(reason, message)` of a `Status` body, plus its own message.
+def diagnose(exc: BaseException) -> Diagnosis:
+    """Everything a failed apply can be asked, pulled out of its `Status`.
 
-    The API server puts the useful half of a 422 in `details.causes`, and
-    `str(exc)` carries only the summary line. The reason matters as much as
-    the message: `FieldValueForbidden` is how an immutability error arrives
-    when the message says neither "immutable" nor "may not change".
+    A Kubernetes failure carries far more than the sentence `str(exc)`
+    returns, and a converging run is exactly where the rest earns its keep:
+    the report is the only interface, and "Deployment/web failed" without a
+    field path sends a person back to the cluster to ask again.
+
+    Four things come out of the body that the message does not have:
+
+    `reason` is the machine-readable `Status.reason` -- `Invalid`,
+    `Forbidden`, `AlreadyExists`, `Timeout` -- which is stable across
+    versions in a way the prose is not.
+
+    `causes[].field` is the JSON path of the offending field. For a rejected
+    manifest it is the single most useful fact available, and nothing else
+    reports it.
+
+    `causes[].reason` is `FieldValueInvalid`, `FieldValueForbidden`,
+    `FieldValueRequired` and so on, which is how an immutable StatefulSet
+    update is recognised at all -- its message says nothing telling.
+
+    `retryAfterSeconds` is the server stating how long to wait. It is sent
+    with 429 and with a 503 from a `Timeout`/`ServerTimeout`, and honouring
+    it beats guessing at a backoff curve.
     """
+    if not isinstance(exc, kr8s.ServerError):
+        return Diagnosis(message=str(exc))
     response = exc.response
-    causes: list[tuple[str, str]] = [("", str(exc))]
     if response is None:
-        return causes
+        return Diagnosis(message=str(exc))
+    body: object
     try:
         body = response.json()
     except ValueError:
-        return causes
+        body = None
     if not isinstance(body, dict):
-        return causes
+        return Diagnosis(message=str(exc), status_code=response.status_code)
     details = body.get("details")
-    if not isinstance(details, dict):
-        return causes
-    listed = details.get("causes")
-    if not isinstance(listed, list):
-        return causes
-    causes.extend(
-        (str(cause.get("reason", "")), str(cause.get("message", ""))) for cause in listed if isinstance(cause, dict)
+    details_dict = details if isinstance(details, dict) else {}
+    listed = details_dict.get("causes")
+    causes = tuple(
+        Cause(
+            reason=str(cause.get("reason", "")),
+            field_path=str(cause.get("field", "")),
+            message=str(cause.get("message", "")),
+        )
+        for cause in (listed if isinstance(listed, list) else [])
+        if isinstance(cause, dict)
     )
-    return causes
+    retry_after = details_dict.get("retryAfterSeconds")
+    return Diagnosis(
+        message=str(exc),
+        status_code=response.status_code,
+        reason=str(body.get("reason", "")) or None,
+        causes=causes,
+        retry_after=float(retry_after) if isinstance(retry_after, int | float) else None,
+    )
 
 
-def _is_immutable_error(exc: kr8s.ServerError) -> bool:
+def _is_immutable_error(diagnosis: Diagnosis) -> bool:
     """True for the 422 that means "this field cannot be changed".
 
     The case that forces this rung to exist is a completed Job:
@@ -233,7 +355,7 @@ def _is_immutable_error(exc: kr8s.ServerError) -> bool:
     and is recognised by its cause reason instead. See `IMMUTABLE_PHRASES`
     and `FORBIDDEN_UPDATE_PHRASE`, which says why that check is narrow.
     """
-    for reason, message in _causes(exc):
+    for reason, message in [("", diagnosis.message), *((c.reason, c.message) for c in diagnosis.causes)]:
         if any(phrase in message for phrase in IMMUTABLE_PHRASES):
             return True
         if reason == "FieldValueForbidden" and FORBIDDEN_UPDATE_PHRASE in message:
@@ -261,7 +383,7 @@ def classify(exc: BaseException) -> Disposition:
     if isinstance(exc, kr8s.ServerError):
         status = _status_code(exc)
         if status == HTTPStatus.UNPROCESSABLE_ENTITY:
-            return Disposition.RECREATE if _is_immutable_error(exc) else Disposition.TERMINAL
+            return Disposition.RECREATE if _is_immutable_error(diagnose(exc)) else Disposition.TERMINAL
         if status in _RETRY_STATUSES:
             return Disposition.RETRY
         if status is None:
@@ -348,88 +470,283 @@ def _backoff(attempt: int) -> float:
     return min(INITIAL_BACKOFF_SECONDS * (2**attempt), MAX_BACKOFF_SECONDS)
 
 
+def _wait_before_retrying(attempt: int, asked_by_server: float | None) -> float:
+    """How long to leave the failed queue alone before sweeping it again.
+
+    **The server's own answer wins when it gives one.** `retryAfterSeconds`
+    arrives with a 429 and with a 503 from `Timeout`/`ServerTimeout`, and it
+    is the API server saying how long it needs. Coming back sooner is what it
+    is asking us not to do, so this takes the longer of the two rather than
+    the backoff curve's guess.
+
+    `MAX_BACKOFF_SECONDS` does not cap it. A cap on our own guess is
+    sensible; a cap on an instruction is just ignoring the instruction more
+    politely.
+    """
+    guess = _backoff(attempt)
+    return guess if asked_by_server is None else max(guess, asked_by_server)
+
+
+@dataclass
+class _Pass:
+    """What one sweep of the queue accumulated, shared by its workers."""
+
+    lock: anyio.Lock
+    last_progress: float
+    applied: int = 0
+    skipped: int = 0
+    retry: list[Manifest] = field(default_factory=list)
+    terminal: dict[tuple[str, str, str], Failure] = field(default_factory=dict)
+    last_error: dict[tuple[str, str, str], str] = field(default_factory=dict)
+    diagnoses: dict[tuple[str, str, str], Diagnosis] = field(default_factory=dict)
+    retry_after: float | None = None
+    """The longest `retryAfterSeconds` any object of this sweep was given.
+
+    The server's own answer to "how long should I wait", which beats the
+    backoff curve when it is offered. The longest rather than the shortest:
+    coming back before the API server said to is what it is asking us not
+    to do.
+    """
+
+
+async def converge_queue(  # noqa: PLR0913 -- every argument is an injected seam; see the Protocols above
+    specs: Sequence[Manifest],
+    *,
+    apply: ApplyOne,
+    resource_priority: Mapping[str, int] | None = None,
+    delete: DeleteOne | None = None,
+    should_skip: SkipCheck | None = None,
+    concurrency: int = DEFAULT_CONCURRENCY,
+    settle_seconds: float = DEFAULT_SETTLE_SECONDS,
+    allow_recreate: bool = False,
+    clock: Callable[[], float] = anyio.current_time,
+    sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+) -> ConvergeReport:
+    """Apply everything, in Helm order, `concurrency` objects at a time.
+
+    One queue rather than a barrier per priority. Objects are sorted by
+    `resource_priority` -- Helm's InstallOrder, as `ekn.resourcePriority`
+    gives it -- and workers pull from the front, so the set in flight is a
+    window of about `concurrency` adjacent objects in that order.
+
+    **That is approximate ordering, not the strict barriers
+    `apply_and_prune` uses, and the retry is what pays for it.** A strict
+    barrier guarantees every CustomResourceDefinition is Established before
+    any custom resource is attempted. A window does not: at a priority
+    boundary a worker can reach a custom resource while its CRD is still
+    being served. That arrives as `KindNotServedError`, classifies RETRY, and
+    the next sweep gets it. So the ordering is a heuristic that makes retries
+    rare, and convergence is what makes them harmless -- which is only true
+    because this loop converges. Do not lift this design into a run that
+    aborts on first failure.
+
+    Each object is: skip if `should_skip` says so, otherwise apply. The skip
+    check is injected because reading live state has two shapes with very
+    different costs -- one LIST per kind, or one GET per object -- and that
+    choice belongs to the caller that owns the `Api`, not here.
+
+    `clock` and `sleep` are arguments so a test of the settle timer costs no
+    wall time. `anyio.current_time` and not `time.monotonic`: it is the event
+    loop's own clock, the one anyio's timeouts measure against, so a
+    `fail_after` wrapped around this agrees with the settle timer rather than
+    drifting from it.
+    """
+    pending = sort_for_apply(specs, resource_priority or {})
+    workers = max(1, concurrency)
+    applied = skipped = 0
+    terminal: dict[tuple[str, str, str], Failure] = {}
+    last_error: dict[tuple[str, str, str], str] = {}
+    diagnoses: dict[tuple[str, str, str], Diagnosis] = {}
+    # How many sweeps each object has been through. A report that says an
+    # object failed once and a report that says it failed eleven times are
+    # different reports, and only the second one says "this is not coming
+    # back on its own".
+    attempts: Counter[tuple[str, str, str]] = Counter()
+    last_progress = clock()
+    attempt = 0
+
+    while pending:
+        for spec in pending:
+            attempts[object_key(spec)] += 1
+        state = _Pass(lock=anyio.Lock(), last_progress=last_progress)
+        # Buffered to the whole sweep and closed before any worker starts, so
+        # a send never blocks and `receive_nowait` ends cleanly on EndOfStream.
+        # Nothing is put back during a sweep: a retry goes to the next one,
+        # which is what keeps the settle timer meaningful.
+        send, receive = anyio.create_memory_object_stream[Manifest](max_buffer_size=len(pending))
+        for spec in pending:
+            send.send_nowait(spec)
+        send.close()
+
+        async with anyio.create_task_group() as tg:
+            for _ in range(workers):
+                tg.start_soon(
+                    _worker,
+                    receive,
+                    state,
+                    apply,
+                    delete,
+                    should_skip,
+                    allow_recreate,
+                    clock,
+                )
+
+        applied += state.applied
+        skipped += state.skipped
+        terminal.update(state.terminal)
+        last_error.update(state.last_error)
+        diagnoses.update(state.diagnoses)
+        last_progress = state.last_progress
+        pending = state.retry
+
+        if not pending:
+            break
+        if settled(last_progress, clock(), settle_seconds):
+            _log.warning(
+                "the queue stopped making progress",
+                remaining=len(pending),
+                settle_seconds=settle_seconds,
+            )
+            break
+        wait = _wait_before_retrying(attempt, state.retry_after)
+        _log.info("retrying", objects=len(pending), seconds=f"{wait:.1f}", asked_by_server=state.retry_after)
+        await sleep(wait)
+        attempt += 1
+
+    stuck = [
+        Failure(
+            object_key(spec),
+            Disposition.RETRY,
+            last_error.get(object_key(spec), ""),
+            diagnosis=diagnoses.get(object_key(spec)),
+            attempts=attempts[object_key(spec)],
+        )
+        for spec in pending
+    ]
+    terminal = {key: replace(failure, attempts=attempts[key]) for key, failure in terminal.items()}
+    return ConvergeReport(
+        applied=applied,
+        skipped=skipped,
+        failures=[*terminal.values(), *stuck],
+    )
+
+
+async def _worker(  # noqa: PLR0913 -- the shared state of one sweep, passed rather than closed over
+    receive: MemoryObjectReceiveStream[Manifest],
+    state: _Pass,
+    apply: ApplyOne,
+    delete: DeleteOne | None,
+    should_skip: SkipCheck | None,
+    allow_recreate: bool,
+    clock: Callable[[], float],
+) -> None:
+    """Pull objects off the queue until it is empty, applying each."""
+    while True:
+        try:
+            spec = receive.receive_nowait()
+        except (anyio.EndOfStream, anyio.WouldBlock):
+            return
+        await _process(
+            spec,
+            state=state,
+            apply=apply,
+            delete=delete,
+            should_skip=should_skip,
+            allow_recreate=allow_recreate,
+            clock=clock,
+        )
+
+
+async def _process(  # noqa: PLR0913 -- the shared state of one sweep, passed rather than closed over
+    spec: Manifest,
+    *,
+    state: _Pass,
+    apply: ApplyOne,
+    delete: DeleteOne | None,
+    should_skip: SkipCheck | None,
+    allow_recreate: bool,
+    clock: Callable[[], float],
+) -> None:
+    """One object: leave it alone if it is unchanged, otherwise apply it."""
+    key = object_key(spec)
+
+    if should_skip is not None and await should_skip(spec):
+        async with state.lock:
+            state.skipped += 1
+        _log.debug("unchanged", namespace=key[0], kind=key[1], name=key[2])
+        return
+
+    try:
+        await apply(spec)
+    except Exception as exc:
+        # Broad on purpose: `classify` is the whole policy, and it answers
+        # TERMINAL for anything it does not know.
+        disposition = classify(exc)
+        found = diagnose(exc)
+        async with state.lock:
+            state.last_error[key] = found.summary()
+            state.diagnoses[key] = found
+            if found.retry_after is not None:
+                state.retry_after = max(state.retry_after or 0.0, found.retry_after)
+        if disposition is Disposition.RECREATE:
+            disposition = await _recreate(
+                spec,
+                key=key,
+                apply=apply,
+                delete=delete,
+                allow_recreate=allow_recreate,
+                last_error=state.last_error,
+            )
+        async with state.lock:
+            if disposition is Disposition.TERMINAL:
+                state.terminal[key] = Failure(
+                    key,
+                    Disposition.TERMINAL,
+                    state.last_error[key],
+                    diagnosis=state.diagnoses.get(key),
+                )
+                return
+            if disposition is Disposition.RETRY:
+                state.retry.append(spec)
+                return
+            state.applied += 1
+            state.last_progress = clock()
+        _log.debug("recreated", namespace=key[0], kind=key[1], name=key[2])
+    else:
+        async with state.lock:
+            state.applied += 1
+            state.last_progress = clock()
+        _log.debug("applied", namespace=key[0], kind=key[1], name=key[2])
+
+
 async def converge_barrier(  # noqa: PLR0913 -- every argument is an injected seam; see the Protocols above
     specs: Sequence[Manifest],
     *,
     apply: ApplyOne,
     delete: DeleteOne | None = None,
+    should_skip: SkipCheck | None = None,
     settle_seconds: float = DEFAULT_SETTLE_SECONDS,
     allow_recreate: bool = False,
     clock: Callable[[], float] = anyio.current_time,
     sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
 ) -> list[Failure]:
-    """Apply every object of one barrier, retrying what has not caught up.
+    """`converge_queue` over one priority group, one object at a time.
 
-    Returns the objects that never applied, with the last error each gave.
-    An empty list means the barrier is clean.
-
-    `clock` and `sleep` are arguments so that a test of the settle timer
-    costs no wall time. Nothing else injects them. `anyio.current_time` and
-    not `time.monotonic`: it is the event loop's own clock, the one anyio's
-    timeouts measure against, so a future `fail_after` around this loop
-    agrees with the settle timer rather than drifting from it.
-
-    **The applies are serial, and a barrier is where concurrency belongs
-    when it arrives.** Objects within one barrier are independent by
-    construction -- that is what the barrier means -- so an
-    `anyio.create_task_group` over this inner loop is the shape. Two pieces
-    of state need moving first: `last_progress`, which several tasks would
-    write, and `retry_next`, which they would append to.
+    The objects that never applied, with the last error each gave. An empty
+    list means the group is clean.
     """
-    pending = list(specs)
-    terminal: dict[tuple[str, str, str], Failure] = {}
-    last_error: dict[tuple[str, str, str], str] = {}
-    last_progress = clock()
-    attempt = 0
-
-    while pending:
-        retry_next: list[Manifest] = []
-        for spec in pending:
-            key = object_key(spec)
-            try:
-                await apply(spec)
-            except Exception as exc:
-                # Broad on purpose: `classify` is the whole policy, and it
-                # answers TERMINAL for anything it does not know.
-                disposition = classify(exc)
-                last_error[key] = str(exc)
-                if disposition is Disposition.RECREATE:
-                    disposition = await _recreate(
-                        spec,
-                        key=key,
-                        apply=apply,
-                        delete=delete,
-                        allow_recreate=allow_recreate,
-                        last_error=last_error,
-                    )
-                if disposition is Disposition.TERMINAL:
-                    terminal[key] = Failure(key, Disposition.TERMINAL, last_error[key])
-                    continue
-                if disposition is Disposition.RETRY:
-                    retry_next.append(spec)
-                    continue
-                # RECREATE that succeeded falls through as progress.
-                last_progress = clock()
-                _log.debug("recreated", namespace=key[0], kind=key[1], name=key[2])
-            else:
-                last_progress = clock()
-                _log.debug("applied", namespace=key[0], kind=key[1], name=key[2])
-
-        pending = retry_next
-        if not pending:
-            break
-        if settled(last_progress, clock(), settle_seconds):
-            _log.warning(
-                "barrier stopped making progress",
-                remaining=len(pending),
-                settle_seconds=settle_seconds,
-            )
-            break
-        await sleep(_backoff(attempt))
-        attempt += 1
-
-    stuck = [Failure(object_key(spec), Disposition.RETRY, last_error.get(object_key(spec), "")) for spec in pending]
-    return [*terminal.values(), *stuck]
+    report = await converge_queue(
+        specs,
+        apply=apply,
+        delete=delete,
+        should_skip=should_skip,
+        concurrency=1,
+        settle_seconds=settle_seconds,
+        allow_recreate=allow_recreate,
+        clock=clock,
+        sleep=sleep,
+    )
+    return report.failures
 
 
 async def converge_objects(  # noqa: PLR0913 -- every argument is an injected seam; see the Protocols above
