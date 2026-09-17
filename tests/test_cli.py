@@ -506,6 +506,36 @@ class TestCachePushTimeout:
         # A bare string in Nix, a one-element list here: normalised at the
         # boundary so nothing downstream branches on the shape.
         assert cfg.cache_to == ["ssh-ng://nix@example.invalid"]
+        # Left unset above, so this is the default an instance that never
+        # thought about host keys deploys with. Issue #18.
+        assert cfg.cache_accept_new_host_keys is True
+
+    async def test_accept_new_host_keys_can_be_turned_off(self, tmp_path: Path) -> None:
+        """Where the host keys arrive ahead of time, for example from NixOS
+        `programs.ssh.knownHosts`, an unknown one is a real failure."""
+        sources_path = PROJECT_ROOT / "nix/sources.nix"
+        f = tmp_path / "strict.nix"
+        f.write_text(f"""
+            let
+              sources = import {sources_path};
+              pkgs = import sources.nixpkgs {{ }};
+            in
+            import {PROJECT_ROOT} {{
+              inherit pkgs;
+              modules = [
+                {{
+                  ekn.environment = "easykubenix";
+                  ekn.cacheTo = "ssh-ng://nix@example.invalid";
+                  ekn.cacheAcceptNewHostKeys = false;
+                  kubernetes.objects.default.ConfigMap.c.data.key = "value";
+                }}
+              ];
+            }}
+        """)
+
+        cfg = await evaluate_cache_config(f, None, None, None)
+
+        assert cfg.cache_accept_new_host_keys is False
 
     async def test_a_list_of_destinations_is_kept_in_order(self, tmp_path: Path) -> None:
         """One destination cannot serve a path whose consumer *is* that

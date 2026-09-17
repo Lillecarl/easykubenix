@@ -473,6 +473,7 @@ async def _push_ekn_cache(file: _Path | None, flake: str | None, attr: str | Non
             cache_to,
             timeout_sec=cfg.cache_timeout_sec,
             allow_failure=allow_failure,
+            accept_new_host_keys=cfg.cache_accept_new_host_keys,
         )
 
 
@@ -482,13 +483,19 @@ async def _push_one_cache(
     *,
     timeout_sec: float | None,
     allow_failure: bool,
+    accept_new_host_keys: bool = True,
 ) -> None:
     """One destination of `ekn.cacheTo`. See `_push_ekn_cache`."""
     if timeout_sec is not None:
         _log.info(f"pushing {cache_package_out} to {cache_to} (up to {timeout_sec:g}s)")
 
     try:
-        await push_closure_to_store([cache_package_out], cache_to, timeout_sec=timeout_sec)
+        await push_closure_to_store(
+            [cache_package_out],
+            cache_to,
+            timeout_sec=timeout_sec,
+            accept_new_host_keys=accept_new_host_keys,
+        )
     except NixError as exc:
         if allow_failure:
             _log.warning(

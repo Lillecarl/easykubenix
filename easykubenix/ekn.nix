@@ -240,6 +240,37 @@ in
       example = 120;
     };
 
+    cacheAcceptNewHostKeys = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Accept the host key of an `ssh://`/`ssh-ng://` destination in
+        `ekn.cacheTo` the first time `ekn` meets it, instead of failing the
+        push. `ekn` does this by adding
+        `-o StrictHostKeyChecking=accept-new` to `NIX_SSHOPTS`, which is what
+        Nix passes to OpenSSH.
+
+        **A key that changed is still refused.** `accept-new` trusts a host
+        the first time only, so this gives up first-contact trust and keeps
+        the protection that matters for a host you already deploy to.
+
+        The default is `true` because the alternative is not a safer deploy.
+        `ekn deploy` cannot prompt, so an unknown key stops the deploy with
+        an error that names the connection and not the key, and the operator
+        answers it by running
+        `ssh -o StrictHostKeyChecking=accept-new nix@host` by hand --
+        the same decision, made under time pressure and with less
+        information. Issue #18.
+
+        Set this to `false` where the host keys are distributed ahead of
+        time, for example by NixOS `programs.ssh.knownHosts`. A push to an
+        unknown host then fails, and `ekn` names the host key as the cause.
+
+        Your own `NIX_SSHOPTS` wins: `ekn` adds nothing when that variable
+        already sets `StrictHostKeyChecking`.
+      '';
+    };
+
     assertCached = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = if config.ekn.cacheTo == null then [ ] else lib.toList config.ekn.cacheTo;

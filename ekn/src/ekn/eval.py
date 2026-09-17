@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from os import PathLike
 from pathlib import Path as _SyncPath
 from typing import TYPE_CHECKING, Annotated, Any
+from urllib.parse import SplitResult, urlsplit
 
 import anyio
 import structlog
@@ -155,6 +156,8 @@ class CacheConfigResult(BaseModel):
     # Seconds to allow the push; None waits forever. `ekn.cacheTimeoutSec`
     # says why there is a bound at all.
     cache_timeout_sec: float | None = None
+    # `ekn.cacheAcceptNewHostKeys`. See `ssh_opts_for_push`.
+    cache_accept_new_host_keys: bool = True
 
 
 class SopsAgeIdentity(BaseModel):
@@ -1153,6 +1156,7 @@ async def evaluate_cache_config(
         cache_to = [declared] if isinstance(declared, str) else declared
 
         timeout_sec = await proxy.attr("ekn").attr("cacheTimeoutSec").to_python()
+        accept_new = await proxy.attr("ekn").attr("cacheAcceptNewHostKeys").to_python()
 
         with timed_stage("cache-push: build ekn.cachePackage"):
             cache_package_out = (await proxy.attr("ekn").attr("cachePackage").build()).get("out")
@@ -1161,6 +1165,7 @@ async def evaluate_cache_config(
                 "cache_to": cache_to,
                 "cache_package_out": cache_package_out,
                 "cache_timeout_sec": timeout_sec,
+                "cache_accept_new_host_keys": accept_new,
             }
         )
 
@@ -1196,6 +1201,60 @@ async def realise_attr(
 
 _MIB = 1024 * 1024
 
+_SSH_STORE_SCHEMES = frozenset({"ssh", "ssh-ng"})
+
+
+def ssh_destination(uri: str) -> SplitResult | None:
+    """*uri* parsed, when it names a store Nix reaches over ssh. Else `None`.
+
+    `urlsplit` and not a regex, so a `?ssh-key=...` query stays out of the
+    host name and a `:2222` port stays out of it too.
+    """
+    split = urlsplit(uri)
+    return split if split.scheme in _SSH_STORE_SCHEMES and split.hostname else None
+
+
+def ssh_opts_for_push(uri: str, current: str | None, *, accept_new_host_keys: bool) -> str | None:
+    """The `NIX_SSHOPTS` a push to *uri* wants, or `None` to keep *current*.
+
+    Nix hands this variable to OpenSSH verbatim, so `accept-new` here makes
+    the same trust-on-first-use decision an operator makes by hand after a
+    push failed on an unknown key. `ekn deploy` cannot prompt, so the
+    alternative is not a stricter deploy but a stopped one.
+    `ekn.cacheAcceptNewHostKeys` holds the whole argument. Issue #18.
+
+    A `current` that already names `StrictHostKeyChecking` is an explicit
+    answer to this question, so it wins.
+    """
+    if not accept_new_host_keys or ssh_destination(uri) is None:
+        return None
+    if "StrictHostKeyChecking" in (current or ""):
+        return None
+    return f"{current or ''} -o StrictHostKeyChecking=accept-new".strip()
+
+
+@contextmanager
+def _pushing_ssh_opts(uri: str, *, accept_new_host_keys: bool) -> Generator[None]:
+    """Hold `ssh_opts_for_push`'s answer in the environment, then restore it.
+
+    **Outside the session, not inside it.** The RPC worker that opens the
+    destination store inherits this process's environment when it spawns, and
+    libnixstore reads `NIX_SSHOPTS` when it starts ssh.
+    """
+    opts = ssh_opts_for_push(uri, os.environ.get("NIX_SSHOPTS"), accept_new_host_keys=accept_new_host_keys)
+    if opts is None:
+        yield
+        return
+    previous = os.environ.get("NIX_SSHOPTS")
+    os.environ["NIX_SSHOPTS"] = opts
+    try:
+        yield
+    finally:
+        if previous is None:
+            del os.environ["NIX_SSHOPTS"]
+        else:
+            os.environ["NIX_SSHOPTS"] = previous
+
 
 async def _closure_size(source: Any, paths: list[str]) -> tuple[int, int]:
     """How many paths the copy covers, and their NAR size, read from *source*.
@@ -1220,13 +1279,14 @@ async def _closure_size(source: Any, paths: list[str]) -> tuple[int, int]:
     return len(closure), nar_bytes
 
 
-async def push_closure_to_store(
+async def push_closure_to_store(  # noqa: PLR0913 -- tracked complexity/arg-count debt, see TODO.md
     paths: list[str],
     to: str,
     *,
     substitute_on_destination: bool = True,
     check_sigs: bool = False,
     timeout_sec: float | None = None,
+    accept_new_host_keys: bool = False,
 ) -> None:
     """Copy the closure of already-realised `paths` to the store at `to`.
 
@@ -1249,8 +1309,11 @@ async def push_closure_to_store(
     The deadline is outside the `async with`, so expiry unwinds the session
     as well: the worker holding the stuck connection goes with it, rather
     than being left to finish a copy nobody is waiting for.
+
+    `accept_new_host_keys` covers an ssh destination whose key this machine
+    has never seen -- see `ssh_opts_for_push`.
     """
-    with anyio.fail_after(timeout_sec):
+    with _pushing_ssh_opts(to, accept_new_host_keys=accept_new_host_keys), anyio.fail_after(timeout_sec):
         async with (
             _session() as session,
             session.store() as source,
