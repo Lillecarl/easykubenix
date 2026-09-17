@@ -802,6 +802,30 @@ async def _engine_paused(
             raise EngineNotResumedError(msg)
 
 
+async def _hold_the_engine(
+    cfg: KubeApplyConfigResult,
+    *,
+    api: kr8s.asyncio.Api,
+    stack: contextlib.AsyncExitStack,
+) -> set[tuple[str, str, str]]:
+    """Pause the engine for the rest of the command, and say what it holds.
+
+    Refuses when the configuration names no engine. An apply that believes
+    the engine is stopped while it is running is the state `--pause-engine`
+    exists to avoid, so the empty case must not look like success.
+    """
+    if not cfg.engine_pause:
+        raise SystemExit(
+            "--pause-engine, but this configuration names no engine to pause.\n"
+            "Set deployment.engine.pause to the workloads holding cluster-wide write "
+            "permission -- for a stock ArgoCD that is the application controller alone.\n"
+            "Refusing rather than pausing nothing, because an apply that believes the "
+            "engine is stopped while it is running is the state this flag exists to avoid."
+        )
+    workloads = [enginepause.Workload(namespace=w.namespace, name=w.name, kind=w.kind) for w in cfg.engine_pause]
+    return await stack.enter_async_context(_engine_paused(workloads, api=api))
+
+
 class EngineNotResumedError(RuntimeError):
     """The apply finished and the engine is still scaled to zero.
 
@@ -960,6 +984,19 @@ class KubeApply(AttrCommand):
         "spec.template, a Service's clusterIP). Off by default: a recreate is a delete, and for some kinds "
         "that is data loss. Never recreates a PersistentVolumeClaim, Secret, Namespace or CRD.",
     )
+    cache_push: bool = opt(
+        True,
+        negatable=True,
+        help="Push ekn.cachePackage's closure to ekn.cacheTo before applying, as `ekn deploy` does. "
+        "A no-op when ekn.cacheTo is null. On by default: a CSI-mounted store path that was never "
+        "pushed is a pod that fails to start, and a direct apply has no engine in front of it to "
+        "absorb the gap.",
+    )
+    cache_allow_failure: bool = opt(
+        False,
+        help="Log a warning and continue if the pre-apply cache push fails, instead of aborting. "
+        "Off by default, for the same reason as on `ekn deploy`.",
+    )
     pause_engine: bool = opt(
         False,
         help="Scale the GitOps engine's reconciler to zero for the duration of this apply and restore it "
@@ -1048,6 +1085,16 @@ class KubeApply(AttrCommand):
         except ValidationError as exc:
             _report_validation_error("kubeapply config", exc)
 
+        # Before the apply, and before the assertion that follows it. The two
+        # answer different halves and neither replaces the other: the push
+        # puts paths on `ekn.cacheTo`, the assertion asks whether a *node*
+        # can fetch them. A leg whose only substituter is the workload it is
+        # needed to start -- pynixd's own environment -- passes the push and
+        # fails the assertion, which is the right way round.
+        if self.cache_push:
+            with timed_stage("kubeapply: cache-push (total, incl. network copy)"):
+                await _push_ekn_cache(self.file, self.flake, self.attr, allow_failure=self.cache_allow_failure)
+
         # `AsyncExitStack` rather than two code paths: the kubeconfig is a
         # temporary file that must outlive the apply and not outlive the
         # command, and without one the whole body would be written twice.
@@ -1056,20 +1103,7 @@ class KubeApply(AttrCommand):
             api = await kr8s.asyncio.api(kubeconfig=kubeconfig)
             if cfg.sops_age_identities:
                 await ensure_age_identities(cfg.sops_age_identities, api=api)
-            held: set[tuple[str, str, str]] = set()
-            if self.pause_engine:
-                if not cfg.engine_pause:
-                    raise SystemExit(
-                        "--pause-engine, but this configuration names no engine to pause.\n"
-                        "Set deployment.engine.pause to the workloads holding cluster-wide write "
-                        "permission -- for a stock ArgoCD that is the application controller alone.\n"
-                        "Refusing rather than pausing nothing, because an apply that believes the "
-                        "engine is stopped while it is running is the state this flag exists to avoid."
-                    )
-                workloads = [
-                    enginepause.Workload(namespace=w.namespace, name=w.name, kind=w.kind) for w in cfg.engine_pause
-                ]
-                held = await stack.enter_async_context(_engine_paused(workloads, api=api))
+            held = await _hold_the_engine(cfg, api=api, stack=stack) if self.pause_engine else set()
             try:
                 await _apply_groups(
                     cfg,
