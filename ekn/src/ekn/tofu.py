@@ -114,6 +114,9 @@ async def prepare(unit: TofuUnit, root: Path | None = None) -> Path:
     # re-initialising there means a provider download and a backend round trip
     # for a question already answered. Unchanged means both: the configuration
     # byte-identical to the store's, and a `.terraform/` already there.
+    #
+    # The directory only means this because a failed `init` no longer leaves
+    # one -- see the `_run` call below. Issue #22.
     unchanged = await target.exists() and await target.read_bytes() == await source.read_bytes()
     if unchanged and await (workdir / ".terraform").exists():
         _log.info(f"{unit.name}: state at {await state_location(workdir)}")
@@ -134,7 +137,22 @@ async def prepare(unit: TofuUnit, root: Path | None = None) -> Path:
     if await lock.exists():
         await lock.unlink()
 
-    await _run(unit, workdir, ["init", "-input=false"])
+    # **A failed `init` must leave no `.terraform/`.** It creates the directory
+    # before it can fail -- on a backend it cannot reach, for instance -- and
+    # writes no lock file. The next run then read the directory as "already
+    # initialised", skipped init, and `plan` died on "Inconsistent dependency
+    # lock file: no version is selected", telling the user to run `tofu init`,
+    # which `ekn` owns and would not run again. Nothing short of deleting the
+    # directory by hand recovered. Issue #22.
+    #
+    # Deciding from `.terraform.lock.hcl` instead does not work: a lock left
+    # by an older nixpkgs pin is exactly what the removal above exists for, and
+    # reading it as "initialised" would skip the init that replaces it.
+    try:
+        await _run(unit, workdir, ["init", "-input=false"])
+    except TofuError:
+        await asyncio.to_thread(shutil.rmtree, str(workdir / ".terraform"), True)
+        raise
     location = await state_location(workdir)
     _log.info(f"{unit.name}: state at {location}")
 

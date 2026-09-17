@@ -59,6 +59,15 @@ exit 1
 """
 
 
+#: What a real `tofu init` does when it cannot reach its backend: it creates
+#: `.terraform/`, then fails without writing a lock file.
+_FAILING_AFTER_MKDIR = """#!/bin/sh
+printf '%s %s\\n' "$(basename "$(pwd)")" "$*" >> "$TOFU_LOG"
+mkdir -p .terraform
+exit 1
+"""
+
+
 def _fake_tofu(tmp_path: pathlib.Path, name: str, script: str) -> str:
     path = tmp_path / name
     path.write_text(script)
@@ -302,6 +311,40 @@ async def test_prepare_skips_init_when_nothing_changed(tmp_path: pathlib.Path, m
     await prepare(unit, root)
 
     assert (tmp_path / "calls").read_text() == "infra init -input=false\n"
+
+
+async def test_a_failed_init_leaves_no_initialised_directory(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`init` creates `.terraform/` before it can fail, and writes no lock.
+
+    Left there, the next run read it as "already initialised", skipped init,
+    and `plan` died on "Inconsistent dependency lock file" -- naming `tofu
+    init`, which `ekn` owns and would not run. Only deleting the directory by
+    hand recovered. Issue #22.
+    """
+    monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
+    unit = _unit(tmp_path, "infra", _fake_tofu(tmp_path, "tofu", _FAILING_AFTER_MKDIR), {})
+    root = Path(tmp_path / "work")
+
+    with pytest.raises(TofuError):
+        await prepare(unit, root)
+
+    workdir = Path(tmp_path / "work") / "infra"
+    assert not await (workdir / ".terraform").exists()
+
+
+async def test_prepare_re_inits_after_a_failed_init(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The point of the removal above: the next run initialises again."""
+    monkeypatch.setenv("TOFU_LOG", str(tmp_path / "calls"))
+    unit = _unit(tmp_path, "infra", _fake_tofu(tmp_path, "tofu", _FAILING_AFTER_MKDIR), {})
+    root = Path(tmp_path / "work")
+
+    for _ in range(2):
+        with pytest.raises(TofuError):
+            await prepare(unit, root)
+
+    assert (tmp_path / "calls").read_text().count("init") == 2
 
 
 async def test_prepare_re_inits_when_the_config_changed(
