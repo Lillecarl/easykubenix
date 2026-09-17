@@ -399,9 +399,18 @@ def python_profile() -> Generator[None]:
 
     **It profiles this process only.** nanopynix runs the evaluator in its
     own worker, so the time this attributes to a `to_python` call is the
-    marshalling and the waiting, not the evaluation inside it. That is the
-    right split: `EKN_EVAL_PROFILER` already covers the other side, and the
-    two together add up to the wall clock.
+    marshalling and the waiting, not the evaluation inside it.
+    `EKN_EVAL_PROFILER` covers the other side.
+
+    **The two do not add up to the wall clock, and a third gap sits between
+    them.** The eval profiler samples at call boundaries, so every nanopynix
+    primop is invisible to it -- YAML parsing included. Measured on one
+    nixlab2 render that is about 2.8s, between a 4.8s evaluator and a 7.6s
+    stage. Neither profiler attributes it.
+
+    Measure on a warm store. Render once unprofiled first, or a first-time
+    import-from-derivation build lands inside the number and reads as
+    evaluation.
     """
     if not os.environ.get("EKN_PROFILE"):
         yield
