@@ -894,8 +894,33 @@ let
       )
     ];
   };
+
+  mkAssertCached =
+    module:
+    (import ../. {
+      inherit pkgs;
+      modules = [ module ];
+    }).config.ekn.assertCached;
 in
 {
+  # `ekn.assertCached` follows `ekn.cacheTo`, in all three shapes that option
+  # takes. The check asks whether the push this run just made arrived, so a
+  # second list would be a list that drifts from the first.
+  assertCachedFollowsCacheTo = {
+    unset = mkAssertCached { };
+    string = mkAssertCached { ekn.cacheTo = "ssh-ng://nix@pynixd"; };
+    list = mkAssertCached {
+      ekn.cacheTo = [
+        "ssh-ng://nix@pynixd"
+        "https://nixkube.cachix.org"
+      ];
+    };
+    overridden = mkAssertCached {
+      ekn.cacheTo = "ssh-ng://nix@pynixd";
+      ekn.assertCached = [ "https://nixkube.cachix.org" ];
+    };
+  };
+
   # Only that it evaluates. The notice itself is `lib.warn` on
   # `kluctl.projectDir`, which nothing here forces.
   kluctlScriptReadsManifest = easyKluctlScriptReadsManifest.config.kubernetes.generated;

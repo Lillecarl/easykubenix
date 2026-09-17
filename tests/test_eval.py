@@ -103,6 +103,15 @@ class TestEknModule:
         with pytest.raises(nanopynix.NixError, match="encryptedData"):
             await evaluate_file(TEMPLATES_NIX_TEST_FILE, "invalidTemplateArguments")
 
+    async def test_assert_cached_follows_cache_to(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "assertCachedFollowsCacheTo")
+        assert result == {
+            "unset": [],
+            "string": ["ssh-ng://nix@pynixd"],
+            "list": ["ssh-ng://nix@pynixd", "https://nixkube.cachix.org"],
+            "overridden": ["https://nixkube.cachix.org"],
+        }
+
     async def test_ekn_routing_is_stripped_from_manifests(self) -> None:
         result = await evaluate_file(NIX_TEST_FILE, "eknRouting")
         assert isinstance(result, dict)

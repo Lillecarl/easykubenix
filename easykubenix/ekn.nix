@@ -242,22 +242,26 @@ in
 
     assertCached = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      default = [ ];
+      default = if config.ekn.cacheTo == null then [ ] else lib.toList config.ekn.cacheTo;
       description = ''
         Substituters to ask, **before applying anything**, whether they can
         serve every store path this apply names. A path on none of them
         refuses the apply.
 
-        Empty by default, which turns the check off. That is right for an
-        instance with no CSI-backed store: there is nothing to assert and it
-        should not pay for the check.
+        **Defaults to `ekn.cacheTo`**, the destinations this same run has
+        just pushed to. So the check asks whether the push arrived, and no
+        second list exists to drift from the first. `cacheTo = null` leaves
+        this empty and turns the check off, which is right for an instance
+        with no CSI-backed store: there is nothing to assert and it should
+        not pay for the check.
 
-        **Name the caches the nodes carry.** Not the ones the deploying
-        machine happens to have configured -- those are usually more, and a
-        path only the deployer can fetch passes a check and then fails to
-        mount. easykubenix knows nothing about any particular cluster, so it
-        sets nothing here; the module that deploys the store server is the
-        one that knows, and it names its own list.
+        **The list has to be the caches the nodes carry**, not the ones the
+        deploying machine happens to have configured -- those are usually
+        more, and a path only the deployer can fetch passes a check and then
+        fails to mount. `cacheTo` is already that list, curated by whoever
+        knows where the paths are consumed, so this follows it rather than
+        asking for the same knowledge twice. Set this option directly where
+        the two differ.
 
         **What it is for.** A CSI-mounted store path can only be
         substituted -- a node cannot build it, because the volume names an
@@ -281,20 +285,17 @@ in
         the query goes through nanopynix rather than a scheme-specific
         fetcher. See issue #37.
 
-        **A configured substituter list cannot express a runtime-injected
-        one, and that is a property of the cluster rather than of the
-        check.** nixkube injects pynixd as a substituter on a node when `nix
-        store ping` answers, so a path held only by pynixd is reachable
-        while pynixd is up and unreachable while it is not. This check
-        reports such a path as missing.
+        **The default answers "did the push arrive", and that is a weaker
+        question than "can a cold node get this".** A destination that is
+        itself a workload in the cluster -- pynixd on nixlab2 -- serves a
+        path exactly as long as that workload runs. The check unions its
+        substituters, so one of them holding the path is enough to pass, and
+        a path held only by pynixd passes while pynixd is up.
 
-        That report is not simply a false positive. It is the same shape as
-        the outage this guard exists for: a path whose only source is a
-        workload in the cluster is available exactly as long as that
-        workload is. Naming pynixd here would make the answer pass and the
-        fragility invisible, which is why this list should be the
-        substituters a node can rely on *without* the cluster already being
-        healthy.
+        Drop that destination from this list to ask the harder question. A
+        list of only the caches that do not depend on the cluster reports a
+        pynixd-only path as missing, which is the outage this guard exists
+        for rather than a false positive.
 
         This is the guard, not the fix. It does not push anything; see
         `ekn.cacheTo`.
