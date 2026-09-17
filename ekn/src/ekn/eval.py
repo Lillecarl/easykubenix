@@ -232,6 +232,9 @@ class KubeApplyConfigResult(BaseModel):
     #: `deployment.unitFieldManagers` -- unit name to its `fieldManager`.
     #: Read **only while the engine is paused**; see `apply.field_manager_for`.
     unit_field_managers: dict[str, str] = Field(default_factory=dict, alias="unitFieldManagers")
+    #: `ekn.preApplyCommand`, already realised. `None` is the ordinary
+    #: shape. See `cli._run_pre_apply`.
+    pre_apply_command: str | None = Field(default=None, alias="preApplyCommand")
 
     @property
     def objects(self) -> list[dict[str, Any]]:
@@ -1109,6 +1112,16 @@ async def evaluate_kubeapply_config(
         assert_cached = (
             await ekn_opts.attr("assertCached").to_python() if await ekn_opts.has_attr("assertCached") else []
         )
+        pre_apply_command = None
+        if await ekn_opts.has_attr("preApplyCommand"):
+            declared_command = ekn_opts.attr("preApplyCommand")
+            # `to_python` first, because `realise_string` on a null is an
+            # error and null is the ordinary case. `realise_string` then
+            # builds what the Nix string context names, so the program
+            # exists on disk before anything tries to run it.
+            if await declared_command.to_python() is not None:
+                with timed_stage("kubeapply: realise ekn.preApplyCommand"):
+                    pre_apply_command = await declared_command.realise_string()
 
         return KubeApplyConfigResult.model_validate(
             {
@@ -1122,6 +1135,7 @@ async def evaluate_kubeapply_config(
                 "enginePause": engine_pause,
                 "assertCached": assert_cached,
                 "unitFieldManagers": unit_managers,
+                "preApplyCommand": pre_apply_command,
             }
         )
 

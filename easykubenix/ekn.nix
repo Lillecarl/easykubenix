@@ -375,6 +375,65 @@ in
       example = [ "https://nixkube.cachix.org" ];
     };
 
+    preApplyCommand = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        Program `ekn kubeapply` runs before it touches the cluster, and
+        before the `ekn.cacheTo` push. A non-zero exit aborts the apply.
+
+        **It runs before the push on purpose.** The case it exists for is a
+        path the push cannot place: a store the cluster reads but this
+        machine cannot write through `ekn.cacheTo`, or a cache that has to
+        hold a path before the workload serving `ekn.cacheTo` restarts. A
+        hook that ran afterwards could not repair what the push depends on.
+
+        `ekn` passes the JSON manifest of the objects this apply will send as
+        the first argument, and in `EKN_MANIFEST`. It is the objects
+        themselves, so a `--target` slice is the slice and a seeded Secret
+        carries its resolved value. `EKN_ENVIRONMENT` holds
+        `ekn.environment`, and `EKN_TARGET` the `--target` name or the empty
+        string for a whole-instance apply.
+
+        **A non-zero exit always aborts, and there is no flag to soften
+        that.** The hook decides what it tolerates; `ekn` tells it what the
+        deploy tolerates and lets the script logic deal with it:
+
+          EKN_CACHE_PUSH           1 unless `--no-cache-push`
+          EKN_CACHE_ALLOW_FAILURE  1 with `--cache-allow-failure`
+
+        Both are `1` or `0`, so `[ "$EKN_CACHE_ALLOW_FAILURE" = 1 ]` needs no
+        case handling. A hook that wants to be advisory reads them and exits
+        0 itself.
+
+        Every store path the apply names is in that manifest as text, so a
+        hook that has to seed a cache can read them out of it rather than
+        being told them:
+
+          grep -o '/nix/store/[a-z0-9]\{32\}-[^"]*' "$1" | sort -u
+
+        `types.path`, and Nix string context is kept, so `ekn` builds the
+        program before it runs it. `ekn` then executes that path directly.
+
+        **Wrap a package in `lib.getExe`.** `pkgs.writeScriptBin` and its
+        relatives build a *directory* with the script under `bin/`, and
+        `ekn` executes the path it is given.
+
+        This is the pre half of issue #5. `kluctl.preDeployScript` is the
+        same hook in the namespace it predates.
+      '';
+      example = lib.literalExpression ''
+        lib.getExe (
+          pkgs.writeScriptBin "seed-the-cache" '''
+            #!''${pkgs.runtimeShell}
+            set -euo pipefail
+            grep -o '/nix/store/[a-z0-9]\{32\}-[^"]*' "$1" | sort -u \
+              | ''${pkgs.cachix}/bin/cachix push nixkube
+          '''
+        )
+      '';
+    };
+
   };
 
   # An option's `default` is used only when it has no definitions at all, so a

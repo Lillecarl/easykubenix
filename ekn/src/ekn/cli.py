@@ -4,7 +4,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, cast
@@ -477,6 +479,55 @@ async def _push_ekn_cache(file: _Path | None, flake: str | None, attr: str | Non
             allow_failure=allow_failure,
             accept_new_host_keys=cfg.cache_accept_new_host_keys,
         )
+
+
+async def _run_pre_apply(
+    cfg: KubeApplyConfigResult,
+    *,
+    target: str | None,
+    cache_push: bool = True,
+    cache_allow_failure: bool = False,
+) -> None:
+    """Run `ekn.preApplyCommand`, and stop the apply if it fails.
+
+    **The manifest is the objects this apply sends, not the whole instance.**
+    A `--target` slice is the slice and a seeded Secret carries its resolved
+    value, so a hook reading store paths out of it sees what is about to be
+    applied rather than what the configuration describes. Issue #5.
+
+    **A non-zero exit always aborts.** A hook that pushes a closure and
+    fails, ignored, leaves a cluster pointed at store paths nothing it can
+    reach holds -- which is the bug this hook is usually written to avoid.
+    So there is no `--pre-apply-allow-failure`: the hook decides what it
+    tolerates, and `ekn` tells it what the deploy tolerates through
+    `EKN_CACHE_ALLOW_FAILURE` and `EKN_CACHE_PUSH`. A hook that wants to be
+    advisory exits 0 itself.
+    """
+    command = cfg.pre_apply_command
+    if command is None:
+        return
+
+    with tempfile.TemporaryDirectory(prefix="ekn-preapply-") as tmp:
+        manifest = _Path(tmp) / "manifest.json"
+        manifest.write_text(json.dumps({"apiVersion": "v1", "kind": "List", "items": cfg.objects}, indent=2))
+        env = {
+            **os.environ,
+            "EKN_MANIFEST": str(manifest),
+            "EKN_ENVIRONMENT": cfg.environment,
+            "EKN_TARGET": target or "",
+            # What the deploy around it tolerates, so the script can match
+            # it. `1`/`0` rather than `true`/`false`: `[ "$X" = 1 ]` in a
+            # POSIX shell needs no case handling.
+            "EKN_CACHE_PUSH": "1" if cache_push else "0",
+            "EKN_CACHE_ALLOW_FAILURE": "1" if cache_allow_failure else "0",
+        }
+        _log.info(f"running ekn.preApplyCommand: {command}")
+        with timed_stage("kubeapply: preApplyCommand"):
+            proc = await asyncio.create_subprocess_exec(command, str(manifest), env=env)
+            rc = await proc.wait()
+    if rc != 0:
+        _log.error(f"ekn.preApplyCommand exited {rc} -- nothing has been applied")
+        raise SystemExit(1)
 
 
 def _with_ssh_hint(message: str, hint: str | None) -> str:
@@ -1149,6 +1200,16 @@ class KubeApply(CachePushCommand):
             _report_nix_error(exc)
         except ValidationError as exc:
             _report_validation_error("kubeapply config", exc)
+
+        # Before the push, not only before the apply. The hook exists for a
+        # path `ekn.cacheTo` cannot place, so it has to be able to repair
+        # what the push depends on. Issue #5.
+        await _run_pre_apply(
+            cfg,
+            target=self.target,
+            cache_push=self.cache_push,
+            cache_allow_failure=self.cache_allow_failure,
+        )
 
         # Before the apply, and before the assertion that follows it. The two
         # answer different halves and neither replaces the other: the push
