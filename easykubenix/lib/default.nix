@@ -81,6 +81,14 @@ self: lib: rec {
   #   this file      1,866,790 -> 1,052,587   (-43.6%)
   #   whole render   9,540,152 -> 8,487,924   (-11.0%)
   #
+  # **Those are calls, and calls are not seconds.** Measured end to end on a
+  # quiet machine, ten runs each: everything that removed about 30% of this
+  # render's calls bought 3.1% of the evaluation stage and 2.2% of the wall
+  # clock. A module-system call costs roughly 0.1 us, and 41% of evaluator
+  # time is package instantiation that no walk here touches. The exchange
+  # rate is about ten to one against, so do not read a call count as a time
+  # saving -- it says where the work is, not what removing it is worth.
+  #
   # **Do not expect the rest of this file to shrink the same way.** What is
   # left is a floor the walk cannot avoid: `isList` at 159,294, `attrValues`
   # and `any` at 78,731 each, and `kubeAttrsToLists` at about 125,000. They
