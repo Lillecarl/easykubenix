@@ -44,6 +44,7 @@ from ekn.eval import (
     evaluate_validation_file,
     evaluate_with_fod_update,
     push_closure_to_store,
+    python_profile,
     realise_attr,
     timed_stage,
     verbose_session,
@@ -1728,4 +1729,7 @@ def main() -> None:
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
         cache_logger_on_first_use=True,
     )
-    asyncio.run(command.run())
+    # Around `asyncio.run`, so the profile covers the whole command including
+    # the event loop's own frames. See `python_profile`.
+    with python_profile():
+        asyncio.run(command.run())

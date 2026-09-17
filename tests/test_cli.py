@@ -850,6 +850,60 @@ class TestTheCachePushIsSharedNotCopied:
         assert not set(Commit.specs) - set(Deploy.specs)
 
 
+class TestThePythonProfiler:
+    """`EKN_PROFILE` closes the one blind spot left in a render's timing.
+
+    Measured on a full nixlab2 render: 11-12s wall, `to_python(kubernetes.
+    generated)` 8.8-9.6s, and the Nix evaluator only 5.4s of it. So roughly
+    4s is IFD realisation and marshalling 919 objects, which `EKN_EVAL_
+    PROFILER` cannot see and `EKN_TIMING` can only name.
+    """
+
+    def test_it_writes_a_profile_that_pstats_can_read(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import pstats
+
+        from ekn.eval import python_profile
+
+        destination = tmp_path / "ekn.profile"
+        monkeypatch.setenv("EKN_PROFILE", "1")
+        monkeypatch.setenv("EKN_PROFILE_FILE", str(destination))
+
+        with python_profile():
+            sum(range(10_000))
+
+        # Readable afterwards is the whole point: a dump no tool can open
+        # would pass a "the file exists" assertion and answer nothing.
+        assert pstats.Stats(str(destination)).stats  # type: ignore[attr-defined]
+
+    def test_it_is_off_unless_asked(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Negative control. Profiling every run would slow the ordinary
+        path and litter the working tree with `ekn.profile`."""
+        from ekn.eval import python_profile
+
+        destination = tmp_path / "ekn.profile"
+        monkeypatch.delenv("EKN_PROFILE", raising=False)
+        monkeypatch.setenv("EKN_PROFILE_FILE", str(destination))
+
+        with python_profile():
+            pass
+
+        assert not destination.exists()
+
+    def test_an_exception_still_writes_the_profile(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A run that fails is one of the runs worth profiling, and the
+        `finally` is what makes the slow-then-failed case readable."""
+        from ekn.eval import python_profile
+
+        destination = tmp_path / "ekn.profile"
+        monkeypatch.setenv("EKN_PROFILE", "1")
+        monkeypatch.setenv("EKN_PROFILE_FILE", str(destination))
+
+        with pytest.raises(RuntimeError, match="boom"), python_profile():
+            raise RuntimeError("boom")
+
+        assert destination.exists()
+
+
 class TestTheExitCode:
     """A command that fails must not report success.
 

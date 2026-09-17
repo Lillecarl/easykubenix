@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import cProfile
 import os
+import pstats
 import sys
 import time
 from contextlib import asynccontextmanager, contextmanager
@@ -372,6 +374,54 @@ def _profiler_eval_settings() -> NixEvalSettings | None:
         eval_profile_file=os.environ.get("EKN_EVAL_PROFILE_FILE", "nix.profile"),
         eval_profiler_frequency=int(os.environ.get("EKN_EVAL_PROFILER_FREQUENCY", "0")),
     )
+
+
+PROFILE_TOP_N = 30
+"""How many rows the stderr summary prints. The file has everything."""
+
+
+@contextmanager
+def python_profile() -> Generator[None]:
+    """Profile the Python side of a run, when `EKN_PROFILE` is set.
+
+    **The blind spot this closes.** `EKN_EVAL_PROFILER` profiles the Nix
+    evaluator and `EKN_TIMING` names each stage, but neither can see inside
+    a stage. Measured on a full nixlab2 render: 11-12s wall, of which
+    `to_python(kubernetes.generated)` is 8.8-9.6s and the evaluator accounts
+    for only 5.4s. So roughly 4s per render is import-from-derivation
+    realisation plus marshalling 919 objects across the wire, and until this
+    existed nothing could attribute any of it.
+
+    `EKN_PROFILE=1` enables it; `EKN_PROFILE_FILE` says where the `pstats`
+    dump goes, defaulting to `ekn.profile`. A summary goes to stderr too,
+    because a bare `pstats` file needs another tool to read and the point is
+    to see the answer.
+
+    **It profiles this process only.** nanopynix runs the evaluator in its
+    own worker, so the time this attributes to a `to_python` call is the
+    marshalling and the waiting, not the evaluation inside it. That is the
+    right split: `EKN_EVAL_PROFILER` already covers the other side, and the
+    two together add up to the wall clock.
+    """
+    if not os.environ.get("EKN_PROFILE"):
+        yield
+        return
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    try:
+        yield
+    finally:
+        profiler.disable()
+        destination = os.environ.get("EKN_PROFILE_FILE", "ekn.profile")
+        profiler.dump_stats(destination)
+        stats = pstats.Stats(profiler, stream=sys.stderr)
+        sys.stderr.write(f"\n[EKN_PROFILE] Python-side profile, {PROFILE_TOP_N} rows by cumulative time\n")
+        # Cumulative, not total: the question this answers is "which stage
+        # costs the wall clock", and an await that spends its time in a
+        # child frame has no total time of its own at all.
+        stats.sort_stats("cumulative").print_stats(PROFILE_TOP_N)
+        sys.stderr.write(f"[EKN_PROFILE] full profile written to {destination}\n")
 
 
 @asynccontextmanager
