@@ -118,6 +118,34 @@ what to inspect next, then query `/tmp/pytest.log` for the full failure context.
 - Use `structlog` for all logging. Use `_log.info()` for progress messages,
   `_log.error()` for errors. Configure at module level with `_log = structlog.get_logger()`.
 
+# Call the library, not its CLI
+
+Before writing `subprocess`, `shellous` or a `runCommand` that shells out,
+check what the project already depends on. A binding exists for most of what
+these repositories drive.
+
+- **Nix: nanopynix.** Never shell out to the `nix` CLI from Python.
+  `Session()`, `session.store(uri=...)`, `store.is_valid_path`,
+  `store.query_path_info`, `store.copy_closure`, `session.settings()`. See
+  `eval.py`'s `push_closure_to_store` and `storecheck.py` for the shape.
+- **Kubernetes: kr8s.** No raw HTTP.
+
+A CLI answers in exit codes and text you have to parse, loses the detail that
+makes an error actionable, and needs the binary on `PATH` at run time. A
+binding keeps distinct answers distinct: `is_valid_path` tells absent from
+unreachable, an exit code does not.
+
+Grep the dependency list before concluding there is no binding.
+
+# Do not declare an option for what the tool can read
+
+A Nix option that restates something `ekn` can find at run time is a second
+copy that drifts. Nix knows its own `substituters`; `ekn` reads them. The
+option is the switch -- `ekn.assertCached` is a `bool` -- not the data.
+
+Ask: could the program find this itself when it runs? Then it should, and the
+option only says whether to.
+
 # Test Failure Discipline
 
 Do not assume failing tests are unrelated, flaky, or pre-existing.
