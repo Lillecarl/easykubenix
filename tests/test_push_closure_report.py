@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ekn.eval import _closure_size
+import pytest
+
+from ekn.eval import UnrealisedPathsError, _closure_size, _refuse_unrealised
 
 
 class _FakeInfo:
@@ -71,3 +73,36 @@ async def test_a_shared_dependency_is_counted_once() -> None:
 async def test_no_paths_is_no_copy_and_no_crash() -> None:
     count, nar_bytes = await _closure_size(_FakeSource({}, {}), [])
     assert (count, nar_bytes) == (0, 0)
+
+
+class TestRefusingAnUnrealisedPush:
+    """A path the manifest names as text is not always on this machine.
+
+    nixkube's `discardStringContext` strips Nix string context from every
+    `nixkube/discard` resource, so building the manifest does not realise
+    what those resources name -- and the node and pynixd environments are
+    exactly those resources. Pushing the rest and reporting success is the
+    failure this refuses.
+    """
+
+    class _Store:
+        def __init__(self, valid: set[str]) -> None:
+            self.valid = valid
+
+        async def is_valid_path(self, path: str) -> bool:
+            return path in self.valid
+
+    async def test_every_path_present_is_no_refusal(self) -> None:
+        paths = ["/nix/store/aaa-one", "/nix/store/bbb-two"]
+        await _refuse_unrealised(self._Store(set(paths)), paths)
+
+    async def test_a_missing_path_names_itself_and_the_option(self) -> None:
+        paths = ["/nix/store/aaa-one", "/nix/store/bbb-nodeEnv"]
+
+        with pytest.raises(UnrealisedPathsError) as exc:
+            await _refuse_unrealised(self._Store({"/nix/store/aaa-one"}), paths)
+
+        message = str(exc.value)
+        assert "/nix/store/bbb-nodeEnv" in message
+        assert "/nix/store/aaa-one" not in message, "a path that is here is not the reader's problem"
+        assert "nixkube.discardStringContext" in message

@@ -416,7 +416,7 @@ class TestCachePushTimeout:
         async def cache_config(*_args: object, **_kwargs: object) -> CacheConfigResult:
             return CacheConfigResult(
                 cache_to=["ssh-ng://nix@unreachable.invalid"],
-                cache_package_out="/nix/store/deadbeef-manifest.json",
+                cache_paths=["/nix/store/deadbeefdeadbeefdeadbeefdeadbeef-manifest.json"],
                 cache_timeout_sec=timeout_sec,
             )
 
@@ -477,8 +477,7 @@ class TestCachePushTimeout:
 
         A real instance, so the option's type and its place in the tree are
         part of what this covers -- a hand-written `{ config.ekn = ...; }`
-        would answer for neither. `cachePackage` is left at its default,
-        which is what a project that never thought about it will push.
+        would answer for neither.
         """
         sources_path = PROJECT_ROOT / "nix/sources.nix"
         f = tmp_path / "instance.nix"
@@ -536,6 +535,41 @@ class TestCachePushTimeout:
         cfg = await evaluate_cache_config(f, None, None, None)
 
         assert cfg.cache_accept_new_host_keys is False
+
+    async def test_a_path_whose_context_was_stripped_is_still_pushed(self, tmp_path: Path) -> None:
+        """The reason the push reads the manifest's text rather than its Nix
+        string context.
+
+        `unsafeDiscardStringContext` is exactly what nixkube's
+        `discardStringContext` does to every `nixkube/discard` resource, and
+        the node and pynixd environments are those resources. A push that
+        followed context did not have them in its set at all, and reported
+        success having moved nothing a node needs.
+        """
+        sources_path = PROJECT_ROOT / "nix/sources.nix"
+        f = tmp_path / "stripped.nix"
+        f.write_text(f"""
+            let
+              sources = import {sources_path};
+              pkgs = import sources.nixpkgs {{ }};
+            in
+            import {PROJECT_ROOT} {{
+              inherit pkgs;
+              modules = [
+                {{
+                  ekn.environment = "easykubenix";
+                  ekn.cacheTo = "ssh-ng://nix@example.invalid";
+                  kubernetes.objects.default.ConfigMap.c.data.stripped =
+                    builtins.unsafeDiscardStringContext "${{pkgs.hello}}";
+                }}
+              ];
+            }}
+        """)
+
+        cfg = await evaluate_cache_config(f, None, None, None)
+
+        hello = [path for path in cfg.cache_paths if path.endswith("-hello-2.12.3")]
+        assert hello, f"the stripped path is missing from {cfg.cache_paths}"
 
     async def test_a_list_of_destinations_is_kept_in_order(self, tmp_path: Path) -> None:
         """One destination cannot serve a path whose consumer *is* that

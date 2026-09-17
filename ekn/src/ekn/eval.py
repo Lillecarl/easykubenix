@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, StringConstraints
 
 from ekn.apply import DEFAULT_FIELD_MANAGER, DEFAULT_UNIT_LABEL
 from ekn.gitops import load_raw_manifest
+from ekn.storecheck import STORE_DIR, store_paths_in_text
 
 # `JsonValue` and `LogEvent` are type-only despite the pydantic models below:
 # both are used in plain function signatures, never in a model field, so
@@ -152,7 +153,9 @@ class CacheConfigResult(BaseModel):
     #: ordinary one-destination case; normalising here means every consumer
     #: has one shape to handle rather than a branch it can forget.
     cache_to: list[str] = Field(default_factory=list)
-    cache_package_out: str | None
+    #: Every store path the rendered manifest names, found in its text. The
+    #: push copies these closures. See `evaluate_cache_config`.
+    cache_paths: list[str] = Field(default_factory=list)
     # Seconds to allow the push; None waits forever. `ekn.cacheTimeoutSec`
     # says why there is a bound at all.
     cache_timeout_sec: float | None = None
@@ -1129,15 +1132,24 @@ async def evaluate_cache_config(
     customer: str | None,
     attr_path: str | None,
 ) -> CacheConfigResult:
-    """Resolve `ekn.cacheTo` and build `ekn.cachePackage`, for `Deploy`'s
+    """Resolve `ekn.cacheTo` and the store paths to push there, for the
     automatic pre-git-push cache push (see `cli.py`'s `Deploy.run`).
 
-    Never forces the whole config, matching `evaluate_gitops_manifests`'s
-    rationale. `cachePackage`'s closure is realized by `.build()`-ing it here
-    (its derivation inputs are every store path embedded anywhere in
-    `kubernetes.generated`, via Nix string context) -- `copy_closure` then
-    only needs this one output path; libnixstore computes the rest of the
-    closure to copy from the store's own reference graph, not from Python.
+    **The paths come from the manifest's text, not from its Nix string
+    context**, and that is the whole point. Context is what a module can
+    take away: nixkube's `discardStringContext` strips it from every
+    `nixkube/discard` resource, and a push that followed context then copied
+    nothing and reported success. Reading the text finds the same set
+    `ekn.assertCached` asks about, so the push and the assertion cannot
+    disagree about what this apply names.
+
+    Building `internal.manifestJSONFile` realises every path the manifest
+    still names *with* context, which is what makes them copyable. A path
+    whose context was stripped is not realised by that build, and
+    `push_closure_to_store` says so rather than pushing a smaller set.
+
+    `kubernetes.generated` is a superset of a `--target` slice, so this can
+    push more than one apply needs. That is the safe direction.
     """
     async with (
         _session() as session,
@@ -1150,7 +1162,7 @@ async def evaluate_cache_config(
 
         declared = await proxy.attr("ekn").attr("cacheTo").to_python()
         if declared is None:
-            return CacheConfigResult.model_validate({"cache_to": [], "cache_package_out": None})
+            return CacheConfigResult.model_validate({"cache_to": []})
         # A bare string is the ordinary one-destination case; normalise it
         # here so nothing downstream has to branch on the shape.
         cache_to = [declared] if isinstance(declared, str) else declared
@@ -1158,12 +1170,16 @@ async def evaluate_cache_config(
         timeout_sec = await proxy.attr("ekn").attr("cacheTimeoutSec").to_python()
         accept_new = await proxy.attr("ekn").attr("cacheAcceptNewHostKeys").to_python()
 
-        with timed_stage("cache-push: build ekn.cachePackage"):
-            cache_package_out = (await proxy.attr("ekn").attr("cachePackage").build()).get("out")
+        with timed_stage("cache-push: build the manifest and realise its closure"):
+            manifest_out = (await proxy.attr("internal").attr("manifestJSONFile").build()).get("out")
+        if manifest_out is None:
+            raise ValueError("internal.manifestJSONFile's build produced no 'out' output")
+        manifest_text = await Path(manifest_out).read_text()
+        cache_paths = sorted(f"{STORE_DIR}/{name}" for name in store_paths_in_text(manifest_text))
         return CacheConfigResult.model_validate(
             {
                 "cache_to": cache_to,
-                "cache_package_out": cache_package_out,
+                "cache_paths": cache_paths,
                 "cache_timeout_sec": timeout_sec,
                 "cache_accept_new_host_keys": accept_new,
             }
@@ -1357,6 +1373,35 @@ async def _closure_size(source: Any, paths: list[str]) -> tuple[int, int]:
     return len(closure), nar_bytes
 
 
+class UnrealisedPathsError(RuntimeError):
+    """The push was refused because this machine does not hold every path."""
+
+
+async def _refuse_unrealised(source: Any, paths: list[str]) -> None:
+    """Stop before a copy that would silently move a smaller set.
+
+    A path the manifest names as text is not necessarily on this machine.
+    nixkube's `discardStringContext` strips Nix string context from every
+    `nixkube/discard` resource, so building the manifest does not realise
+    what those resources name -- and the node and pynixd environments are
+    exactly those resources.
+
+    Refusing is the point. A push that followed Nix string context did not
+    have these paths in its set at all, so it reported success having moved
+    nothing a node needs.
+    """
+    missing = [path for path in paths if not await source.is_valid_path(path)]
+    if not missing:
+        return
+    listed = "\n".join(f"  {path}" for path in missing)
+    raise UnrealisedPathsError(
+        f"the manifest names {len(missing)} store path(s) this machine does not have, "
+        f"so the push would move a smaller set than the apply needs:\n{listed}\n"
+        "nixkube strips Nix string context from `nixkube/discard` resources, which is "
+        "what leaves them unbuilt. Set `nixkube.discardStringContext = false` to keep it."
+    )
+
+
 async def push_closure_to_store(  # noqa: PLR0913 -- tracked complexity/arg-count debt, see TODO.md
     paths: list[str],
     to: str,
@@ -1390,6 +1435,11 @@ async def push_closure_to_store(  # noqa: PLR0913 -- tracked complexity/arg-coun
 
     `accept_new_host_keys` covers an ssh destination whose key this machine
     has never seen -- see `ssh_opts_for_push`.
+
+    `substitute_on_destination` lets the destination fetch a path from its
+    own substituters instead of taking it over the link. On by default: the
+    destination is usually closer to a public cache than to this machine,
+    and the paths that matter here are the ones a cluster already publishes.
     """
     with _pushing_ssh_opts(to, accept_new_host_keys=accept_new_host_keys), anyio.fail_after(timeout_sec):
         async with (
@@ -1397,6 +1447,7 @@ async def push_closure_to_store(  # noqa: PLR0913 -- tracked complexity/arg-coun
             session.store() as source,
             session.store(uri=to) as dest,
         ):
+            await _refuse_unrealised(source, paths)
             count, nar_bytes = await _closure_size(source, paths)
             _log.info(
                 "copying closure",

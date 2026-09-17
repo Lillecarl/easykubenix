@@ -109,7 +109,7 @@ in
         each object as the manager its own unit declares.
 
         A whole-instance apply is one group and wrote everything as
-        `ekn.cachePackage`'s default manager, even though every routed
+        the instance's default manager, even though every routed
         object carries the unit that names one. That is right for an apply
         that runs again -- it keeps conflict detection -- and wrong for a
         full deploy standing in for a paused engine, which has a successor

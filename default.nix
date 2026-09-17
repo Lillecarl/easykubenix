@@ -378,7 +378,7 @@ in
   # write `$ekn:env:VARNAME` over a live credential.
   #
   # `internal.manifestJSONFile` keeps the full set, because `ekn validate`,
-  # `ekn _applyManifest` and `ekn.cachePackage` all go through the CLI, which
+  # `ekn _applyManifest` and the cache push all go through the CLI, which
   # substitutes first. `ekn render` likewise reads `kubernetes.generated`, so
   # a person looking at what is about to happen still sees the seeded object
   # with its reference visible rather than silently missing.

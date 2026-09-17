@@ -31,6 +31,7 @@ from ekn.eval import (
     ApplyGroup,
     GitOpsManifestsResult,
     KubeApplyConfigResult,
+    UnrealisedPathsError,
     evaluate_cache_config,
     evaluate_file,
     evaluate_flake,
@@ -367,7 +368,7 @@ class CachePushCommand(AttrCommand):
     cache_push: bool = opt(
         True,
         negatable=True,
-        help="Push ekn.cachePackage's closure to ekn.cacheTo first. A no-op when ekn.cacheTo is null. "
+        help="Push the store paths the manifests name to ekn.cacheTo first. A no-op when ekn.cacheTo is null. "
         "On by default: a CSI-mounted store path that was never pushed is a pod that fails to start.",
     )
     cache_allow_failure: bool = opt(
@@ -443,7 +444,7 @@ async def _push_cache(  # noqa: PLR0913 -- tracked complexity/arg-count debt, se
 
 async def _push_ekn_cache(file: _Path | None, flake: str | None, attr: str | None, *, allow_failure: bool) -> None:
     """`Deploy`'s automatic pre-git-push cache push, sourced entirely from
-    Nix config (`ekn.cacheTo`/`ekn.cachePackage`) -- no CLI flags needed.
+    `ekn.cacheTo` -- a list of destination URIs, and no other knob.
 
     Must run and (by default) succeed *before* the git commit/push that
     triggers GitOps sync: CSI-mounted store paths referenced in the
@@ -461,16 +462,16 @@ async def _push_ekn_cache(file: _Path | None, flake: str | None, attr: str | Non
     if not cfg.cache_to:
         _log.info("ekn.cacheTo is null -- skipping the cache push")
         return
-    cache_package_out = cfg.cache_package_out
-    if cache_package_out is None:
-        _log.error("ekn.cachePackage's build produced no 'out' output")
-        raise SystemExit(1)
+    if not cfg.cache_paths:
+        _log.info("the manifests name no store paths -- skipping the cache push")
+        return
+    _log.info(f"the manifests name {len(cfg.cache_paths)} store path(s)")
 
     # Every destination, because a path that reached only some of the stores
     # that need it is the case `ekn.cacheTo` accepts a list to avoid.
     for cache_to in cfg.cache_to:
         await _push_one_cache(
-            cache_package_out,
+            cfg.cache_paths,
             cache_to,
             timeout_sec=cfg.cache_timeout_sec,
             allow_failure=allow_failure,
@@ -483,7 +484,7 @@ def _with_ssh_hint(message: str, hint: str | None) -> str:
 
 
 async def _push_one_cache(
-    cache_package_out: str,
+    cache_paths: list[str],
     cache_to: str,
     *,
     timeout_sec: float | None,
@@ -492,15 +493,22 @@ async def _push_one_cache(
 ) -> None:
     """One destination of `ekn.cacheTo`. See `_push_ekn_cache`."""
     if timeout_sec is not None:
-        _log.info(f"pushing {cache_package_out} to {cache_to} (up to {timeout_sec:g}s)")
+        _log.info(f"pushing {len(cache_paths)} path(s) to {cache_to} (up to {timeout_sec:g}s)")
 
     try:
         await push_closure_to_store(
-            [cache_package_out],
+            cache_paths,
             cache_to,
             timeout_sec=timeout_sec,
             accept_new_host_keys=accept_new_host_keys,
         )
+    except UnrealisedPathsError as exc:
+        # Not covered by `--cache-allow-failure`. That flag decides what to
+        # do about a destination this machine could not reach; this is a
+        # configuration that cannot push what the apply needs, and
+        # continuing would put the failure on a node an hour later.
+        _log.error(str(exc))
+        raise SystemExit(1) from exc
     except NixError as exc:
         # Before the report, not after: `_report_nix_error` exits, and Nix's
         # own `failed to start SSH connection to '<host>'` is the message
@@ -527,7 +535,7 @@ async def _push_one_cache(
             return
         _log.error(reason)
         raise SystemExit(1) from None
-    _log.info(f"pushed {cache_package_out} to {cache_to}")
+    _log.info(f"pushed {len(cache_paths)} path(s) to {cache_to}")
 
 
 class Validate(AttrCommand):
@@ -598,9 +606,9 @@ class Deploy(CachePushCommand, Commit):
     """Verify, push the pre-deploy cache, commit, and push -- the whole
     release in one command.
 
-    Chains Validate (unless --no-verify) -> cache push (`ekn.cacheTo`/
-    `ekn.cachePackage`, read straight from Nix config -- see
-    `evaluate_cache_config`; a no-op if `ekn.cacheTo` is unset) -> Commit
+    Chains Validate (unless --no-verify) -> cache push (`ekn.cacheTo`, read
+    straight from Nix config -- see `evaluate_cache_config`; a no-op if
+    `ekn.cacheTo` is unset) -> Commit
     (render + write GitOps branches, git-pushed with --push).
 
     The cache push runs *before* the git commit/push deliberately: ArgoCD/
@@ -1489,8 +1497,8 @@ class PushCache(NixCommand):
 
     Manual/ad-hoc escape hatch (or for CI) for pushing an arbitrary
     attribute's closure -- for the routine per-deploy case, `ekn deploy`
-    already does this automatically from `ekn.cacheTo`/`ekn.cachePackage`,
-    no flags needed (see `Deploy`).
+    already does this automatically from `ekn.cacheTo`, no flags needed
+    (see `Deploy`).
     """
 
     cli_name = "pushcache"

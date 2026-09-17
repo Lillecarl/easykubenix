@@ -4,6 +4,22 @@
   ...
 }:
 let
+  removedCachePackage = lib.mkRemovedOptionModule [ "ekn" "cachePackage" ] ''
+    The cache push no longer follows a derivation's closure. It reads the
+    store paths the rendered manifest names, which is the same set
+    `ekn.assertCached` asks about, so the two cannot disagree.
+
+    That removes the reason this option existed. It named paths whose Nix
+    string context a module had stripped, because a closure cannot see them
+    -- `ekn deploy` then reported a successful push having moved nothing a
+    node needs. Reading the text finds them with no help.
+
+    Delete the definition. If the paths it named are not in the manifest at
+    all, put them there; if they are in the manifest but not on this
+    machine, set `nixkube.discardStringContext = false`, which is the option
+    for keeping the context that realises them.
+  '';
+
   # Helm's `InstallOrder` verbatim, from pkg/release/v1/util/kind_sorter.go --
   # the de-facto order the entire ecosystem's charts are written against, which
   # is why it is the default rather than something designed here.
@@ -100,6 +116,7 @@ in
         kubectl label <kinds> -A -l ekn.dev/discriminator=<value> \
           ekn.dev/environment=<value>
     '')
+    removedCachePackage
   ];
 
   options.ekn = {
@@ -188,9 +205,33 @@ in
       default = null;
       description = ''
         Destination Nix store URI (e.g. "ssh-ng://user@host:2222"), or a
-        list of them, that `ekn deploy` and `ekn kubeapply` push
-        `ekn.cachePackage`'s closure to before they act. `null` disables the
-        cache push entirely.
+        list of them, that `ekn deploy` and `ekn kubeapply` push to before
+        they act. `null` disables the cache push entirely.
+
+        **This is the only knob.** What gets pushed is not a choice: it is
+        every store path the rendered manifest names, found in the
+        manifest's *text*. That is the same set `ekn.assertCached` asks
+        about, so the push and the assertion cannot disagree about what an
+        apply names.
+
+        The text, and not a closure, because Nix string context is what a
+        module can take away. nixkube's `discardStringContext` strips it
+        from every resource annotated `nixkube/discard`. Measured on
+        nixkube's own instance:
+
+          store paths named as text in manifest.json   4
+          paths in its closure                         1   (itself)
+
+        The four are the node and pynixd environments -- exactly the paths a
+        node needs to boot.
+
+        A stripped path is also not realised on the deploying machine, and
+        `ekn` refuses the push rather than moving a smaller set. Set
+        `nixkube.discardStringContext = false` to keep the context that
+        realises them.
+
+        The destination substitutes what it can reach itself, so a path both
+        ends can fetch from a public cache never crosses this link.
 
         **A list is allowed because one destination cannot always be
         enough.** A store path is only useful where whatever mounts it can
@@ -233,7 +274,7 @@ in
 
         This bounds the whole push, not the connect, because that is the
         part a store URI gives us any control over. So it has to be larger
-        than a real push of `ekn.cachePackage`'s closure over the slowest
+        than a real push of the manifest's store paths over the slowest
         link you deploy across, and the default is generous for that reason
         rather than tuned.
       '';
@@ -334,90 +375,6 @@ in
       example = [ "https://nixkube.cachix.org" ];
     };
 
-    cachePackage = lib.mkOption {
-      type = lib.types.package;
-      default = config.internal.manifestJSONFile;
-      description = ''
-        Derivation whose full closure gets pushed to `ekn.cacheTo`. Defaults
-        to `internal.manifestJSONFile` -- the same manifest-JSON derivation
-        `ekn validate` already builds, rather than a fresh whole-cluster
-        dump. Its closure covers every store path the manifests reference
-        *with string context intact*, so most projects need not enumerate
-        anything by hand.
-
-        A path a module deliberately strips context from is NOT in it, and
-        that is the case worth checking before relying on this. nixkube
-        discards context on every resource annotated `nixkube/discard`,
-        because rendering on one architecture would otherwise have to build
-        the other's `buildEnv`, which sets `allowSubstitutes = false` and so
-        can never be fetched. Measured on nixkube's own instance:
-
-          store paths named as text in manifest.json   4
-          paths in its closure                         1   (itself)
-
-        The four are the node and pynixd environments -- exactly the paths a
-        node needs to boot. So a cluster whose nodes depend on this push must
-        set `cachePackage` to something that names them with context, such as
-        a `buildEnv` over them, rather than assuming the manifest carries
-        them. `ekn deploy` reports a successful push either way, which is
-        what makes this worth stating here.
-
-        A module reaches them through the `csiPkgs` module argument:
-
-          { csiPkgs, pkgs, lib, ... }:
-          {
-            ekn.cachePackage = pkgs.linkFarm "nixkube-node-paths" (
-              lib.concatLists (
-                lib.mapAttrsToList (system: p: [
-                  { name = "''${system}-node"; path = p.nixkube-node-env; }
-                  { name = "''${system}-pynixd"; path = p.nixkube-pynixd-env; }
-                ]) csiPkgs
-              )
-            );
-          }
-
-        `linkFarm` and not `buildEnv`. Nothing here wants the environments
-        merged, only one derivation that depends on all of them, and merging
-        them fails:
-
-          error: two given paths contain a conflicting subpath:
-            .../cacheEnv/bin/kill and .../nodeEnv/bin/kill
-
-        linkFarm gives each input its own name, so it cannot collide.
-
-        Both environments, not only the node one. `nixkube-node-env` is what
-        the node's init fetches; `nixkube-pynixd-env` is what pynixd mounts
-        for itself. Pushing only the first leaves pynixd unable to start on a
-        node that does not already have its own.
-
-        Measured on nixkube's own instance: the closure holds 604 paths and
-        names all four environments, against 1 for the manifest alone.
-
-        On a multi-architecture cluster, know the cost. `buildEnv` sets
-        `allowSubstitutes = false`, so a foreign-architecture environment is
-        built rather than fetched even when a cache holds that exact output:
-        one such closure wanted to build the aarch64 `nodeEnv` on an x86_64
-        machine while its seven aarch64 dependencies fetched normally.
-        Without binfmt that fails outright. `csiPkgs` holds only the systems
-        `nixkube.systems` enables, so a single-architecture cluster never
-        meets this.
-
-        `always-allow-substitutes = true` in the deployer's nix.conf removes
-        it without changing any derivation. Measured on the same foreign
-        environment, into an empty store, with binfmt off:
-
-          (default)  error: Cannot build '...-nodeEnv.drv'
-                     Reason: platform mismatch
-          (true)     copying path '...-nodeEnv' from 'https://nix-csi.cachix.org'
-
-        It is a machine-wide setting: it lets Nix fetch any output whose
-        derivation asked to be built locally, which is a deliberate trade
-        rather than a free one.
-
-        Override for that, or whenever a project needs a different (narrower
-        or wider) closure pushed.
-      '';
-    };
   };
 
   # An option's `default` is used only when it has no definitions at all, so a

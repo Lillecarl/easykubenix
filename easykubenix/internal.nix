@@ -115,9 +115,10 @@
     };
 
     # What `ekn` itself reads: `ekn validate` and `ekn _applyManifest` both
-    # take `internal.manifestJSONFile`, and `ekn.cachePackage` pushes its
-    # closure. All three go through the CLI, which substitutes first, and a
-    # reference is a plain string so `kubeconform` has nothing to object to.
+    # take `internal.manifestJSONFile`, and the cache push reads the store
+    # paths its text names. All three go through the CLI, which substitutes
+    # first, and a reference is a plain string so `kubeconform` has nothing
+    # to object to.
     # The closure holds variable *names*, never values.
     inherit (manifestsFrom config.kubernetes.generated)
       manifestAttrs

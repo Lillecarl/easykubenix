@@ -60,7 +60,8 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger()
 
-STORE_PATH = re.compile(r"/nix/store/([a-z0-9]{32}-[A-Za-z0-9._+?=-]*)")
+STORE_DIR = "/nix/store"
+STORE_PATH = re.compile(rf"{STORE_DIR}/([a-z0-9]{{32}}-[A-Za-z0-9._+?=-]*)")
 
 DEFAULT_JOBS = 16
 
@@ -92,9 +93,9 @@ def store_paths_in(objects: Sequence[dict[str, Any]]) -> set[str]:
     """Every store path these objects name.
 
     A caller with the objects in hand should use this rather than the
-    rendered manifest derivation: a `--target` slice is not what
-    `ekn.cachePackage` covers, and a seed rewrites an object's data before
-    it goes out.
+    rendered manifest: a `--target` slice is narrower than the whole
+    instance the cache push reads, and a seed rewrites an object's data
+    before it goes out.
     """
     return store_paths_in_text(json.dumps(objects))
 

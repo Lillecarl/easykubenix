@@ -322,7 +322,7 @@ class TestEknModule:
         assert [o["kind"] for o in public["items"]] == ["ConfigMap"]
 
     async def test_the_internal_manifest_keeps_the_seeded_object(self) -> None:
-        # `ekn validate`, `ekn _applyManifest` and `ekn.cachePackage` read
+        # `ekn validate`, `ekn _applyManifest` and the cache push read
         # this one, and all three go through the CLI, which substitutes
         # first. A reference is a plain string, so kubeconform is content.
         internal = await evaluate_file(NIX_TEST_FILE, "seededInternalManifest")
