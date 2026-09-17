@@ -684,7 +684,7 @@ class TestGitOpsTargetMetadata:
     async def test_every_unit_records_its_name_on_its_objects(self) -> None:
         """The mark has to be in the rendered manifest, not stamped at apply time.
 
-        `ekn` writes `ekn.dev/environment` in `_with_environment_label`,
+        `ekn` writes `ekn.dev/environment` in `with_environment_label`,
         so only objects `ekn` itself applies carry it. On a GitOps cluster
         nearly every object arrives through ArgoCD instead, which applies the
         committed YAML -- measured on a live cluster, such an object had no

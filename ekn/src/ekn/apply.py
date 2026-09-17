@@ -230,7 +230,13 @@ def _object_key(obj: APIObject) -> tuple[str, str, str]:
     return (obj.namespace or "none", obj.kind, obj.name)
 
 
-def _with_environment_label(spec: Manifest, label: str, value: str) -> Manifest:
+def with_environment_label(spec: Manifest, label: str, value: str) -> Manifest:
+    """Stamp `ekn.dev/environment` onto a copy of `spec`.
+
+    Public because both applies need it and both must stamp identically: a
+    converging run and a barrier run have to leave the same prune scope, and
+    an object stamped by only one of them is one the other would delete.
+    """
     labeled = dict(spec)
     metadata_value = labeled.get("metadata") or {}
     metadata: Manifest = dict(metadata_value) if isinstance(metadata_value, dict) else {}
@@ -366,11 +372,9 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     protected = protect or set()
     if unit is not None:
         _check_unit_labels(objects, unit, unit_label)
-    desired_keys: set[tuple[str, str, str]] = set()
-    kinds: set[str] = set()
-    # The class each kind was applied through, kept for the prune scan. See
-    # the loop at the end for what passing it rather than a name buys.
-    classes: dict[str, type[APIObject]] = {}
+    # Every object this apply produced, keyed as the prune scan keys them, and
+    # carrying the class it was applied through. See `prune_generation`.
+    desired: dict[tuple[str, str, str], type[APIObject]] = {}
 
     # Progress is logged at INFO per barrier, not per object. An apply of a few
     # hundred objects otherwise runs completely silently for minutes -- every
@@ -382,12 +386,10 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
         _log.info("applying", barrier=f"{index}/{len(tiers)}", objects=len(tier))
         applied: list[APIObject] = []
         for spec in tier:
-            labeled = _with_environment_label(spec, environment_label, environment)
+            labeled = with_environment_label(spec, environment_label, environment)
             obj = await apply_one(labeled, api, field_manager=field_manager)
             applied.append(obj)
-            desired_keys.add(_object_key(obj))
-            kinds.add(obj.kind)
-            classes.setdefault(obj.kind, type(obj))
+            desired[_object_key(obj)] = type(obj)
             _log.debug("applied", kind=obj.kind, namespace=obj.namespace, name=obj.name)
 
         crds = [obj for obj in applied if obj.kind == "CustomResourceDefinition"]
@@ -399,7 +401,48 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     if not prune:
         return
 
-    classes |= await _extra_classes(api, prune_kinds or {}, already=kinds)
+    await prune_generation(
+        api,
+        desired=desired,
+        environment=environment,
+        unit=unit,
+        hand_applied=hand_applied,
+        declared_units=declared_units,
+        prune_kinds=prune_kinds,
+        protect=protected,
+        environment_label=environment_label,
+        unit_label=unit_label,
+    )
+
+
+async def prune_generation(  # noqa: PLR0913 -- every argument names part of a delete scope, and a dict would hide them
+    api: Api,
+    *,
+    desired: Mapping[tuple[str, str, str], type[APIObject]],
+    environment: str,
+    unit: str | None = None,
+    hand_applied: Collection[str] = (),
+    declared_units: Collection[str] | None = None,
+    prune_kinds: Mapping[str, str] | None = None,
+    protect: Collection[tuple[str, str, str]] = (),
+    environment_label: str = DEFAULT_ENVIRONMENT_LABEL,
+    unit_label: str = DEFAULT_UNIT_LABEL,
+) -> None:
+    """Delete what this environment holds and this generation does not.
+
+    `desired` maps every object the generation produced to the class it was
+    applied through. **Built from the applied objects, never from the raw
+    manifests**: a namespaced manifest that names no namespace resolves to
+    the API's default namespace, so a key taken from the manifest would read
+    `none` where the scan reads `default`, and the object would be pruned on
+    the next run.
+
+    Separate from `apply_and_prune` because two applies now share it -- the
+    barrier one above, and the converging one in `directapply` -- and the
+    scope must not be able to drift between them.
+    """
+    classes = {key[1]: cls for key, cls in desired.items()}
+    classes |= await _extra_classes(api, prune_kinds or {}, already=set(classes))
     await _prune(
         api=api,
         selector=prune_selector(
@@ -409,10 +452,10 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
             environment_label=environment_label,
             unit_label=unit_label,
         ),
-        scan_kinds=kinds | set(classes),
+        scan_kinds=set(classes),
         classes=classes,
-        desired_keys=desired_keys,
-        protected=protected,
+        desired_keys=set(desired),
+        protected=set(protect),
         declared_units=declared_units,
         unit_label=unit_label,
     )
@@ -656,6 +699,8 @@ __all__ = [
     "barriers",
     "build_object",
     "discover",
+    "prune_generation",
     "prune_selector",
     "ssa_apply",
+    "with_environment_label",
 ]

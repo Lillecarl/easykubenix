@@ -5,8 +5,9 @@ import contextlib
 import json
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path as _Path
-from typing import TYPE_CHECKING, ClassVar, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, cast
 
 import anyio
 import anyio.to_thread
@@ -22,8 +23,10 @@ from pydantic import TypeAdapter, ValidationError
 
 from ekn import seeds
 from ekn._cli import Command, build_parser, complete, dispatch, opt, pos
-from ekn.apply import apply_and_prune
+from ekn.apply import apply_and_prune, prune_generation
 from ekn.clusterdiff import cluster_diff
+from ekn.converge import DEFAULT_CONCURRENCY, DEFAULT_SETTLE_SECONDS
+from ekn.directapply import converge_direct, report_failures
 from ekn.eval import (
     ApplyGroup,
     GitOpsManifestsResult,
@@ -687,12 +690,79 @@ class Rollback(AttrCommand):
         await try_jj_status(".")
 
 
+@dataclass(frozen=True)
+class _ConvergeOptions:
+    """The `--converge` knobs, passed as one object.
+
+    Grouped so `_apply_groups` does not grow four more parameters for a mode
+    that either is on or is not.
+    """
+
+    enabled: bool = False
+    concurrency: int = DEFAULT_CONCURRENCY
+    settle_seconds: float = DEFAULT_SETTLE_SECONDS
+    allow_recreate: bool = False
+
+
+async def _converge_group(  # noqa: PLR0913 -- the same state `apply_and_prune` takes, for the same apply
+    group: ApplyGroup,
+    objects: list[dict[str, Any]],
+    *,
+    api: kr8s.asyncio.Api,
+    cfg: KubeApplyConfigResult,
+    options: _ConvergeOptions,
+    prune: bool,
+    protect: set[tuple[str, str, str]],
+) -> None:
+    """One group, converged rather than applied in barriers.
+
+    Exits non-zero on any object that did not converge. A converging run that
+    ended with failures and exited 0 would be worse than the aborting apply
+    it replaces: the failures are *reported*, so the run looks like it said
+    something, and a `&&` chain carries on regardless.
+
+    **The prune runs only after everything converged**, and that ordering is
+    the whole safety of it. Pruning deletes what this generation does not
+    contain, and an object that failed to apply is indistinguishable from one
+    the configuration dropped if you only look at the cluster.
+    """
+    report, desired = await converge_direct(
+        objects,
+        api=api,
+        environment=cfg.environment,
+        resource_priority=cfg.resource_priority,
+        field_manager=group.field_manager,
+        concurrency=options.concurrency,
+        settle_seconds=options.settle_seconds,
+        allow_recreate=options.allow_recreate,
+    )
+    report_failures(report)
+    if not report.ok:
+        scope = "instance" if group.unit is None else f"unit {group.unit}"
+        raise SystemExit(
+            f"{len(report.failures)} object(s) did not converge in this {scope}"
+            + (". Nothing was pruned: a failed apply and a removed object look the same to a prune." if prune else "")
+        )
+    if prune:
+        await prune_generation(
+            api,
+            desired=desired,
+            environment=cfg.environment,
+            unit=group.unit,
+            hand_applied=cfg.hand_applied_units or (),
+            declared_units=cfg.declared_units,
+            prune_kinds=cfg.api_mappings,
+            protect=protect,
+        )
+
+
 async def _apply_groups(
     cfg: KubeApplyConfigResult,
     *,
     api: kr8s.asyncio.Api,
     target: str | None,
     prune: bool,
+    converge: _ConvergeOptions | None = None,
 ) -> None:
     """Decrypt and seed-resolve every group, then apply them in order.
 
@@ -727,6 +797,17 @@ async def _apply_groups(
         seeds.report(plan.actions)
 
     for group, plan in prepared:
+        if converge is not None and converge.enabled:
+            await _converge_group(
+                group,
+                plan.objects,
+                api=api,
+                cfg=cfg,
+                options=converge,
+                prune=prune and group.unit == target,
+                protect=plan.protected,
+            )
+            continue
         await apply_and_prune(
             plan.objects,
             api=api,
@@ -779,6 +860,27 @@ class KubeApply(AttrCommand):
     prune: bool = opt(
         False,
         help="Delete previously-applied objects no longer present in this apply. Scoped by label: ekn.dev/environment plus this target's ekn.dev/deployment-unit with --target, otherwise ekn.dev/environment excluding the hand-applied units (deployment.handAppliedUnits). Never deletes an object owned by a controller.",
+    )
+    converge: bool = opt(
+        False,
+        help="Apply from one queue, N objects at a time, retrying what the cluster has not caught up with, "
+        "instead of applying in strict barriers and stopping at the first failure. "
+        "Ends non-zero and names every object that did not converge.",
+    )
+    concurrency: int = opt(
+        DEFAULT_CONCURRENCY,
+        help=f"How many objects --converge applies at once. Default {DEFAULT_CONCURRENCY}.",
+    )
+    settle_seconds: float = opt(
+        DEFAULT_SETTLE_SECONDS,
+        help="How long --converge keeps retrying with no object making progress before it gives up. "
+        f"Default {DEFAULT_SETTLE_SECONDS:.0f}.",
+    )
+    allow_recreate: bool = opt(
+        False,
+        help="Let --converge delete and re-create an object whose immutable field changed (a completed Job's "
+        "spec.template, a Service's clusterIP). Off by default: a recreate is a delete, and for some kinds "
+        "that is data loss. Never recreates a PersistentVolumeClaim, Secret, Namespace or CRD.",
     )
     confirm_context: str | None = opt(
         None,
@@ -871,7 +973,18 @@ class KubeApply(AttrCommand):
             if cfg.sops_age_identities:
                 await ensure_age_identities(cfg.sops_age_identities, api=api)
             try:
-                await _apply_groups(cfg, api=api, target=self.target, prune=self.prune)
+                await _apply_groups(
+                    cfg,
+                    api=api,
+                    target=self.target,
+                    prune=self.prune,
+                    converge=_ConvergeOptions(
+                        enabled=self.converge,
+                        concurrency=self.concurrency,
+                        settle_seconds=self.settle_seconds,
+                        allow_recreate=self.allow_recreate,
+                    ),
+                )
             except kr8s.ServerError as exc:
                 _report_server_error("apply", exc)
 
