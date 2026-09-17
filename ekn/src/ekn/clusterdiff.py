@@ -13,7 +13,7 @@ from ekn import seeds
 from ekn.apply import build_object, ssa_apply
 
 if TYPE_CHECKING:
-    from kr8s._api import Api  # kr8s.asyncio.api() returns this, not kr8s.Api
+    from kr8s.asyncio import Api  # kr8s.asyncio.api() returns this, not kr8s.Api
     from nanopynix.models import JsonValue
 
     from ekn.apply import Manifest

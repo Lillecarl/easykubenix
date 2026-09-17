@@ -11,7 +11,7 @@ from nanopynix.models import JsonValue
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
 
-    from kr8s._api import Api  # kr8s.asyncio.api() returns this, not kr8s.Api
+    from kr8s.asyncio import Api  # kr8s.asyncio.api() returns this, not kr8s.Api
 
 _log = structlog.get_logger()
 

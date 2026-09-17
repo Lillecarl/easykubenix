@@ -15,7 +15,7 @@ import yaml
 from ekn.apply import apply_one, build_object
 
 if TYPE_CHECKING:
-    from kr8s._api import Api  # kr8s.asyncio.api() returns this, not kr8s.Api
+    from kr8s.asyncio import Api  # kr8s.asyncio.api() returns this, not kr8s.Api
     from nanopynix.models import JsonValue
 
     from ekn.apply import Manifest

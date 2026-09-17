@@ -30,7 +30,7 @@ from .converge import DEFAULT_CONCURRENCY, DEFAULT_SETTLE_SECONDS, ConvergeRepor
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from kr8s._api import Api
+    from kr8s.asyncio import Api
     from kr8s.asyncio.objects import APIObject
 
     from .apply import Manifest

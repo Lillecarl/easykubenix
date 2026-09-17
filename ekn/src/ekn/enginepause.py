@@ -29,7 +29,7 @@ from kr8s.asyncio.objects import Deployment, StatefulSet
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-    from kr8s._api import Api
+    from kr8s.asyncio import Api
     from kr8s.asyncio.objects import APIObject
 
     from .apply import Manifest
