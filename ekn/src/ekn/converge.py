@@ -164,9 +164,14 @@ def sort_for_apply(specs: Iterable[Manifest], resource_priority: Mapping[str, in
 class ApplyOne(Protocol):
     """The "put this object on the cluster" step, as this loop needs it.
 
-    A callable rather than an `Api`, because every decision here is made from
-    what the call *raises*. A test scripts the exceptions directly and needs
-    no API server, fake or otherwise, to reach the branch it is about.
+    A callable rather than an `Api`, because almost every decision here is
+    made from what the call *raises*. A test scripts the exceptions directly
+    and needs no API server, fake or otherwise, to reach the branch it is
+    about.
+
+    The object it returns matters for one case, and only one: an apply that
+    succeeded against an object that is being deleted. See
+    `_applied_but_terminating`.
     """
 
     def __call__(self, spec: Manifest) -> Awaitable[APIObject]: ...
@@ -369,6 +374,43 @@ def _is_immutable_error(diagnosis: Diagnosis) -> bool:
         if reason == "FieldValueForbidden" and FORBIDDEN_UPDATE_PHRASE in message:
             return True
     return False
+
+
+def _applied_but_terminating(applied: APIObject) -> Diagnosis | None:
+    """The diagnosis for an apply that **succeeded and did not converge**.
+
+    Applying an object that is being deleted returns 200 with a `Warning:`
+    header, not an error. Measured on Kubernetes 1.36 against a namespace in
+    `phase=Terminating`: `serverside-applied`, exit 0, and the namespace
+    still goes away.
+
+    The ladder cannot catch this, because nothing failed. Counting it as
+    applied produces a run that cannot finish and cannot say why: a worker
+    applies Namespace X and it "succeeds", so it is never retried; X finishes
+    terminating; a worker applies an object in X, gets 404, and retries for
+    the whole settle window; nothing ever re-applies X. The run ends non-zero
+    blaming the object, and the real cause -- a successful apply that was
+    undone -- appears nowhere.
+
+    Read from `metadata.deletionTimestamp` rather than from the `Warning:`
+    header the API server also sends: the field is the state, the header is a
+    message about it. `ssa_apply` already assigns `obj.raw = result`, so this
+    costs no extra request.
+
+    Re-applying is inert rather than harmful -- three controlled runs on the
+    same terminating namespace (never re-applied, re-applied once, re-applied
+    every 5s) all finished in 10-11s -- so the object goes back on the retry
+    queue and the ordinary backoff spaces the attempts.
+    """
+    metadata = applied.raw.get("metadata")
+    stamp = metadata.get("deletionTimestamp") if isinstance(metadata, dict) else None
+    if not stamp:
+        return None
+    return Diagnosis(
+        message=f"the apply succeeded, but the object is being deleted (deletionTimestamp {stamp})",
+        reason="Terminating",
+        causes=(Cause(reason="Terminating", field_path="metadata.deletionTimestamp", message=str(stamp)),),
+    )
 
 
 def _blocked_by_a_terminating_namespace(diagnosis: Diagnosis) -> bool:
@@ -706,7 +748,7 @@ async def _process(  # noqa: PLR0913 -- the shared state of one sweep, passed ra
         return
 
     try:
-        await apply(spec)
+        applied = await apply(spec)
     except Exception as exc:
         # Broad on purpose: `classify` is the whole policy, and it answers
         # TERMINAL for anything it does not know.
@@ -742,6 +784,17 @@ async def _process(  # noqa: PLR0913 -- the shared state of one sweep, passed ra
             state.last_progress = clock()
         _log.debug("recreated", namespace=key[0], kind=key[1], name=key[2])
     else:
+        terminating = _applied_but_terminating(applied)
+        if terminating is not None:
+            async with state.lock:
+                state.last_error[key] = terminating.summary()
+                state.diagnoses[key] = terminating
+                state.retry.append(spec)
+            # `last_progress` deliberately untouched. Nothing converged, and
+            # the settle timer has to measure that rather than be reset by an
+            # apply the cluster is about to undo.
+            _log.debug("applied into a deleting object", namespace=key[0], kind=key[1], name=key[2])
+            return
         async with state.lock:
             state.applied += 1
             state.last_progress = clock()

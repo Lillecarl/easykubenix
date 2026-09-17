@@ -5,15 +5,17 @@ classification is decided entirely by what an apply *raises*, so a fake
 `Api` would only add a layer between the test and the branch it is about --
 `converge_barrier` takes the apply step as a callable for that reason.
 
-Three of these are negative controls, and each guards a failure that looks
+Several of these are negative controls, and each guards a failure that looks
 healthy from outside: a retried 403 reports an RBAC error as a slow success,
-an object that never applies must not vanish from the report, and a recreate
-of the wrong kind destroys data no re-apply brings back.
-Issue Lillecarl/easykubenix#28.
+an object that never applies must not vanish from the report, a recreate of
+the wrong kind destroys data no re-apply brings back, and an apply that
+*succeeds* against an object being deleted is the one failure the retry
+ladder cannot see at all. Issue Lillecarl/easykubenix#28.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import anyio
@@ -45,6 +47,18 @@ if TYPE_CHECKING:
 @pytest.fixture(scope="module")
 def anyio_backend() -> str:
     return "asyncio"
+
+
+def applied_object(**metadata: Any) -> Any:
+    """What a successful apply hands back: the object as the server returned
+    it. Only `metadata` is read, and only to see whether the object this run
+    just "applied" is on its way out -- see `_applied_but_terminating`."""
+    return SimpleNamespace(raw={"metadata": metadata})
+
+
+async def _no_sleep(_seconds: float) -> None:
+    """A retry that waits for nothing, so a test of the queue's shape costs
+    no wall-clock."""
 
 
 def server_error(status: int, message: str = "nope", causes: list[str] | None = None) -> kr8s.ServerError:
@@ -186,7 +200,7 @@ class TestTheSettleTimer:
             # One succeeds per pass; the rest report the cluster catching up.
             if spec is remaining[len(applied)]:
                 applied.append(object_key(spec)[2])
-                return object()
+                return applied_object()
             raise server_error(404)
 
         async def sleep(seconds: float) -> None:
@@ -234,7 +248,7 @@ class TestTheReport:
         async def apply(spec: Manifest) -> Any:
             if object_key(spec)[2] == "bad":
                 raise server_error(403, "forbidden")
-            return object()
+            return applied_object()
 
         failures = await converge_barrier([good, bad], apply=apply, settle_seconds=1.0)
 
@@ -243,7 +257,7 @@ class TestTheReport:
 
     async def test_a_clean_barrier_reports_nothing(self) -> None:
         async def apply(_spec: Manifest) -> Any:
-            return object()
+            return applied_object()
 
         assert await converge_barrier([manifest()], apply=apply) == []
 
@@ -293,7 +307,7 @@ class TestRecreate:
             calls[0] += 1
             if calls[0] == 1:
                 raise server_error(422, causes=[self.IMMUTABLE])
-            return object()
+            return applied_object()
 
         async def delete(spec: Manifest) -> None:
             deleted.append(object_key(spec)[2])
@@ -355,7 +369,7 @@ class TestBarrierWalking:
             attempted.append(name)
             if name == "first":
                 raise server_error(403)
-            return object()
+            return applied_object()
 
         failures = await converge_objects(
             [[manifest(name="first")], [manifest(name="second")]],
@@ -374,7 +388,7 @@ class TestBarrierWalking:
             attempted.append(name)
             if name == "first":
                 raise server_error(403)
-            return object()
+            return applied_object()
 
         failures = await converge_objects(
             [[manifest(name="first")], [manifest(name="second")]],
@@ -390,7 +404,7 @@ class TestBarrierWalking:
         """`after_barrier` is how a caller waits for CRDs to be Established
         without this module knowing what a CRD is."""
         seen: list[int] = []
-        sentinel = object()
+        sentinel = applied_object()
 
         async def apply(_spec: Manifest) -> Any:
             return sentinel
@@ -623,7 +637,7 @@ class TestTheQueue:
             peak[0] = max(peak[0], in_flight[0])
             await anyio.lowlevel.checkpoint()
             in_flight[0] -= 1
-            return object()
+            return applied_object()
 
         report = await converge_queue(
             [manifest(name=f"cm{i}") for i in range(20)],
@@ -645,7 +659,7 @@ class TestTheQueue:
             peak[0] = max(peak[0], in_flight[0])
             await anyio.lowlevel.checkpoint()
             in_flight[0] -= 1
-            return object()
+            return applied_object()
 
         await converge_queue([manifest(name=f"cm{i}") for i in range(5)], apply=apply, concurrency=1)
 
@@ -660,7 +674,7 @@ class TestFastMode:
 
         async def apply(spec: Manifest) -> Any:
             applied.append(object_key(spec)[2])
-            return object()
+            return applied_object()
 
         async def should_skip(spec: Manifest) -> bool:
             return object_key(spec)[2] == "same"
@@ -680,7 +694,7 @@ class TestFastMode:
 
         async def apply(spec: Manifest) -> Any:
             applied.append(object_key(spec)[2])
-            return object()
+            return applied_object()
 
         report = await converge_queue([manifest(name="a"), manifest(name="b")], apply=apply)
 
@@ -759,6 +773,73 @@ class TestTheDiagnosis:
         )
 
         assert report.failures[0].attempts > 1
+
+
+class TestAnApplyThatSucceedsAndDoesNotConverge:
+    """Applying an object that is being deleted returns 200, not an error.
+
+    Measured on Kubernetes 1.36: a namespace in `phase=Terminating` answers
+    `serverside-applied` with a `Warning:` header and exit 0, and still goes
+    away. The retry ladder cannot see it, because nothing failed. This is
+    the hole that makes a run end non-zero while naming the wrong object.
+    """
+
+    async def test_it_is_re_queued_rather_than_counted_as_applied(self) -> None:
+        attempts = [0]
+
+        async def apply(_spec: Manifest) -> Any:
+            attempts[0] += 1
+            # Gone by the second attempt, which is what happens on a cluster:
+            # the namespace finishes terminating and this run recreates it.
+            if attempts[0] == 1:
+                return applied_object(name="ekn-term", deletionTimestamp="2026-09-17T10:25:19Z")
+            return applied_object(name="ekn-term")
+
+        report = await converge_queue([manifest(kind="Namespace", name="ekn-term")], apply=apply, sleep=_no_sleep)
+
+        assert attempts[0] == 2
+        assert report.applied == 1
+        assert report.ok
+
+    async def test_a_run_that_never_converges_names_the_terminating_object(self) -> None:
+        """The third control. Left uncaught, the settle window expires on the
+        *dependent* object's 404 and the report blames that, never the
+        namespace whose apply "succeeded" and was undone."""
+        now = [0.0]
+
+        async def apply(_spec: Manifest) -> Any:
+            return applied_object(name="ekn-term", deletionTimestamp="2026-09-17T10:25:19Z")
+
+        async def sleep(seconds: float) -> None:
+            now[0] += seconds
+
+        report = await converge_queue(
+            [manifest(kind="Namespace", name="ekn-term")],
+            apply=apply,
+            settle_seconds=10.0,
+            clock=lambda: now[0],
+            sleep=sleep,
+        )
+
+        assert not report.ok
+        assert report.applied == 0
+        failure = report.failures[0]
+        assert failure.key == ("default", "Namespace", "ekn-term")
+        assert "being deleted" in failure.error
+        assert failure.diagnosis is not None
+        assert failure.diagnosis.causes[0].field_path == "metadata.deletionTimestamp"
+
+    async def test_an_ordinary_apply_is_still_progress(self) -> None:
+        """Negative control: the check reads `deletionTimestamp` and nothing
+        else, so an object without one must not be re-queued for ever."""
+
+        async def apply(_spec: Manifest) -> Any:
+            return applied_object(name="ekn-term")
+
+        report = await converge_queue([manifest(kind="Namespace", name="ekn-term")], apply=apply)
+
+        assert report.applied == 1
+        assert report.ok
 
 
 class TestTheRetryDelay:
