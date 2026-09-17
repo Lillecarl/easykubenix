@@ -119,6 +119,34 @@ class TestClassify:
         turns a clear failure into a slow one, and the run still fails."""
         assert classify(server_error(403, "forbidden")) is Disposition.TERMINAL
 
+    def test_a_403_from_a_terminating_namespace_is_retried(self) -> None:
+        """Captured on Kubernetes 1.36. The namespace finishes terminating,
+        this run recreates it -- it is in the desired set -- and the object
+        lands. Pruning makes this ordinary: prune deletes namespaces while
+        applies are still in flight."""
+        exc = server_error_with_fields(
+            403,
+            'configmaps "after-term" is forbidden: unable to create new content in '
+            "namespace ekn-term because it is being terminated",
+            reason="Forbidden",
+            causes=[("NamespaceTerminating", "metadata.namespace", "namespace ekn-term is being terminated")],
+        )
+
+        assert classify(exc) is Disposition.RETRY
+
+    def test_another_403_with_causes_is_still_terminal(self) -> None:
+        """The narrow half of the rule. A 403 that carries causes but not
+        this one must not ride in on the same branch -- the discriminator is
+        the cause reason, not the presence of a `details` block."""
+        exc = server_error_with_fields(
+            403,
+            "configmaps is forbidden: User cannot create resource",
+            reason="Forbidden",
+            causes=[("SomethingElse", "metadata.namespace", "no")],
+        )
+
+        assert classify(exc) is Disposition.TERMINAL
+
     def test_a_schema_error_is_terminal(self) -> None:
         """A 422 that is not about immutability does not become true by
         waiting."""

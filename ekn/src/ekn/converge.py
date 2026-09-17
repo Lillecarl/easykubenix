@@ -282,6 +282,14 @@ it as terminal with the server's own message, and inventing one destroys
 data. This errs at the safe end deliberately.
 """
 
+NAMESPACE_TERMINATING_REASON = "NamespaceTerminating"
+"""The `causes[].reason` on the one `403` that is worth retrying.
+
+Captured on Kubernetes 1.36: `configmaps "after-term" is forbidden: unable
+to create new content in namespace ekn-term because it is being terminated`,
+with `field: metadata.namespace`.
+"""
+
 
 def diagnose(exc: BaseException) -> Diagnosis:
     """Everything a failed apply can be asked, pulled out of its `Status`.
@@ -363,6 +371,17 @@ def _is_immutable_error(diagnosis: Diagnosis) -> bool:
     return False
 
 
+def _blocked_by_a_terminating_namespace(diagnosis: Diagnosis) -> bool:
+    """True for the one `403` that waiting fixes.
+
+    Matched on `causes[].reason`, which the API server sets to
+    `NamespaceTerminating`, rather than on the message. Every other `403`
+    stays TERMINAL: an RBAC denial retried for the whole settle window is a
+    slow failure, which is what the ladder exists to avoid.
+    """
+    return any(cause.reason == NAMESPACE_TERMINATING_REASON for cause in diagnosis.causes)
+
+
 def classify(exc: BaseException) -> Disposition:
     """What a failed apply means, and therefore what to do about it.
 
@@ -370,6 +389,14 @@ def classify(exc: BaseException) -> Disposition:
     refusal and a schema error do not become true by waiting, and retrying
     either for the whole settle window turns a clear failure into a slow
     one -- which is the failure mode this classification exists to prevent.
+
+    **One `403` is retryable: a namespace that is terminating.** Captured on
+    Kubernetes 1.36, applying into a namespace mid-deletion answers `403
+    Forbidden` with cause reason `NamespaceTerminating`. It is retryable
+    because the namespace finishes terminating and this run recreates it --
+    it is in the desired set. Pruning makes the case ordinary rather than
+    exceptional: prune deletes namespaces while applies are still in flight.
+    The discriminator is the machine-readable cause reason, not the wording.
 
     **`KindNotServedError` is checked first, and it is not an HTTP error at all.**
     Discovery answers 200 and lacks the kind, so the apply never reaches a
@@ -384,6 +411,8 @@ def classify(exc: BaseException) -> Disposition:
         status = _status_code(exc)
         if status == HTTPStatus.UNPROCESSABLE_ENTITY:
             return Disposition.RECREATE if _is_immutable_error(diagnose(exc)) else Disposition.TERMINAL
+        if status == HTTPStatus.FORBIDDEN:
+            return Disposition.RETRY if _blocked_by_a_terminating_namespace(diagnose(exc)) else Disposition.TERMINAL
         if status in _RETRY_STATUSES:
             return Disposition.RETRY
         if status is None:
