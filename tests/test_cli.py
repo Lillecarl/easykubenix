@@ -9,8 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from ekn.cli import Deploy, JsonToYaml, Validate, YamlToJson, _push_ekn_cache
-from ekn.eval import CacheConfigResult, evaluate_cache_config, evaluate_file, evaluate_flake_ekn
+from ekn.cli import Deploy, JsonToYaml, Validate, YamlToJson, _apply_groups, _push_ekn_cache
+from ekn.eval import (
+    CacheConfigResult,
+    KubeApplyConfigResult,
+    evaluate_cache_config,
+    evaluate_file,
+    evaluate_flake_ekn,
+)
 from ekn.git import commit_manifests, diff_manifests
 from ekn.gitops import flatten_manifests
 
@@ -497,6 +503,50 @@ class TestCachePushTimeout:
 
         assert cfg.cache_timeout_sec == 7
         assert cfg.cache_to == "ssh-ng://nix@example.invalid"
+
+
+class TestAWholeInstancePruneNeedsItsExclusionSet:
+    """A prune that does not know what to leave alone must not run.
+
+    `deployment.handAppliedUnits` is what keeps a whole-instance `--prune`
+    away from a bootstrap unit's objects -- ArgoCD, the CNI -- which carry
+    the environment label and are never in a whole-instance apply's desired
+    set. An easykubenix older than that option evaluates to no list at all,
+    and proceeding with an empty one would delete every one of them on the
+    first run.
+
+    Unknown and empty must therefore stay distinguishable: empty is the
+    ordinary shape of a configuration with no nested units.
+    """
+
+    @staticmethod
+    def _config(hand_applied: list[str] | None) -> KubeApplyConfigResult:
+        return KubeApplyConfigResult.model_validate(
+            {
+                "groups": [{"unit": None, "field_manager": "ekn", "objects": []}],
+                "environment": "test",
+                "resource_priority": {},
+                "sops_age_identities": [],
+                "handAppliedUnits": hand_applied,
+                "declaredUnits": hand_applied,
+            }
+        )
+
+    async def test_an_unknown_exclusion_set_refuses_the_prune(self) -> None:
+        with pytest.raises(SystemExit, match="handAppliedUnits"):
+            await _apply_groups(self._config(None), api=None, target=None, prune=True)  # type: ignore[arg-type]
+
+    async def test_no_hand_applied_units_is_not_the_same_as_unknown(self) -> None:
+        """The empty list runs. A guard that refused it would make `--prune`
+        useless for every configuration that declares no nested unit, which
+        is most of them."""
+        await _apply_groups(self._config([]), api=None, target=None, prune=True)  # type: ignore[arg-type]
+
+    async def test_a_target_apply_is_unaffected(self) -> None:
+        """A `--target` prune scopes by the unit's own label and never reads
+        the exclusion set, so an old configuration can still use it -- which
+        is what the refusal message offers as the way forward."""
+        await _apply_groups(self._config(None), api=None, target="bootstrap", prune=True)  # type: ignore[arg-type]
 
 
 class TestTheExitCode:

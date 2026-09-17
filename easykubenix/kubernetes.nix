@@ -245,10 +245,15 @@ let
   # means each apply removes the label the other wrote.
   #
   # That matters because `ekn.dev/deployment-unit` decides the prune scope.
-  # An object carrying it is pruned only by its own unit's `--target <name>
-  # --prune`; a whole-instance `--prune` skips it, by selecting on the
-  # label's *absence*. A label that flips depending on which apply ran last
-  # makes that scope flip too.
+  # A whole-instance `--prune` excludes the hand-applied units *by value*
+  # (`deployment.handAppliedUnits`), so a routed object's label decides which
+  # of the two scopes owns it -- and a label that flips depending on which
+  # apply ran last makes that ownership flip too.
+  #
+  # A routed object is in the whole-instance scope, and that is deliberate:
+  # its objects reach `kubernetes.generated`, so they are in every
+  # whole-instance apply's desired set, and removing the component from the
+  # configuration is what deletes them.
   # A name no unit of *this* instance declares is left alone rather than
   # rejected, and that is not laziness about typos.
   #

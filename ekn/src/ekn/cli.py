@@ -706,6 +706,16 @@ async def _apply_groups(
     Split out of `KubeApply.run` to keep that method under the complexity
     limit.
     """
+    if prune and target is None and cfg.hand_applied_units is None:
+        raise SystemExit(
+            "refusing a whole-instance --prune: this configuration does not offer "
+            "deployment.handAppliedUnits, so the units that must not be pruned are unknown.\n"
+            "That list is what keeps the prune away from a bootstrap unit's objects -- "
+            "ArgoCD, the CNI -- which carry the environment label but are never in a "
+            "whole-instance apply's desired set.\n"
+            "Update easykubenix, or apply a single unit with --target <name> --prune."
+        )
+
     prepared: list[tuple[ApplyGroup, seeds.SeedPlan]] = []
     try:
         for group in cfg.groups:
@@ -724,6 +734,13 @@ async def _apply_groups(
             unit=group.unit,
             field_manager=group.field_manager,
             resource_priority=cfg.resource_priority,
+            hand_applied=cfg.hand_applied_units or (),
+            declared_units=cfg.declared_units,
+            # Every kind the configuration knows, so a prune finds the objects
+            # of a component removed from it. Without this the scan covers
+            # only kinds this apply still touches, which is precisely the set
+            # a removal empties.
+            prune_kinds=cfg.api_mappings,
             # Only the unit the user named. A dependency's objects are
             # applied, not pruned: a `--prune` that deletes in a scope nobody
             # asked about is a surprise, and `ekn kubeapply --target
@@ -761,7 +778,7 @@ class KubeApply(AttrCommand):
     )
     prune: bool = opt(
         False,
-        help="Delete previously-applied objects no longer present in this apply. Scoped by label: ekn.dev/environment plus this target's ekn.dev/deployment-unit with --target, otherwise ekn.dev/environment and no unit label.",
+        help="Delete previously-applied objects no longer present in this apply. Scoped by label: ekn.dev/environment plus this target's ekn.dev/deployment-unit with --target, otherwise ekn.dev/environment excluding the hand-applied units (deployment.handAppliedUnits). Never deletes an object owned by a controller.",
     )
     confirm_context: str | None = opt(
         None,

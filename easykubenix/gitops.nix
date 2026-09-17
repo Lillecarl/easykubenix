@@ -75,6 +75,42 @@ in
   options.deployment = {
     enable = lib.mkEnableOption "rendering objects into named deployment units";
 
+    handAppliedUnits = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      readOnly = true;
+      description = ''
+        The units a whole-instance `ekn kubeapply --prune` must not touch:
+        every unit whose objects do not reach `kubernetes.generated`.
+
+        `ekn` selects `ekn.dev/environment=E,ekn.dev/deployment-unit notin
+        (these)`. Each of these units renders a whole nested instance that
+        only `ekn kubeapply --target <name>` applies, so its objects carry
+        the environment label without ever being in a whole-instance apply's
+        desired set. Without the exclusion that prune deletes them, and for
+        a bootstrap unit that is ArgoCD and the CNI.
+
+        Computed by **inverting** the routing-only test, not by listing the
+        nested ones. A unit is left in scope only when it is demonstrably
+        `class = "kubernetes"` with no `modules` of its own; anything else,
+        including a class nobody has written yet, is excluded. A wrong
+        exclusion leaves an object running, a wrong inclusion deletes it,
+        and the two mistakes are not worth the same.
+
+        `modules` is a list of deferred modules, so it cannot be serialised
+        for `ekn` to test itself. This option is the answer, evaluated here.
+      '';
+    };
+
+    declaredUnits = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      readOnly = true;
+      description = ''
+        Every unit this configuration declares. `ekn` reads it only to warn:
+        pruning an object whose unit is not in this list is correct, and is
+        also one line of configuration away from deleting ArgoCD and the CNI.
+      '';
+    };
+
     tofuUnits = lib.mkOption {
       type = lib.types.anything;
       readOnly = true;
@@ -480,6 +516,14 @@ in
       '';
     };
   };
+
+  config.deployment.declaredUnits = lib.attrNames config.deployment.units;
+
+  # The same discriminator `kubernetes.nix` uses to decide what reaches
+  # `kubernetes.generated`, inverted. See the option's description.
+  config.deployment.handAppliedUnits = lib.attrNames (
+    lib.filterAttrs (_name: unit: !(unit.class == "kubernetes" && unit.modules == [ ])) config.deployment.units
+  );
 
   config.deployment.tofuUnits = lib.mapAttrs (name: unit: {
     target = {

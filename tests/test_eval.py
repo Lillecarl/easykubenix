@@ -888,6 +888,42 @@ class TestGitOpsTargetSubmoduleEndToEnd:
             "ekn.dev/deployment-unit": "bootstrap",
         }
 
+    async def test_the_prune_exclusion_set_names_only_the_hand_applied_unit(self, tmp_path: Path) -> None:
+        """The discriminator a whole-instance `--prune` is scoped by.
+
+        A unit with `modules` renders a nested instance, so its objects never
+        reach `kubernetes.generated` and a whole-instance apply never has them
+        in its desired set -- it must not delete them. A routing-only unit's
+        objects *do* reach it, so they stay in scope and a component removed
+        from the configuration is deleted, which is the point of the whole
+        change.
+        """
+        probe = tmp_path / "two-units.nix"
+        probe.write_text(f"""
+            import {PROJECT_ROOT} {{
+              modules = [{{
+                ekn.environment = "easykubenix";
+                deployment.deployBranch = "deploy";
+                deployment.units.bootstrap.modules = [{{
+                  kubernetes.objects.argocd.ConfigMap.root.data.key = "value";
+                }}];
+                deployment.units.routed = {{ }};
+                kubernetes.objects.app.ConfigMap.owned = {{
+                  ekn.deploymentUnit = "routed";
+                  data.key = "value";
+                }};
+              }}];
+            }}
+        """)
+
+        cfg = await evaluate_kubeapply_config(probe, None, None, None, None)
+
+        assert cfg.hand_applied_units == ["bootstrap"]
+        assert cfg.declared_units == ["bootstrap", "routed"]
+        # And the routed object is in the whole-instance apply, so it is in the
+        # desired set that prune compares against.
+        assert [obj["metadata"]["name"] for obj in cfg.objects] == ["owned"]
+
     async def test_a_raw_file_in_a_unit_carries_the_unit_label(self, tmp_path: Path) -> None:
         """Nix never parses a raw file, so `ekn` adds the label at load time.
 

@@ -186,6 +186,20 @@ class KubeApplyConfigResult(BaseModel):
     environment: str
     resource_priority: dict[str, int]
     sops_age_identities: list[SopsAgeIdentity]
+    #: `deployment.handAppliedUnits` -- the units a whole-instance prune must
+    #: leave alone.
+    #:
+    #: `None` means the evaluated configuration does not offer the option, so
+    #: the exclusion set is *unknown*. A whole-instance prune then refuses to
+    #: run rather than proceeding with an empty exclusion set, which would
+    #: delete every hand-applied unit's objects. An easykubenix older than
+    #: the option is the way this happens; see `KubeApply.run`.
+    hand_applied_units: list[str] | None = Field(default=None, alias="handAppliedUnits")
+    #: `deployment.declaredUnits`, read only to warn. See `apply._prune`.
+    declared_units: list[str] | None = Field(default=None, alias="declaredUnits")
+    #: `kubernetes.apiMappings` -- kind to apiVersion, so a prune scans kinds
+    #: this apply no longer generates. See `apply_and_prune`'s `prune_kinds`.
+    api_mappings: dict[str, str] = Field(default_factory=dict, alias="apiMappings")
 
     @property
     def objects(self) -> list[dict[str, Any]]:
@@ -892,12 +906,29 @@ async def evaluate_kubeapply_config(
                 }
             ]
 
+        deployment = proxy.attr("deployment")
+        # Absent on an easykubenix older than the option. Left as `None`, which
+        # a whole-instance `--prune` reads as "the exclusion set is unknown"
+        # and refuses to run on. Defaulting to `[]` here would instead delete
+        # every hand-applied unit's objects, silently and on the first run.
+        hand_applied = (
+            await deployment.attr("handAppliedUnits").to_python()
+            if await deployment.has_attr("handAppliedUnits")
+            else None
+        )
+        declared = (
+            await deployment.attr("declaredUnits").to_python() if await deployment.has_attr("declaredUnits") else None
+        )
+
         return KubeApplyConfigResult.model_validate(
             {
                 "groups": groups,
                 "environment": environment,
                 "resource_priority": await proxy.attr("ekn").attr("resourcePriority").to_python(),
                 "sops_age_identities": await proxy.attr("kubernetes").attr("sopsAgeIdentities").to_python(),
+                "handAppliedUnits": hand_applied,
+                "declaredUnits": declared,
+                "apiMappings": await proxy.attr("kubernetes").attr("apiMappings").to_python(),
             }
         )
 
