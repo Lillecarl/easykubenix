@@ -19,12 +19,12 @@ call has no exit code to be wrong.
 
 from __future__ import annotations
 
+import os
+import pathlib
 import shutil
 import subprocess
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import pathlib
+_PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 #: Long enough for a nanopynix session to start and fail.
 _TIMEOUT_SECONDS = 180
@@ -86,3 +86,65 @@ def test_a_usage_error_is_not_success() -> None:
     """argparse's own exit, kept here so the three ways `ekn` can refuse to
     do something are pinned in one place."""
     assert _ekn("pushcache", "--to", "file:///nowhere").returncode != 0
+
+
+def test_a_failed_git_push_is_not_success(tmp_path: pathlib.Path) -> None:
+    """The case reported from a live repository, where `ekn deploy --push`
+    was said to fail with `rc=128` and still exit 0.
+
+    It does not, and this pins that. The remote cannot be resolved, so
+    `git push` exits 128 and `_git_push` turns it into `SystemExit(1)`.
+    The commit has already happened by then, which is the shape that makes
+    a wrong exit code dangerous: the branch moved locally, nothing reached
+    the remote, and a caller reading only the status would believe the
+    deploy landed.
+
+    `--no-verify` and `--no-cache-push` keep this off an apiserver and off
+    the network except for the push itself.
+    """
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    for key, value in (("user.email", "t@t"), ("user.name", "t")):
+        subprocess.run(["git", "-C", str(repo), "config", key, value], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "root"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://gitlab.invalid/nope/nope.git"],
+        check=True,
+    )
+
+    instance = tmp_path / "instance.nix"
+    instance.write_text(f"""
+        let
+          sources = import {_PROJECT_ROOT}/nix/sources.nix;
+          pkgs = import sources.nixpkgs {{ }};
+        in
+        import {_PROJECT_ROOT} {{
+          inherit pkgs;
+          modules = [
+            {{
+              ekn.environment = "pushprobe";
+              deployment.deployBranch = "probe-deploy";
+              deployment.units.app = {{
+                path = "app/";
+                modules = [ {{ kubernetes.objects.default.ConfigMap.c.data.k = "v"; }} ];
+              }};
+            }}
+          ];
+        }}
+    """)
+
+    env = {**os.environ, "EKN_REPO": str(repo), "GIT_TERMINAL_PROMPT": "0"}
+    exe = shutil.which("ekn")
+    assert exe is not None
+    result = subprocess.run(
+        [exe, "--file", str(instance), "deploy", "--no-verify", "--no-cache-push", "--push", "-m", "probe"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=_TIMEOUT_SECONDS,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stderr
+    assert "rc=128" in result.stderr, "the git exit code is reported, not swallowed"
