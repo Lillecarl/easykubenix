@@ -246,7 +246,8 @@ class Diff(AttrCommand):
     """Diff GitOps-routed manifests against the deploy branch."""
 
     async def run(self) -> None:
-        deploy_branch, _source_branch, files = await _resolve_gitops(self.file, self.flake, self.attr)
+        # `ekn diff` moves no ref, so it does not assert fetchability.
+        deploy_branch, _source_branch, files, _assert_cached = await _resolve_gitops(self.file, self.flake, self.attr)
         try:
             diff_output = diff_manifests(".", deploy_branch, files)
         except Exception as exc:
@@ -263,10 +264,15 @@ async def _resolve_gitops(
     file: _Path | None,
     flake: str | None,
     attr: str | None,
-) -> tuple[str, str | None, list[tuple[str, str]]]:
+) -> tuple[str, str | None, list[tuple[str, str]], list[str]]:
     """Evaluate GitOps manifests and return `(deploy_branch, source_branch,
-    files)` -- one branch pair per easykubenix instance, see
-    `gitops.branches`."""
+    files, assert_cached)` -- one branch pair per easykubenix instance, see
+    `gitops.branches`.
+
+    `assert_cached` rides along rather than being evaluated again: the
+    substituters have to come from the render being deployed, and this is
+    the function that already has it. See `_assert_committed_fetchable`.
+    """
     result = await _evaluate_gitops(file, flake, attr)
     try:
         files = gitops_file_groups(result)
@@ -284,7 +290,38 @@ async def _resolve_gitops(
         _log.error("nothing to commit: no routed Kubernetes objects and no tf units")
         raise SystemExit(1)
     deploy_branch, source_branch = gitops_branches(result)
-    return deploy_branch, source_branch, files
+    return deploy_branch, source_branch, files, result.config.ekn.assert_cached
+
+
+async def _assert_committed_fetchable(files: list[tuple[str, str]], substituters: list[str]) -> None:
+    """Refuse to move a branch naming a store path no node can fetch.
+
+    **The render being deployed, not the one CI built.** CI proves its own
+    render is fetchable; nothing proved this one was, and the two differ the
+    moment a pin moves. Reached by hand on nixlab2 one minute before a
+    deploy that would have taken pynixd down. Issue #19.
+
+    Over the committed text, so it asks about exactly what a GitOps engine
+    will read from the branch -- including a `tf` unit's rendered
+    configuration, and excluding a seeded object `ekn commit` withholds.
+
+    The substituters come from the render (`ekn.assertCached`), never from
+    this machine: a workstation holding the path in its own store would pass
+    a check the cluster still fails. Empty is off, which is right for an
+    instance with no CSI-backed store.
+    """
+    if not substituters:
+        return
+    paths: set[str] = set()
+    for _path, content in files:
+        paths |= storecheck.store_paths_in_text(content)
+    if not paths:
+        return
+    with timed_stage("commit: assert every committed store path is fetchable"):
+        try:
+            await storecheck.assert_fetchable(paths, substituters=substituters)
+        except (storecheck.StorePathsUnavailableError, storecheck.NoSubstitutersError) as exc:
+            raise SystemExit(str(exc)) from exc
 
 
 def _default_commit_message(attr: str | None) -> str:
@@ -403,8 +440,9 @@ class Commit(AttrCommand):
     remote: str = opt("origin", help="Remote to push GitOps branch(es) to (with --push).")
 
     async def run(self) -> None:
-        deploy_branch, source_branch, files = await _resolve_gitops(self.file, self.flake, self.attr)
+        deploy_branch, source_branch, files, assert_cached = await _resolve_gitops(self.file, self.flake, self.attr)
         message = self.message or _default_commit_message(self.attr)
+        await _assert_committed_fetchable(files, assert_cached)
         await _finalize_commit(
             deploy_branch,
             source_branch,
@@ -694,7 +732,7 @@ class Deploy(CachePushCommand, Commit):
 
     async def run(self) -> None:
         with verbose_session(self.verbosity, print_build_logs=self.print_build_logs):
-            deploy_branch, source_branch, files = await _resolve_gitops(self.file, self.flake, self.attr)
+            deploy_branch, source_branch, files, assert_cached = await _resolve_gitops(self.file, self.flake, self.attr)
             message = self.message or _default_commit_message(self.attr)
 
             # Prepared *before* Validate/cache-push run (not just before the
@@ -716,6 +754,10 @@ class Deploy(CachePushCommand, Commit):
                 with timed_stage("deploy: validate (total)"):
                     await Validate.run(cast("Validate", self))
             await self.push_cache()
+            # After the push, so a path this run just published counts, and
+            # before the branch moves, because an engine may sync the instant
+            # it does.
+            await _assert_committed_fetchable(files, assert_cached)
             with timed_stage("deploy: commit (total, incl. git push)"):
                 await _finalize_commit(
                     deploy_branch,

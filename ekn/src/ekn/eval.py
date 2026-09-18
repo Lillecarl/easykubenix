@@ -133,9 +133,16 @@ class _GitOpsKubernetesConfig(BaseModel):
     gitops_targets: dict[str, GitOpsTargetEntry] = Field(alias="deploymentUnits")
 
 
+class _GitOpsEknConfig(BaseModel):
+    #: `ekn.assertCached`. Empty is off, and is also what an easykubenix
+    #: older than the option gives.
+    assert_cached: list[str] = Field(default_factory=list, alias="assertCached")
+
+
 class _GitOpsManifestsConfig(BaseModel):
     kubernetes: _GitOpsKubernetesConfig
     git_ops: GitOpsBranches = Field(alias="deployment")
+    ekn: _GitOpsEknConfig = Field(default_factory=_GitOpsEknConfig)
 
 
 class GitOpsManifestsResult(BaseModel):
@@ -808,6 +815,11 @@ async def evaluate_gitops_manifests(
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
 
+        ekn_opts = proxy.attr("ekn")
+        assert_cached = (
+            await ekn_opts.attr("assertCached").to_python() if await ekn_opts.has_attr("assertCached") else []
+        )
+
         gitops_proxy = proxy.attr("deployment")
         with timed_stage("gitops: to_python(kubernetes.deploymentUnits, deployment.deployBranch/sourceBranch)"):
             gitops_targets = await proxy.attr("kubernetes").attr("deploymentUnits").to_python()
@@ -838,6 +850,7 @@ async def evaluate_gitops_manifests(
                         "sourceBranch": source_branch,
                         "tofuUnits": tofu_units,
                     },
+                    "ekn": {"assertCached": assert_cached},
                 },
             }
         )

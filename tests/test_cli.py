@@ -279,8 +279,11 @@ def _stub_deploy(monkeypatch: pytest.MonkeyPatch, *, no_verify: bool) -> tuple[D
     async def push_cache(*_args: object, **_kwargs: object) -> None:
         calls.append("push_cache")
 
-    async def resolve_gitops(*_args: object) -> tuple[str, None, list[tuple[str, str]]]:
-        return "deploy", None, [("default/ConfigMap/my-config.yaml", "kind: ConfigMap\n")]
+    async def resolve_gitops(*_args: object) -> tuple[str, None, list[tuple[str, str]], list[str]]:
+        return "deploy", None, [("default/ConfigMap/my-config.yaml", "kind: ConfigMap\n")], []
+
+    async def assert_fetchable(*_args: object, **_kwargs: object) -> None:
+        calls.append("assert_fetchable")
 
     async def finalize_commit(*_args: object, **_kwargs: object) -> None:
         calls.append("commit")
@@ -291,6 +294,7 @@ def _stub_deploy(monkeypatch: pytest.MonkeyPatch, *, no_verify: bool) -> tuple[D
     monkeypatch.setattr(Validate, "run", verify)
     monkeypatch.setattr("ekn.cli._push_ekn_cache", push_cache)
     monkeypatch.setattr("ekn.cli._resolve_gitops", resolve_gitops)
+    monkeypatch.setattr("ekn.cli._assert_committed_fetchable", assert_fetchable)
     monkeypatch.setattr("ekn.cli._finalize_commit", finalize_commit)
     monkeypatch.setattr("ekn.cli.try_jj_status", jj_status)
 
@@ -314,14 +318,17 @@ class TestCommit:
 
         await Deploy.run(deploy)
 
-        assert calls == ["verify", "push_cache", "commit"]
+        # `assert_fetchable` sits after `push_cache` on purpose: a path this
+        # run publishes must count as fetchable, so asking first reports a
+        # failure that is about to stop being true.
+        assert calls == ["verify", "push_cache", "assert_fetchable", "commit"]
 
     async def test_deploy_no_verify_skips_validation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         deploy, calls = _stub_deploy(monkeypatch, no_verify=True)
 
         await Deploy.run(deploy)
 
-        assert calls == ["push_cache", "commit"]
+        assert calls == ["push_cache", "assert_fetchable", "commit"]
 
     async def test_first_commit(self, tmp_path: Path, git_repo: Path) -> None:
         f = tmp_path / "customers.nix"
