@@ -5,7 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
+import structlog
 import yaml
+
+from ekn import seeds
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -17,6 +20,9 @@ if TYPE_CHECKING:
     # of `ekn.eval` here would be a circular one.
     from ekn.apply import Manifest
     from ekn.eval import GitOpsManifestsResult, GitOpsTargetEntry
+
+
+_log = structlog.get_logger()
 
 
 class GitOpsTargetError(ValueError):
@@ -215,12 +221,52 @@ def branches(result: GitOpsManifestsResult) -> tuple[str, str | None]:
     return branch_config.deploy_branch, branch_config.source_branch
 
 
+def _identity(manifest: Manifest, path: str) -> str:
+    metadata = manifest.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    namespace = metadata.get("namespace") or "none"
+    return f"{path}: {namespace}/{manifest.get('kind')}/{metadata.get('name')}"
+
+
+def without_seeded(manifests: list[Manifest], path: str) -> tuple[list[Manifest], list[str]]:
+    """The manifests safe to commit, and a description of each one withheld.
+
+    **A seeded object must not reach a branch another applier reads.** It
+    carries `$ekn:env:VARNAME` where a credential goes, and only `ekn`
+    resolves that. A controller syncing the committed file applies the
+    sentinel as the literal value, over the credential `ekn kubeapply` had
+    already put there -- and nothing in the file distinguishes the two,
+    because staying schema-valid is the whole point of a string sentinel.
+
+    `kubernetes.generatedExportable` states this rule, but
+    `kubernetes.deploymentUnits` reads `generated` rather than that, so a
+    unit whose own `modules` render a seeded Secret went straight past it.
+    The `seededGitOpsObjects` assertion misses the same case: it fires on an
+    object *routed* to a unit, and a unit's own modules route nothing.
+    Issue #14.
+
+    The field itself keeps the object, deliberately. `ekn kubeapply --target
+    <name>` has to apply it -- delivering that credential is the whole
+    reason seeds exist. Only what gets written to a branch is filtered.
+    """
+    committable: list[Manifest] = []
+    withheld: list[str] = []
+    for manifest in manifests:
+        if seeds.is_seeded(manifest):
+            withheld.append(_identity(manifest, path))
+        else:
+            committable.append(manifest)
+    return committable, withheld
+
+
 def file_groups(result: GitOpsManifestsResult) -> list[tuple[str, str]]:
     """Merge every GitOps target's rendered objects into one file list.
 
     Targets are pure path-routing (`gitOps.targets.<name>.path`) -- there is
     only one `(deployBranch, sourceBranch)` pair per instance (see
     `branches`), so there is nothing left to group by branch here.
+
+    Seeded objects are left out -- see `without_seeded`.
     """
     gitops_targets = result.config.kubernetes.gitops_targets
     # An empty set is not an error here any more. A `tf`-only instance routes
@@ -230,12 +276,26 @@ def file_groups(result: GitOpsManifestsResult) -> list[tuple[str, str]]:
     routed = resolved_targets(gitops_targets)
 
     files: dict[str, str] = {}
+    withheld: list[str] = []
     for target, target_manifests in routed.items():
-        for path, content in flatten_manifests(target_manifests, target.path, kustomize=True):
+        committable, target_withheld = without_seeded(target_manifests, target.path)
+        withheld.extend(target_withheld)
+        for path, content in flatten_manifests(committable, target.path, kustomize=True):
             existing = files.get(path)
             if existing is not None and existing != content:
                 raise GitOpsTargetError(f"conflicting generated content for {path}")
             files[path] = content
+    if withheld:
+        listed = "\n".join(f"  {entry}" for entry in withheld)
+        # Said out loud, because the branch is rewritten from this list: an
+        # object left out of it is deleted from the branch on this commit,
+        # not merely not-added.
+        _log.warning(
+            "not committing seeded object(s) -- only `ekn kubeapply` can resolve "
+            f"`$ekn:env:` references, and a controller syncing the file would apply the "
+            f"sentinel over the live credential. They are removed from the branch if "
+            f"present.\n{listed}"
+        )
     return list(files.items())
 
 
@@ -247,4 +307,5 @@ __all__ = [
     "flatten_manifests",
     "load_raw_manifest",
     "resolved_targets",
+    "without_seeded",
 ]

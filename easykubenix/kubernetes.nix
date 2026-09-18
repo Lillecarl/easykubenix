@@ -1097,11 +1097,11 @@ in
         it either way, including `--target <name>'; the routing only decides
         what `ekn commit' writes to a branch.
 
-        This fires inside a nested bootstrap instance too, where nobody
-        commits the target and `ekn kubeapply --target' applies it directly.
-        The assertion is deliberately blunt there rather than carved out: it
-        cannot tell from here whether a given target is ever committed, and
-        a wrong guess writes a credential to git.
+        **This sees a routed object only.** A deployment unit whose own
+        `modules' render a seeded object routes nothing -- inside the nested
+        instance that object belongs to no unit -- so this says nothing about
+        the commonest shape there is. `ekn commit' withholds those instead,
+        and names each one it withheld. Issue #14.
       '';
     }
     {
