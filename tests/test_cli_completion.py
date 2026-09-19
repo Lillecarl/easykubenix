@@ -130,7 +130,7 @@ def test_help_is_never_offered(monkeypatch: pytest.MonkeyPatch) -> None:
         ("ekn pushcache --substitute", ["--substitute-on-destination "]),
         ("ekn pushcache --no-", ["--no-substitute-on-destination "]),
         # A `Literal` becomes `choices`, and the shell offers the members.
-        ("ekn _yamlToJson --yaml-version ", ["yaml11", "yaml12"]),
+        ("ekn _yamlToJson --yaml-version ", ["golike", "yaml11", "yaml12"]),
         ("ekn deploy --verbosity t", ["talkative "]),
         # A quoted flake reference. The word before the cursor is what is being
         # completed, and the reference in front of it is a value like any other.
