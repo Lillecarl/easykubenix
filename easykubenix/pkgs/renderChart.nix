@@ -7,6 +7,7 @@
   lib,
   kubernetes-helm,
   fetchHelm,
+  ekn-yaml2json,
 }:
 {
   # { repoURL, name, version, sha256 }
@@ -24,10 +25,6 @@
   # `helm.charts.<name>.apiVersions` in helm.nix, which carries the detail,
   # including that Helm matches these strings literally.
   apiVersions ? null,
-  # The `ekn` CLI package, used only by the no-primop fallback below to
-  # convert this chart's rendered YAML. Not needed when evaluating through
-  # `ekn` itself, hence the null default.
-  eknPackage ? null,
 }:
 let
   # Single switch for every chart's CRD handling: `true` routes CRDs through
@@ -73,67 +70,29 @@ let
       } \
       ${chartDrv} > $out
   '';
-  # `fromYAML11Stream` is a nanopynix primop (registered per-Session via
-  # `yaml_primops()`, not a stock Nix builtin), only present when this is
-  # evaluated through `ekn`'s worker. It parses YAML with 1.1 semantics --
-  # notably leading-zero numbers as octal (Helm's Go YAML parser produces
-  # e.g. a volume's `defaultMode: 0644`, meaning octal 420, the Unix
-  # file-mode convention; YAML 1.2 would silently read that as decimal 644)
-  # -- entirely in-process, with no extra derivation or subprocess.
+  # `ekn-yaml2json` reads the stream and does the grouping, and this file
+  # takes its answer whole. See lib/parseYamlStream.nix for why go-yaml is
+  # the only reader here.
   #
-  # Falling back to plain Nix (`nix build`/`nix eval` with no nanopynix
-  # primops registered) shells out to ekn's own hidden `_yamlToJson`
-  # subcommand in a derivation, then parses with `builtins.fromJSON`. That
-  # is the same nanopynix parser the primop above uses, just out-of-process,
-  # so both branches agree on YAML 1.1 semantics.
+  # The grouping moved out of Nix with it. `lib.foldl' lib.recursiveUpdate`
+  # built the same namespace/kind/name tree, and it *deep-merged* two objects
+  # that shared an identity into one nothing rendered, which then applied
+  # without complaint. The Go side refuses and names the document.
   #
-  # This used to run `yq` instead, which was the only foreign YAML parser
-  # left in the project and did not agree with the primop: measured, `yq`
-  # reads `0644` as octal 420 (correct) but an unquoted `yes` as the string
-  # "yes" where YAML 1.1 -- and therefore Kubernetes' own go-yaml v2 -- reads
-  # boolean true. That made the parse result depend on which evaluator ran.
-  # No such scalar appears in any chart this repo renders today (checked: 143
-  # rendered outputs, 0 hits), so it was latent rather than live, but the
-  # divergence class is now gone rather than merely unexercised.
-  #
-  # `eknPackage` is threaded in as a *call-time* argument rather than a
-  # callPackage one: this file is instantiated inside the `pkgs.extend`
-  # overlay, where the ekn CLI does not exist yet. (Verified there is no
-  # actual cycle -- nothing in ekn's build graph pulls a chart through
-  # renderChart -- but taking it here keeps the overlay uninvolved either
-  # way.) Only this fallback branch needs it, so callers evaluating through
-  # `ekn` never have to supply it.
-  parsed =
-    if builtins ? fromYAML11Stream then
-      builtins.fromYAML11Stream (builtins.readFile resourcesYaml)
-    else if eknPackage == null then
-      throw ''
-        renderChart: evaluating without nanopynix's fromYAML11Stream primop
-        (i.e. not through `ekn`) needs `eknPackage` passed in to convert
-        "${name}"'s rendered YAML, and none was given.
-      ''
-    else
-      let
-        resourcesJson = runCommand "${name}-rendered.json" { } ''
-          ${eknPackage}/bin/ekn _yamlToJson --yaml-version yaml11 \
-            < ${resourcesYaml} > $out
-        '';
-      in
-      builtins.fromJSON (builtins.readFile resourcesJson);
-  rendered = lib.filter (object: object != null) parsed;
   # CustomResourceDefinitions carry enormous OpenAPI schemas. Forcing them
   # through kubernetes.resources' per-object submodule (settingsFormat.type's
   # recursive value-checking) costs measurably more eval time (see
-  # `crdsBypassTyping` above); split them out here so callers can route them
-  # through `kubernetes.crds` instead, which skips that machinery.
-  isCRD = object: object.kind == "CustomResourceDefinition";
+  # `crdsBypassTyping` above), so `--crd-split` files them separately for a
+  # caller to route through `kubernetes.crds`, which skips that machinery.
+  grouped = builtins.fromJSON (
+    builtins.readFile (
+      runCommand "${name}-rendered.json" { nativeBuildInputs = [ ekn-yaml2json ]; } ''
+        ekn-yaml2json --crd-split=${lib.boolToString crdsBypassTyping} \
+          < ${resourcesYaml} > $out
+      ''
+    )
+  );
 in
 {
-  crds = if crdsBypassTyping then lib.filter isCRD rendered else [ ];
-  resources = lib.foldl' (
-    acc: object:
-    lib.recursiveUpdate acc {
-      ${object.metadata.namespace or "none"}.${object.kind}.${object.metadata.name} = object;
-    }
-  ) { } (if crdsBypassTyping then lib.filter (object: !isCRD object) rendered else rendered);
+  inherit (grouped) crds resources;
 }
