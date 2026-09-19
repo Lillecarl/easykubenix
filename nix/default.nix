@@ -56,16 +56,14 @@ let
 
   # **The two YAML readers in this repository, side by side.**
   #
-  # `ekn _yamlToJson --yaml-version yaml11` is PyYAML taught the Kubernetes
-  # dialect by hand -- three implicit resolvers removed, four added, a
-  # constructor registered for a bare `=`. `ekn-yaml2json` is go-yaml, the
-  # parser that description is a description *of*. Nothing else in either
-  # project compares them, and the scalars below are the ones that can differ:
-  # each separates YAML 1.1 from YAML 1.2, and each appears in a chart this
-  # repository renders.
+  # `ekn _yamlToJson --yaml-version golike` is nanopynix's port of go-yaml's
+  # own resolver into PyYAML. `ekn-yaml2json` is go-yaml itself. Nothing else
+  # in either project compares them, and the scalars below are the ones that
+  # can differ: each separates YAML 1.1 from YAML 1.2, and each appears in a
+  # chart this repository renders.
   #
-  # This gate found two that did differ, and nanopynix #306 corrected the
-  # Python for both. It needs the nanopynix that carries those fixes.
+  # This gate found two that did differ, and nanopynix #306 and #307 corrected
+  # the Python for both. It needs the nanopynix that carries those fixes.
   #
   # Building the package runs the Go unit tests. This gate is the
   # cross-implementation half.
@@ -100,9 +98,17 @@ let
           "off": off
           matcher: =
           port: "8080"
+          # The six classes of nanopynix #307. The deprecated reader gives
+          # "n", "08", "0X1f", 90, a date object and null for these.
+          bareN: n
+          eight: 08
+          upperHex: 0X1f
+          sexagesimal: 1:30
+          date: 2023-01-01
+          overflow: 75.e993
         YAML
 
-        ekn _yamlToJson --yaml-version yaml11 <stream.yaml \
+        ekn _yamlToJson --yaml-version golike <stream.yaml \
           | jq -S 'map(select(. != null))' >python.json
         ekn-yaml2json --shape list <stream.yaml | jq -S . >go.json
         diff -u python.json go.json
@@ -146,6 +152,11 @@ let
           # "1000000.0" here. That is what makes this an assertion about the
           # type and not only about the value.
           test "$(jq -c '.[0].data.exponent' "$file")" = 1000000
+          # Two of the six that break a chart. A `false` here and a string
+          # there is the class that reaches the cluster, and the date is the
+          # class that stops the document.
+          test "$(jq -c '.[0].data.bareN' "$file")" = false
+          test "$(jq -r '.[0].data.date' "$file")" = 2023-01-01
         done
 
         touch "$out"
