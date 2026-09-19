@@ -313,20 +313,7 @@ class Fuzzer:
         python, go = self.read_both("\n".join(lines) + "\n")
 
         if python.failed or go.failed:
-            if len(tokens) == 1:
-                # Both refusing is agreement. The messages differ because the
-                # parsers differ, and neither reader is telling Nix anything.
-                if python.failed and go.failed:
-                    return
-                self.record(
-                    f"{position} {tokens[0]!r}",
-                    REJECTED if python.failed else python.documents,
-                    REJECTED if go.failed else go.documents,
-                )
-                return
-            middle = len(tokens) // 2
-            self.scalars(tokens[:middle], position)
-            self.scalars(tokens[middle:], position)
+            self.bisect(tokens, position, python, go)
             return
 
         if len(python.documents) != 1 or len(go.documents) != 1:
@@ -339,11 +326,7 @@ class Fuzzer:
             return
 
         if position == "key":
-            # A key's own reading is the key itself, so compare the key sets.
-            if set(python_map) != set(go_map):
-                only_python = sorted(set(python_map) - set(go_map))
-                only_go = sorted(set(go_map) - set(python_map))
-                self.record(f"keys of a batch of {len(tokens)}", only_python, only_go)
+            self.compare_keys(tokens, python_map, go_map)
             return
 
         for index, token in enumerate(tokens):
@@ -351,6 +334,31 @@ class Fuzzer:
             python_value, go_value = python_map.get(name), go_map.get(name)
             if python_value != go_value:
                 self.record(f"value {token!r}", python_value, go_value)
+
+    def bisect(self, tokens: list[str], position: str, python: Reading, go: Reading) -> None:
+        """Halve a stream either reader refused, until the tokens stand alone."""
+        if len(tokens) > 1:
+            middle = len(tokens) // 2
+            self.scalars(tokens[:middle], position)
+            self.scalars(tokens[middle:], position)
+            return
+        # Both refusing is agreement. The messages differ because the parsers
+        # differ, and neither reader is telling Nix anything.
+        if python.failed and go.failed:
+            return
+        self.record(
+            f"{position} {tokens[0]!r}",
+            REJECTED if python.failed else python.documents,
+            REJECTED if go.failed else go.documents,
+        )
+
+    def compare_keys(self, tokens: list[str], python_map: dict[str, Any], go_map: dict[str, Any]) -> None:
+        """A key's own reading is the key itself, so compare the key sets."""
+        if set(python_map) == set(go_map):
+            return
+        only_python = sorted(set(python_map) - set(go_map))
+        only_go = sorted(set(go_map) - set(python_map))
+        self.record(f"keys of a batch of {len(tokens)}", only_python, only_go)
 
     def structure(self, rng: random.Random, tokens: list[str]) -> None:
         """A nested document, to reach the container and stream paths."""
