@@ -54,6 +54,87 @@ let
         touch "$out"
       '';
 
+  # **The two YAML readers in this repository, side by side.**
+  #
+  # `ekn _yamlToJson --yaml-version yaml11` is PyYAML taught the Kubernetes
+  # dialect by hand -- three implicit resolvers removed, four added, a
+  # constructor registered for a bare `=`. `ekn-yaml2json` is go-yaml, the
+  # parser that description is a description *of*. Nothing else in either
+  # project compares them, and the scalars below are the ones that can differ:
+  # each separates YAML 1.1 from YAML 1.2, and each appears in a chart this
+  # repository renders.
+  #
+  # Building the package runs the Go unit tests. This gate is the
+  # cross-implementation half.
+  #
+  # `jq -S` and not a byte diff: `ekn` writes a document's keys in the order it
+  # read them and `ekn-yaml2json` writes them sorted, and `ekn` keeps the null
+  # documents that Nix filters out later.
+  yaml2json =
+    pkgs.runCommand "easykubenix-check-yaml2json"
+      {
+        nativeBuildInputs = [
+          root.passthru.ekn
+          (pkgs.callPackage ../tools/yaml2json/package.nix { })
+          pkgs.jq
+        ];
+      }
+      ''
+        cat >stream.yaml <<'YAML'
+        # Source: chart/templates/nothing.yaml
+        ---
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: dialect
+        data:
+          mode: 0644
+          leadingZero: 017
+          hex: 0xff
+          "on": on
+          "off": off
+          matcher: =
+          port: "8080"
+        YAML
+
+        ekn _yamlToJson --yaml-version yaml11 <stream.yaml \
+          | jq -S 'map(select(. != null))' >python.json
+        ekn-yaml2json --shape list <stream.yaml | jq -S . >go.json
+        diff -u python.json go.json
+
+        # The grouped shape is what `renderChart.nix` builds in Nix. An object
+        # with no `metadata.namespace` is cluster-scoped and files under
+        # "none", the same key `kubernetes.resources` uses.
+        ekn-yaml2json <stream.yaml | jq -S . >grouped.json
+        test "$(jq -r '.resources.none.ConfigMap.dialect.data.mode' grouped.json)" = 420
+
+        # **Two scalars where the readers disagree.** Both are pinned here, on
+        # both sides, because swapping one reader for the other changes what a
+        # chart evaluates to -- and neither difference shows up in a chart's
+        # YAML, only in the JSON underneath it.
+        #
+        #   0o755   go-yaml reads 493. The Python reads the string "0o755":
+        #           `_yaml11_loader` appends YAML 1.2's float resolver and not
+        #           its integer one, so the 1.2 octal form resolves as text.
+        #           `toYAML`'s dumper already quotes `0o` integers, so the
+        #           Python's own write side and read side disagree.
+        #
+        #   1e+06   Both read 1000000. go-yaml's JSON says `1000000` and the
+        #           Python's says `1000000.0`, so Nix gets an integer from one
+        #           and a float from the other. Helm renders a chart's
+        #           `priorityClass.value: 1000000` in exactly this form,
+        #           against an API field that takes int32.
+        printf 'a: 0o755\nb: 1e+06\n' >divergent.yaml
+        ekn _yamlToJson --yaml-version yaml11 <divergent.yaml >python-divergent.json
+        ekn-yaml2json --shape list <divergent.yaml >go-divergent.json
+        printf '%s' '[{"a":"0o755","b":1000000.0}]' >want-python.json
+        printf '%s\n' '[{"a":493,"b":1000000}]' >want-go.json
+        diff -u want-python.json python-divergent.json
+        diff -u want-go.json go-divergent.json
+
+        touch "$out"
+      '';
+
   # **The completion scripts the package installs, and the answer they get.**
   #
   # Two questions, and one derivation answers both. The first is whether the
@@ -218,6 +299,7 @@ in
     inherit
       ekn-sandbox
       ekn-completions
+      yaml2json
       kubeapply
       nixfmt
       tofu-render
@@ -233,6 +315,7 @@ in
         examples.checks.all
         ekn-sandbox
         ekn-completions
+        yaml2json
         nixfmt
         tofu-render
         validation-e2e
