@@ -166,10 +166,9 @@
     # present it renders at eval time with no derivation/IFD at all, so
     # prefer it outright over the derivation-fallback path below.
     #
-    # Fallback: `_jsonToYAML` is the same derivation-fallback CLI subcommand
-    # importyaml.nix's `_yamlToJson` counterpart uses, reusing nanopynix's
-    # `to_yaml` so this stays byte-for-byte consistent with the in-process
-    # `toYAML` primop path -- no more `yq` (whose old heredoc-based
+    # Fallback: `_jsonToYAML` is a CLI subcommand of `ekn`, reusing
+    # nanopynix's `to_yaml` so this stays byte-for-byte consistent with the
+    # in-process `toYAML` primop path -- no more `yq` (whose old heredoc-based
     # invocation broke on manifest content containing a bare "EOF" line,
     # since an unquoted heredoc delimiter also gets scanned for inside
     # interpolated content, silently truncating the input and dumping the

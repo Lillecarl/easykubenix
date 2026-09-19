@@ -126,6 +126,20 @@ let
         #           decimal point, so Nix gets an integer. Helm renders a
         #           chart's `priorityClass.value: 1000000` in exactly this
         #           form, against an API field that takes int32.
+        # **The write direction.** `ekn _jsonToYAML` renders what GitOps
+        # commits, and go-yaml is what reads that file. A string it writes
+        # plain and go-yaml resolves is a type change on an applied manifest:
+        # the string "n" reached the cluster as false until nanopynix quoted
+        # these. Round trip rather than an expected rendering, because the
+        # question is not how it is quoted but whether it survives.
+        jq -cn '[ "y", "n", "Y", "N", "08", "-0892864", "0X1f", "0O17",
+                  "1:30", "0644", "1e+06", "yes", "true", "2023-01-01",
+                  "yellow", "x" ] | { v: . }' >strings.json
+        ekn _jsonToYAML <strings.json >strings.yaml
+        ekn-yaml2json --shape list <strings.yaml | jq -S '.[0]' >back.json
+        jq -S . strings.json >want-strings.json
+        diff -u want-strings.json back.json
+
         for file in python.json go.json; do
           test "$(jq -c '.[0].data.explicitOctal' "$file")" = 493
           # `jq -c` prints the literal it read, so a float still says
