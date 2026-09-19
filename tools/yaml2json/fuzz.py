@@ -1,9 +1,12 @@
 """Differential fuzzer for the two YAML readers this project ships.
 
-`ekn _yamlToJson --yaml-version yaml11` is PyYAML taught the Kubernetes
-dialect by hand. `ekn-yaml2json` is go-yaml, the parser that description is a
-description of. This generates YAML, gives the same text to both, and reports
-every scalar they read differently.
+`ekn _yamlToJson` is PyYAML taught the Kubernetes dialect. `ekn-yaml2json` is
+go-yaml, the parser that description is a description of. This generates YAML,
+gives the same text to both, and reports every scalar they read differently.
+
+`--dialect` picks the Python side. `golike` is `fromGoLikeYAML`, which ports
+go-yaml's own resolver and is what a run should report nothing for. `yaml11`
+is the deprecated reader, and it reproduces the six classes of nanopynix #307.
 
 It fuzzes both directions. The read direction compares the two readers. The
 write direction sends a string out through `ekn _jsonToYAML` and back through
@@ -23,9 +26,8 @@ Run it from the repository root, with both programs on PATH:
 A seed makes a run reproducible, so a failing seed is a bug report.
 
 easykubenix reads YAML with the Go program alone (lib/parseYamlStream.nix), so
-this no longer guards its own parse path. It guards the Python one: nanopynix
-#307 proposes a `fromGoYAML` primop, and this is what would say whether a
-candidate is one.
+this does not guard its own parse path. It guards the Python one, which
+nanopynix #307 replaced with `fromGoLikeYAML`.
 """
 
 from __future__ import annotations
@@ -409,11 +411,17 @@ def main() -> int:
     parser.add_argument("--structures", type=int, default=20, help="nested documents")
     parser.add_argument("--keys", action="store_true", help="also fuzz the mapping keys")
     parser.add_argument("--examples", type=int, default=3, help="examples printed per group")
+    parser.add_argument(
+        "--dialect",
+        default="golike",
+        choices=["golike", "yaml11", "yaml12"],
+        help="which reader the Python side uses",
+    )
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
     fuzzer = Fuzzer(
-        python_command=resolve("ekn", ["_yamlToJson", "--yaml-version", "yaml11"]),
+        python_command=resolve("ekn", ["_yamlToJson", "--yaml-version", args.dialect]),
         go_command=resolve("ekn-yaml2json", ["--shape", "list"]),
         write_command=resolve("ekn", ["_jsonToYAML"]),
     )

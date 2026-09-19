@@ -20,7 +20,7 @@ import structlog
 from anyio import Path
 from nanopynix import NixError
 from nanopynix.models import JsonValue
-from nanopynix.primops import from_yaml11_stream, from_yaml_stream, to_yaml
+from nanopynix.primops import from_go_like_yaml_stream, from_yaml11_stream, from_yaml_stream, to_yaml
 from pydantic import TypeAdapter, ValidationError
 
 from ekn import enginepause, seeds, storecheck
@@ -1773,6 +1773,7 @@ _json_value_adapter: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 _json_value_list_adapter: TypeAdapter[list[JsonValue]] = TypeAdapter(list[JsonValue])
 
 _YAML_STREAM_PARSERS: dict[str, Callable[[str], list[JsonValue]]] = {
+    "golike": from_go_like_yaml_stream,
     "yaml11": from_yaml11_stream,
     "yaml12": from_yaml_stream,
 }
@@ -1792,9 +1793,9 @@ class YamlToJson(Command):
 
     cli_name = "_yamlToJson"
 
-    yaml_version: Literal["yaml11", "yaml12"] = opt(
+    yaml_version: Literal["golike", "yaml11", "yaml12"] = opt(
         "yaml12",
-        help="YAML version to parse the input stream with.",
+        help="Dialect to parse the input stream with; golike is go-yaml v2.",
     )
 
     async def run(self) -> None:
