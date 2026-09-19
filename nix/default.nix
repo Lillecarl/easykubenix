@@ -64,6 +64,9 @@ let
   # each separates YAML 1.1 from YAML 1.2, and each appears in a chart this
   # repository renders.
   #
+  # This gate found two that did differ, and nanopynix #306 corrected the
+  # Python for both. It needs the nanopynix that carries those fixes.
+  #
   # Building the package runs the Go unit tests. This gate is the
   # cross-implementation half.
   #
@@ -90,7 +93,9 @@ let
         data:
           mode: 0644
           leadingZero: 017
+          explicitOctal: 0o755
           hex: 0xff
+          exponent: 1e+06
           "on": on
           "off": off
           matcher: =
@@ -108,29 +113,26 @@ let
         ekn-yaml2json <stream.yaml | jq -S . >grouped.json
         test "$(jq -r '.resources.none.ConfigMap.dialect.data.mode' grouped.json)" = 420
 
-        # **Two scalars where the readers disagree.** Both are pinned here, on
-        # both sides, because swapping one reader for the other changes what a
-        # chart evaluates to -- and neither difference shows up in a chart's
-        # YAML, only in the JSON underneath it.
+        # **The two scalars this gate found, pinned by value.** The diff above
+        # says the readers agree; these say what they agree on, because both
+        # answers changed and a diff of two wrong answers also passes.
         #
-        #   0o755   go-yaml reads 493. The Python reads the string "0o755":
-        #           `_yaml11_loader` appends YAML 1.2's float resolver and not
-        #           its integer one, so the 1.2 octal form resolves as text.
-        #           `toYAML`'s dumper already quotes `0o` integers, so the
-        #           Python's own write side and read side disagree.
+        #   0o755   493. The Python read the string "0o755" until nanopynix
+        #           #306: `_yaml11_loader` appended YAML 1.2's float resolver
+        #           and not its integer one.
         #
-        #   1e+06   Both read 1000000. go-yaml's JSON says `1000000` and the
-        #           Python's says `1000000.0`, so Nix gets an integer from one
-        #           and a float from the other. Helm renders a chart's
-        #           `priorityClass.value: 1000000` in exactly this form,
-        #           against an API field that takes int32.
-        printf 'a: 0o755\nb: 1e+06\n' >divergent.yaml
-        ekn _yamlToJson --yaml-version yaml11 <divergent.yaml >python-divergent.json
-        ekn-yaml2json --shape list <divergent.yaml >go-divergent.json
-        printf '%s' '[{"a":"0o755","b":1000000.0}]' >want-python.json
-        printf '%s\n' '[{"a":493,"b":1000000}]' >want-go.json
-        diff -u want-python.json python-divergent.json
-        diff -u want-go.json go-divergent.json
+        #   1e+06   The integer 1000000, not the float 1000000.0. go-yaml
+        #           reads a float64 and Go writes an integral float64 with no
+        #           decimal point, so Nix gets an integer. Helm renders a
+        #           chart's `priorityClass.value: 1000000` in exactly this
+        #           form, against an API field that takes int32.
+        for file in python.json go.json; do
+          test "$(jq -c '.[0].data.explicitOctal' "$file")" = 493
+          # `jq -c` prints the literal it read, so a float still says
+          # "1000000.0" here. That is what makes this an assertion about the
+          # type and not only about the value.
+          test "$(jq -c '.[0].data.exponent' "$file")" = 1000000
+        done
 
         touch "$out"
       '';
