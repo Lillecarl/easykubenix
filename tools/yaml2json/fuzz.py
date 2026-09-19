@@ -5,6 +5,12 @@ dialect by hand. `ekn-yaml2json` is go-yaml, the parser that description is a
 description of. This generates YAML, gives the same text to both, and reports
 every scalar they read differently.
 
+It fuzzes both directions. The read direction compares the two readers. The
+write direction sends a string out through `ekn _jsonToYAML` and back through
+go-yaml, and asks whether it is still that string -- `manifestYAMLFile` is
+what GitOps commits and go-yaml is what reads it, so a string the dumper
+writes plain and go-yaml resolves reaches a cluster as another type.
+
 It compares types and not only values. `1e+06` read as the float 1000000.0 and
 as the integer 1000000 is the divergence that motivated the Go tool, and a
 comparison that goes through `float()` cannot see it.
@@ -221,6 +227,7 @@ def run(command: list[str], stream: str, drop_nulls: bool) -> Reading:
 class Fuzzer:
     python_command: list[str]
     go_command: list[str]
+    write_command: list[str]
     # (what the Python made of it, what the Go made of it) -> the subjects.
     #
     # Grouped, because one cause produces many tokens: YAML 1.1's base-60
@@ -239,6 +246,42 @@ class Fuzzer:
             run(self.python_command, stream, drop_nulls=True),
             run(self.go_command, stream, drop_nulls=False),
         )
+
+    def roundtrip(self, tokens: list[str]) -> None:
+        """A string written by `ekn` and read by go-yaml must still be a string.
+
+        The write direction is the half that reaches a cluster.
+        `manifestYAMLFile` is what GitOps commits, and go-yaml is what reads
+        that file, so a string the dumper writes plain and go-yaml resolves is
+        a silent type change on an applied manifest. The string "n" was
+        reaching the cluster as false.
+
+        The assertion is the round trip and not an expected rendering. How a
+        string is quoted is the dumper's business; that it survives is not.
+        """
+        if not tokens:
+            return
+        self.streams += 1
+        written = subprocess.run(
+            self.write_command,
+            input=json.dumps({"v": tokens}),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if written.returncode != 0:
+            self.record(f"writing {len(tokens)} strings", REJECTED, "not asked")
+            return
+
+        back = run(self.go_command, written.stdout, drop_nulls=False)
+        if back.failed or len(back.documents) != 1:
+            self.record(f"reading back {len(tokens)} strings", tokens, REJECTED)
+            return
+
+        got = back.documents[0]["v"]
+        for token, value in zip(tokens, got, strict=False):
+            if value != token:
+                self.record(f"written {token!r}", token, value)
 
     def record(self, subject: str, python: object, go: object) -> None:
         group = (kind_of(python), kind_of(go))
@@ -372,15 +415,18 @@ def main() -> int:
     fuzzer = Fuzzer(
         python_command=resolve("ekn", ["_yamlToJson", "--yaml-version", "yaml11"]),
         go_command=resolve("ekn-yaml2json", ["--shape", "list"]),
+        write_command=resolve("ekn", ["_jsonToYAML"]),
     )
 
     fuzzer.scalars(CURATED, "value")
+    fuzzer.roundtrip(CURATED)
     if args.keys:
         fuzzer.scalars(CURATED, "key")
 
     for _ in range(args.rounds):
         tokens = [random_token(rng) for _ in range(args.per_round)]
         fuzzer.scalars(tokens, "value")
+        fuzzer.roundtrip(tokens)
         if args.keys:
             fuzzer.scalars(sorted(set(tokens)), "key")
 
