@@ -241,7 +241,7 @@ let
   # would import its dependency again.
   parseYAMLStream = import ./easykubenix/lib/parseYamlStream.nix {
     inherit lib pkgs;
-    eknPackage = eknCli;
+    yaml2json = pkgs.ekn-yaml2json;
   };
   importYaml = import ./easykubenix/lib/importYaml.nix { inherit lib parseYAMLStream; };
   importHelm = import ./easykubenix/lib/importHelm.nix { inherit lib pkgs importYaml; };
@@ -332,10 +332,9 @@ let
         # merged via ordinary `attrsOf` semantics and always emitted
         # back out as a real list. See kubeValueType.nix.
         kubeValueType = import ./easykubenix/lib/kubeValueType.nix { inherit lib; };
-        # Shared YAML-stream parser (primop path + `ekn _yamlToJson`
-        # derivation fallback) used by importyaml.nix and helm.nix so
-        # neither hand-rolls the primop-vs-CLI-fallback dispatch. See
-        # parseYamlStream.nix.
+        # The YAML-stream parser, used by importyaml.nix and helm.nix so
+        # neither reaches for a reader of its own. One reader, go-yaml, in a
+        # derivation. See parseYamlStream.nix.
         inherit parseYAMLStream;
         # Run a Nix transform in a derivation and read the JSON back, so a
         # value carried whole by `mkUntyped` -- which nothing walks, and so

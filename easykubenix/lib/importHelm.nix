@@ -38,11 +38,6 @@
   includeCRDs ? false,
   noHooks ? false,
   apiVersions ? null,
-  # "yaml11" here rather than `importYaml`'s "yaml12". Helm's Go YAML library
-  # commonly emits bare leading-zero numbers with octal semantics -- a
-  # volume's `defaultMode: 0644` means 420, the Unix file-mode convention,
-  # which "yaml12" reads as decimal 644.
-  yamlVersion ? "yaml11",
   # Passed through untouched. See importYaml.nix.
   transformers ? [ ],
   crdSplit ? true,
@@ -95,7 +90,7 @@ let
 
   imported = importYaml {
     src = rendered;
-    inherit yamlVersion crdSplit;
+    inherit crdSplit;
     transformers = transformers ++ lib.optional (namespace != null) appendNamespace;
   };
 in

@@ -20,9 +20,9 @@ let
   # ../docs/examples/default.nix for what they are.
   examples = import ../docs/examples { inherit sources system pkgs; };
 
-  # `ekn` runs inside a Nix build sandbox from three derivations in this
-  # repository -- `_yamlToJson` (lib/parseYamlStream.nix, pkgs/renderChart.nix),
-  # `_jsonToYAML` and `split-manifest` (both easykubenix/internal.nix) -- and a
+  # `ekn` runs inside a Nix build sandbox from two derivations in this
+  # repository -- `_jsonToYAML` and `split-manifest`, both in
+  # easykubenix/internal.nix -- and a
   # sandbox has no ambient trust store. `ekn` imports pygit2, which initialises
   # OpenSSL at import and refuses to start without one, so until the CA bundle
   # moved onto the program itself it could not run here at all (nanopynix issue

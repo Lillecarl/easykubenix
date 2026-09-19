@@ -1,43 +1,36 @@
 # Parse a multi-document YAML stream into a filtered (no null/empty
 # documents) list of JSON-ish values.
 #
-# Prefers nanopynix's fromYAML11Stream/fromYAMLStream primops (registered
-# per-Session via `yaml_primops()`, present only when evaluated through
-# `ekn`'s worker) to parse in-process. Falls back to shelling out to ekn's
-# own hidden `_yamlToJson` CLI subcommand (plain `nix build`/`nix eval`, no
-# nanopynix primops registered) -- the exact same nanopynix YAML-parsing
-# code, just out-of-process, so both paths agree on `yamlVersion` scalar
-# semantics regardless of which one a given evaluation takes.
+# **One reader, and it is go-yaml.** `ekn-yaml2json` (tools/yaml2json) reads
+# the stream through `sigs.k8s.io/yaml`, which is the parser Helm renders
+# through and the API server decodes with. Kubernetes YAML is that parser and
+# not a YAML version: `defaultMode: 0644` is 420, which YAML 1.2 reads as 644,
+# and `value: 1e+06` is a number, which YAML 1.1 reads as a string.
+#
+# nanopynix's `fromYAML11Stream` primop described the same dialect in PyYAML.
+# It parsed in-process, which is faster, and it was wrong in six classes -- an
+# unquoted `1:30` came back as 90, an unquoted `n` as the string "n" where
+# Kubernetes reads false, and an unquoted date stopped the whole stream.
+# tools/yaml2json/fuzz.py found them by generating YAML for both readers, and
+# nanopynix #307 carries the table. A parser that has to be described is a
+# parser that drifts from its description; this one is inherited.
+#
+# The cost is a derivation per stream rather than an in-process call. The
+# store caches it, and the conversion itself is 16 ms against the 1431 ms the
+# Python reader spent starting up.
 {
   lib,
   pkgs,
-  eknPackage,
+  yaml2json,
 }:
 {
-  # Derivation/store path (or any value accepted by string interpolation)
-  # containing the YAML document stream to parse.
+  # Derivation, store path, or any value string interpolation accepts,
+  # holding the YAML document stream.
   src,
-  # "yaml11" | "yaml12" -- selects fromYAML11Stream/`--yaml-version yaml11`
-  # (bare leading-zero numbers resolve as octal, e.g. a volume's
-  # `defaultMode: 0644` means 420) vs fromYAMLStream/`--yaml-version
-  # yaml12` (the same literal reads as decimal 644).
-  yamlVersion,
 }:
-let
-  streamBuiltins = {
-    yaml11 = "fromYAML11Stream";
-    yaml12 = "fromYAMLStream";
-  };
-  streamBuiltin = streamBuiltins.${yamlVersion};
-in
-lib.filter (object: object != null) (
-  if builtins ? ${streamBuiltin} then
-    builtins.${streamBuiltin} (builtins.readFile src)
-  else
-    lib.importJSON (
-      pkgs.runCommand "yaml2json" { nativeBuildInputs = [ eknPackage ]; } # bash
-        ''
-          ekn _yamlToJson --yaml-version ${yamlVersion} < ${src} >$out
-        ''
-    )
+lib.importJSON (
+  pkgs.runCommand "yaml2json" { nativeBuildInputs = [ yaml2json ]; } # bash
+    ''
+      ekn-yaml2json --shape list < ${src} > $out
+    ''
 )

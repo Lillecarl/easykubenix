@@ -23,10 +23,6 @@
   # Derivation, store path, or URL holding the YAML stream. A URL is fetched
   # with `builtins.fetchTree`.
   src,
-  # "yaml11" | "yaml12". See parseYamlStream.nix -- "yaml11" reads a bare
-  # leading-zero number as octal, which is what Helm's Go YAML library emits
-  # for a volume's `defaultMode`.
-  yamlVersion ? "yaml12",
   # Functions from the whole object list to a new one, applied in order.
   #
   # The only hook. There is deliberately no per-object one: `map f` expresses
@@ -67,7 +63,7 @@
   crdSplit ? true,
 }:
 let
-  objects = lib.pipe (parseYAMLStream { inherit src yamlVersion; }) transformers;
+  objects = lib.pipe (parseYAMLStream { inherit src; }) transformers;
 
   isCRD = object: (object.kind or null) == "CustomResourceDefinition";
   crds = lib.filter isCRD objects;

@@ -32,22 +32,6 @@ let
           [ (objects: map (object: object // { metadata = object.metadata // { namespace = "app"; }; }) objects) ]
         '';
       };
-      yamlVersion = mkOption {
-        description = ''
-          YAML version to parse `src` with -- matches nanopynix's
-          fromYAML11Stream/fromYAMLStream primops (in-process path) and
-          ekn's hidden `_yamlToJson --yaml-version` CLI fallback
-          (derivation path, used when those primops aren't registered).
-          "yaml11" resolves bare leading-zero numbers as octal (e.g. a
-          volume's `defaultMode: 0644` means 420, the Unix file-mode
-          convention); "yaml12" reads the same literal as decimal 644.
-        '';
-        type = types.enum [
-          "yaml11"
-          "yaml12"
-        ];
-        default = "yaml12";
-      };
       crdSplit = mkOption {
         description = ''
           Route CustomResourceDefinitions to `kubernetes.crds` instead of
@@ -97,7 +81,6 @@ in
         ekn.lib.importYaml {
           inherit (importspec)
             src
-            yamlVersion
             transformers
             crdSplit
             ;

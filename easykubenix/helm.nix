@@ -92,25 +92,6 @@ in
                 type = types.bool;
                 default = true;
               };
-              yamlVersion = mkOption {
-                description = ''
-                  YAML version to parse the rendered `helm template` output
-                  with -- matches nanopynix's fromYAML11Stream/fromYAMLStream
-                  primops (in-process path) and ekn's hidden `_yamlToJson
-                  --yaml-version` CLI fallback (derivation path, used when
-                  those primops aren't registered). Defaults to "yaml11"
-                  here (unlike importyaml.nix's "yaml12" default) because
-                  Helm's Go YAML library commonly emits bare leading-zero
-                  numbers with octal semantics -- e.g. a volume's
-                  `defaultMode: 0644` means 420, the Unix file-mode
-                  convention, which "yaml12" would misread as decimal 644.
-                '';
-                type = types.enum [
-                  "yaml11"
-                  "yaml12"
-                ];
-                default = "yaml11";
-              };
               includeCRDs = mkOption {
                 description = ''
                   Whether to include CRDs.
@@ -220,7 +201,6 @@ in
             includeCRDs
             noHooks
             apiVersions
-            yamlVersion
             transformers
             crdSplit
             ;
