@@ -15,6 +15,11 @@ Run it from the repository root, with both programs on PATH:
     python tools/yaml2json/fuzz.py --seed 0 --rounds 20
 
 A seed makes a run reproducible, so a failing seed is a bug report.
+
+easykubenix reads YAML with the Go program alone (lib/parseYamlStream.nix), so
+this no longer guards its own parse path. It guards the Python one: nanopynix
+#307 proposes a `fromGoYAML` primop, and this is what would say whether a
+candidate is one.
 """
 
 from __future__ import annotations
