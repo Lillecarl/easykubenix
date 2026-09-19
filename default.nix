@@ -396,7 +396,31 @@ in
     manifestYAMLDir
     ;
 
-  inherit (eval) config;
+  /*
+    **The shape a NixOS evaluation has, so a generic tool can read this one.**
+
+    `nixos/lib/eval-config.nix` returns `config`, `options`, `pkgs` and `lib`
+    beside each other, and a tool that reads a module system looks for them
+    by those names. `pynix search` does: it tries `options` for the option
+    tree, `pkgs` then `_module.args.pkgs` for the package set, and `lib` for
+    the library. Only `config` was here, so it answered
+
+        <target> holds neither an options tree nor a package set.
+        Tried options and pkgs, _module.args.pkgs; name one with
+        --options-attr or --pkgs-attr.
+
+    and a person had to pass `--options-attr passthru.eval.options
+    --lib-attr passthru.lib --pkgs-attr passthru.pkgs` to search their own
+    configuration.
+
+    `passthru` keeps its copies rather than losing them to this. Consumers
+    read them by those paths -- docs/examples/default.nix takes
+    `passthru.pkgs` and nixkube's default.nix takes `passthru.eval.options`
+    -- and a second name for one value costs nothing, where moving it breaks
+    both.
+  */
+  inherit (eval) config options;
+  inherit pkgs lib;
 
   deploymentScript = eval.config.kluctl.script;
   validationScript = eval.config.validation.script;

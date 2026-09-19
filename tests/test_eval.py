@@ -1230,3 +1230,75 @@ class TestValidationConfig:
         assert all(c.ekn.resource_priority[kind] > DEFAULT_BARRIER_PRIORITY for kind in intercepting)
         assert c.ekn.environment
         assert c.internal.manifest_json_file.out_path.startswith("/nix/store/")
+
+
+class TestModuleSystemShape:
+    """What `default.nix` hands a tool that reads any module system.
+
+    `nixos/lib/eval-config.nix` returns `config`, `options`, `pkgs` and `lib`
+    beside each other, so a tool that reads a module system looks for them by
+    those names rather than knowing this project. `pynix search` does: its
+    `_search_target` module tries `options`, then `pkgs` and
+    `_module.args.pkgs`, then `lib`.
+
+    **Nothing inside this repository reads any of the three.** They exist for
+    a reader outside it, so a refactor of the returned attrset can drop them
+    and every gate here still passes -- the failure shows up as `pynix search
+    --file ./cluster.nix` answering "holds neither an options tree nor a
+    package set". This test is the only thing that says otherwise.
+
+    `passthru` carries its own copies of `pkgs`, `lib` and the raw evaluation,
+    and consumers read those paths. Both names are asserted, because dropping
+    either breaks somebody.
+    """
+
+    async def test_the_names_a_generic_tool_looks_for(self, ekn_root: str) -> None:
+        nix = f"""
+        let
+          easy = import {ekn_root} {{ modules = [{{ }}]; }};
+        in
+        {{
+          top = builtins.attrNames easy;
+          passthru = builtins.attrNames easy.passthru;
+        }}
+        """
+        async with (
+            Session(experimental_features=["flakes", "nix-command"]) as session,
+            session.store() as store,
+            session.eval(store) as eval_,
+        ):
+            names = cast("dict[str, Any]", await (await eval_.string(nix)).to_python())
+
+        for name in ("config", "options", "pkgs", "lib"):
+            assert name in names["top"], f"pynix search resolves {name!r} against the target"
+        for name in ("pkgs", "lib", "eval"):
+            assert name in names["passthru"], f"a consumer reads passthru.{name}"
+
+    async def test_options_and_config_describe_the_same_tree(self, ekn_root: str) -> None:
+        """`options` has to be this evaluation's, not some other one's."""
+        nix = f"""
+        let
+          easy = import {ekn_root} {{
+            modules = [{{ kubernetes.resources.default.ConfigMap.demo.data.hello = "world"; }}];
+          }};
+        in
+        {{
+          declared = easy.options.kubernetes.resources.description or null;
+          value = easy.config.kubernetes.resources.default.ConfigMap.demo.data.hello;
+          libIsNixpkgs = easy.lib ? mkOption;
+          pkgsIsPackageSet = easy.pkgs ? stdenv && easy.pkgs ? path;
+        }}
+        """
+        async with (
+            Session(experimental_features=["flakes", "nix-command"]) as session,
+            session.store() as store,
+            session.eval(store) as eval_,
+        ):
+            result = cast("dict[str, Any]", await (await eval_.string(nix)).to_python())
+
+        assert result["value"] == "world"
+        assert result["declared"], "the options tree carries its descriptions"
+        assert result["libIsNixpkgs"]
+        # `pynix search` reads the binary index from `${pkgs.path}/programs.sqlite`,
+        # so `path` is not incidental here.
+        assert result["pkgsIsPackageSet"]
