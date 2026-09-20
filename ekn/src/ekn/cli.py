@@ -23,7 +23,7 @@ from nanopynix.models import JsonValue
 from nanopynix.primops import from_go_like_yaml_stream, from_yaml11_stream, from_yaml_stream, to_yaml
 from pydantic import TypeAdapter, ValidationError
 
-from ekn import enginepause, seeds, storecheck
+from ekn import enginepause, fastcache, seeds, storecheck
 from ekn._cli import Command, build_parser, complete, dispatch, opt, pos
 from ekn.apply import DEFAULT_DELIVERY_MANAGERS, DEFAULT_FIELD_MANAGER, apply_and_prune, prune_generation
 from ekn.clusterdiff import cluster_diff
@@ -881,6 +881,7 @@ async def _converge_group(  # noqa: PLR0913 -- the same state `apply_and_prune` 
     prune: bool,
     protect: set[tuple[str, str, str]],
     unit_managers: Mapping[str, str] | None,
+    cache: fastcache.ApplyCache | None = None,
 ) -> None:
     """One group, converged rather than applied in barriers.
 
@@ -904,6 +905,7 @@ async def _converge_group(  # noqa: PLR0913 -- the same state `apply_and_prune` 
         settle_seconds=options.settle_seconds,
         allow_recreate=options.allow_recreate,
         unit_managers=unit_managers,
+        cache=cache,
     )
     report_failures(report)
     if not report.ok:
@@ -1011,6 +1013,7 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
     prune: bool,
     converge: _ConvergeOptions | None = None,
     held_by_engine_pause: set[tuple[str, str, str]] | None = None,
+    assume_unchanged: bool = False,
 ) -> None:
     """Decrypt and seed-resolve every group, then apply them in order.
 
@@ -1062,6 +1065,72 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
         except (storecheck.StorePathsUnavailableError, storecheck.NoSubstitutersError) as exc:
             raise SystemExit(str(exc)) from exc
 
+    cache = await fastcache.open_cache(
+        api,
+        environment=cfg.environment,
+        assume_unchanged=assume_unchanged,
+        never_record=_uncacheable(cfg),
+    )
+    if cache is not None and assume_unchanged:
+        _log.warning(
+            "--assume-unchanged: an object this machine last applied unchanged is not sent, "
+            "so anything that edited or deleted it since is invisible to this run",
+            cache=str(cache.path),
+        )
+    try:
+        await _apply_prepared(
+            prepared,
+            cfg=cfg,
+            api=api,
+            target=target,
+            prune=prune,
+            converge=converge,
+            held=held,
+            unit_managers=unit_managers,
+            cache=cache,
+        )
+    finally:
+        if cache is not None:
+            cache.save()
+            _log.info("apply cache", skipped=cache.skipped, recorded=cache.recorded, path=str(cache.path))
+
+
+def _uncacheable(cfg: KubeApplyConfigResult) -> set[tuple[str, str, str]]:
+    """Objects `fastcache` must never write a digest for.
+
+    A SOPS-encrypted object and a seeded one both carry a value that is not in
+    git, and the rest of the manifest is. So a digest of what was sent is a
+    brute-force oracle for that one field, and the cheap answer is to send
+    these every time -- there are tens of them, not hundreds.
+
+    Read from `cfg.groups`, which is the manifest before decryption and before
+    seed resolution: after either step the marker is gone.
+    """
+    return {
+        _object_identity(obj)
+        for group in cfg.groups
+        for obj in group.objects
+        if isinstance(obj.get("sops"), dict) or seeds.is_seeded(obj)
+    }
+
+
+async def _apply_prepared(  # noqa: PLR0913 -- the state `_apply_groups` built, handed on whole
+    prepared: list[tuple[ApplyGroup, seeds.SeedPlan]],
+    *,
+    cfg: KubeApplyConfigResult,
+    api: kr8s.asyncio.Api,
+    target: str | None,
+    prune: bool,
+    converge: _ConvergeOptions | None,
+    held: set[tuple[str, str, str]],
+    unit_managers: Mapping[str, str] | None,
+    cache: fastcache.ApplyCache | None,
+) -> None:
+    """Apply each prepared group, in order.
+
+    Split from `_apply_groups` so the cache is saved in one `finally` around
+    the whole loop, rather than per group.
+    """
     for group, plan in prepared:
         # Both halves, and neither is safe alone. Applying a paused workload
         # re-applies its replica count and wakes the engine mid-apply;
@@ -1080,6 +1149,7 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
                 prune=prune and group.unit == target,
                 protect=protected,
                 unit_managers=unit_managers,
+                cache=cache,
             )
             continue
         await apply_and_prune(
@@ -1105,6 +1175,7 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
             # a workload this run has scaled to zero. See `SeedPlan.protected`
             # and `enginepause`.
             protect=protected,
+            cache=cache,
         )
 
 
@@ -1156,6 +1227,14 @@ class KubeApply(CachePushCommand):
         help="Let --converge delete and re-create an object whose immutable field changed (a completed Job's "
         "spec.template, a Service's clusterIP). Off by default: a recreate is a delete, and for some kinds "
         "that is data loss. Never recreates a PersistentVolumeClaim, Secret, Namespace or CRD.",
+    )
+    assume_unchanged: bool = opt(
+        False,
+        help="Do not send an object whose bytes and field manager are what this machine last applied to "
+        "this cluster. The record is local (see ekn.fastcache), so it says nothing about the live object: "
+        "a GitOps engine syncing another commit, a kubectl edit or a delete since the last run is invisible. "
+        "Recording happens on every apply; this flag only turns the skipping on. Never skips a SOPS-encrypted "
+        "or seeded object.",
     )
     pause_engine: bool = opt(
         False,
@@ -1285,6 +1364,7 @@ class KubeApply(CachePushCommand):
                         settle_seconds=self.settle_seconds,
                         allow_recreate=self.allow_recreate,
                     ),
+                    assume_unchanged=self.assume_unchanged,
                 )
             except kr8s.ServerError as exc:
                 _report_server_error("apply", exc)

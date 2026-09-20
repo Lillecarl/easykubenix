@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
     from kr8s.asyncio import Api  # kr8s.asyncio.api() returns this, not kr8s.Api
 
+    from .fastcache import ApplyCache
+
 _log = structlog.get_logger()
 
 # Stamped by `ekn` at apply time, on every object it applies. Its value is
@@ -350,6 +352,7 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     hand_applied: Collection[str] = (),
     declared_units: Collection[str] | None = None,
     protect: set[tuple[str, str, str]] | None = None,
+    cache: ApplyCache | None = None,
 ) -> None:
     """Apply `objects` in barrier order, then (if `prune`) prune anything
     previously applied in the same scope that this run no longer generates.
@@ -399,6 +402,12 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
     next `--prune` deletes a credential nobody can recreate: the variable was
     exported once, at bootstrap, and is long gone from the environment.
 
+    `cache` is `ekn.fastcache`'s local record of what was last applied. It
+    decides two things per object: whether to send it at all, and whether to
+    remember it once sent. An object it answers for is still built and still
+    enters the desired set -- absence from that set is answered with a delete,
+    and "already correct" is not "removed from the configuration".
+
     `prune=False` (the default for `ekn kubeapply` against a real cluster,
     e.g. a narrow `--target` slice) avoids pruning objects that are simply
     outside the current apply's scope -- the same "two controllers fighting
@@ -423,9 +432,20 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
         applied: list[APIObject] = []
         for spec in tier:
             labeled = with_environment_label(spec, environment_label, environment)
+            if cache is not None and cache.unchanged(spec, field_manager=field_manager):
+                # Built, so the key matches what the prune scan reports, and
+                # kept out of `applied`: a skipped CustomResourceDefinition was
+                # applied by an earlier run, so it is Established already and
+                # nothing is waiting for it.
+                skipped = await build_object(labeled, api)
+                desired[_object_key(skipped)] = type(skipped)
+                _log.debug("unchanged", kind=skipped.kind, namespace=skipped.namespace, name=skipped.name)
+                continue
             obj = await apply_one(labeled, api, field_manager=field_manager)
             applied.append(obj)
             desired[_object_key(obj)] = type(obj)
+            if cache is not None:
+                cache.record(spec, field_manager=field_manager)
             _log.debug("applied", kind=obj.kind, namespace=obj.namespace, name=obj.name)
 
         crds = [obj for obj in applied if obj.kind == "CustomResourceDefinition"]

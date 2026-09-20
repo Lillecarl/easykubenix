@@ -182,8 +182,9 @@ class SkipCheck(Protocol):
 
     Injected, because reading live state has two shapes whose costs differ by
     more than an order of magnitude -- one LIST per kind against one GET per
-    object -- and the choice belongs to whoever owns the `Api`. `livestate`
-    holds the decision this is usually built from.
+    object -- and the choice belongs to whoever owns the `Api`. `fastcache`
+    builds the one `ekn kubeapply --assume-unchanged` uses; `livestate` holds
+    the decision made from live state instead.
     """
 
     def __call__(self, spec: Manifest) -> Awaitable[bool]: ...

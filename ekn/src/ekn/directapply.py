@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from kr8s.asyncio.objects import APIObject
 
     from .apply import Manifest
+    from .fastcache import ApplyCache
 
 _log = structlog.get_logger()
 
@@ -54,6 +55,7 @@ def _applier(  # noqa: PLR0913 -- one caller, and each argument is a piece of wh
     environment_label: str,
     desired: dict[tuple[str, str, str], type[APIObject]],
     unit_managers: Mapping[str, str] | None = None,
+    cache: ApplyCache | None = None,
 ):
     """The apply step, recording what it built into `desired` for the prune.
 
@@ -72,13 +74,49 @@ def _applier(  # noqa: PLR0913 -- one caller, and each argument is a piece of wh
             api,
         )
         desired[(obj.namespace or "none", obj.kind, obj.name)] = type(obj)
-        await ssa_apply(
-            obj,
-            field_manager=field_manager_for(spec, default=field_manager, unit_managers=unit_managers),
-        )
+        manager = field_manager_for(spec, default=field_manager, unit_managers=unit_managers)
+        await ssa_apply(obj, field_manager=manager)
+        if cache is not None:
+            # After the apply and never before it. A recorded object that was
+            # never sent is one this cache skips for ever.
+            cache.record(spec, field_manager=manager)
         return obj
 
     return apply
+
+
+def _skipper(  # noqa: PLR0913 -- one caller, and each argument is part of what the skip has to reproduce
+    api: Api,
+    *,
+    cache: ApplyCache,
+    environment: str,
+    field_manager: str,
+    environment_label: str,
+    desired: dict[tuple[str, str, str], type[APIObject]],
+    unit_managers: Mapping[str, str] | None = None,
+):
+    """The skip step: leave an object alone, and still call it desired.
+
+    **The `desired` entry is the whole safety of this.** A prune deletes what
+    the generation does not contain, and an object skipped because it is
+    already correct is contained -- it is simply not sent. Without this line
+    the first `--assume-unchanged --prune` run deletes almost everything.
+
+    So a skipped object is still built. That is what resolves a namespaced
+    manifest with no namespace to the API's default, which is what the prune
+    scan reports, and it costs a request only for a kind nothing has
+    discovered yet.
+    """
+
+    async def should_skip(spec: Manifest) -> bool:
+        manager = field_manager_for(spec, default=field_manager, unit_managers=unit_managers)
+        if not cache.unchanged(spec, field_manager=manager):
+            return False
+        obj = await build_object(with_environment_label(spec, environment_label, environment), api)
+        desired[(obj.namespace or "none", obj.kind, obj.name)] = type(obj)
+        return True
+
+    return should_skip
 
 
 def _deleter(api: Api):
@@ -124,6 +162,7 @@ async def converge_direct(  # noqa: PLR0913 -- one caller, and each argument is 
     settle_seconds: float = DEFAULT_SETTLE_SECONDS,
     allow_recreate: bool = False,
     unit_managers: Mapping[str, str] | None = None,
+    cache: ApplyCache | None = None,
 ) -> tuple[ConvergeReport, dict[tuple[str, str, str], type[APIObject]]]:
     """Apply `objects` until the cluster stops changing, or until it stops
     making progress.
@@ -134,6 +173,9 @@ async def converge_direct(  # noqa: PLR0913 -- one caller, and each argument is 
     Every object is stamped with `environment_label`, exactly as
     `apply_and_prune` stamps it, so a converging run and a barrier run leave
     the same cluster state and the same prune scope.
+
+    `cache` is `ekn.fastcache`. It records every successful apply, and skips
+    an object only when the operator asked for it -- see `_skipper`.
     """
     _log.info(
         "converging",
@@ -152,7 +194,19 @@ async def converge_direct(  # noqa: PLR0913 -- one caller, and each argument is 
             environment_label=environment_label,
             desired=desired,
             unit_managers=unit_managers,
+            cache=cache,
         ),
+        should_skip=_skipper(
+            api,
+            cache=cache,
+            environment=environment,
+            field_manager=field_manager,
+            environment_label=environment_label,
+            desired=desired,
+            unit_managers=unit_managers,
+        )
+        if cache is not None and cache.assume_unchanged
+        else None,
         delete=_deleter(api) if allow_recreate else None,
         resource_priority=resource_priority,
         concurrency=concurrency,
