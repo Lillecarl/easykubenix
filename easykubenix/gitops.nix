@@ -75,6 +75,39 @@ in
   options.deployment = {
     enable = lib.mkEnableOption "rendering objects into named deployment units";
 
+    fieldManager = lib.mkOption {
+      type = lib.types.str;
+      default = "ekn";
+      description = ''
+        The server-side-apply field manager this instance writes as, for
+        every apply that does not name another one.
+
+        **Set this rather than each unit's `fieldManager`.** A whole-instance
+        `ekn kubeapply` is one group with no unit, so before this option it
+        could not name a manager at all and wrote as the built-in default.
+        A deployment that set `deployment.units.<name>.fieldManager` on every
+        unit therefore still had two managers on its objects: the units' one
+        from a targeted apply, and the built-in one from a whole-instance
+        apply.
+
+        That split is not cosmetic. Server-side apply removes a field only
+        when its **owning** manager stops declaring it, so a field the
+        built-in manager wrote and the successor does not declare stays on
+        the object for ever -- the successor's apply cannot drop what it does
+        not own, and `force` does not help, because two different fields are
+        not a conflict. A probe that changes handler type is then refused by
+        the API server forever: `may not specify more than 1 handler type`.
+
+        `ekn reclaim` moves existing ownership onto this manager. This option
+        is what stops the split happening again.
+
+        `deployment.units.<name>.fieldManager` defaults to this and still
+        overrides it, for a bootstrap unit whose successor differs from the
+        instance's.
+      '';
+      example = "argocd-controller";
+    };
+
     handAppliedUnits = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       readOnly = true;
@@ -348,7 +381,8 @@ in
               };
               fieldManager = lib.mkOption {
                 type = lib.types.str;
-                default = "ekn";
+                default = config.deployment.fieldManager;
+                defaultText = lib.literalExpression "config.deployment.fieldManager";
                 description = ''
                   Server-side-apply field manager `ekn kubeapply --target
                   ${name}` writes as. Apply-time only -- it never appears in

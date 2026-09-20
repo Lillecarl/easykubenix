@@ -1029,6 +1029,24 @@ def _unit_group(units: JsonValue, name: str) -> dict[str, Any]:
     }
 
 
+async def _instance_field_manager(deployment: Any) -> str:
+    """`deployment.fieldManager`, or the built-in default without it.
+
+    Its own function because `evaluate_kubeapply_config` is at the complexity
+    ceiling, and a branch there is worth less than this name.
+
+    Absent on an easykubenix older than the option, where every apply used the
+    built-in default anyway -- so falling back to it changes nothing for such
+    a consumer.
+    """
+    if not await deployment.has_attr("fieldManager"):
+        return DEFAULT_FIELD_MANAGER
+    value = await deployment.attr("fieldManager").to_python()
+    if not isinstance(value, str) or not value:
+        raise ValueError("deployment.fieldManager did not evaluate to a non-empty string")
+    return value
+
+
 async def evaluate_kubeapply_config(
     file: str | PathLike[str] | None,
     flake_uri: str | None,
@@ -1063,6 +1081,10 @@ async def evaluate_kubeapply_config(
 
         environment = await proxy.attr("ekn").attr("environment").to_python()
 
+        deployment = proxy.attr("deployment")
+        # Read before the groups, because the untargeted group needs it.
+        instance_manager = await _instance_field_manager(deployment)
+
         if target:
             units = await proxy.attr("kubernetes").attr("deploymentUnits").to_python()
             _, _, _, dependencies = _unpack_gitops_target(units, target)
@@ -1088,16 +1110,20 @@ async def evaluate_kubeapply_config(
             groups = [
                 {
                     "unit": None,
-                    # Only a deployment unit can name a field manager. A
-                    # whole-`generated` apply has no successor to hand
-                    # ownership to -- it *is* the steady state, and it runs
-                    # again, so keeping conflict detection is right.
-                    "field_manager": DEFAULT_FIELD_MANAGER,
+                    # `deployment.fieldManager`, and not the built-in default.
+                    #
+                    # A whole-instance apply has no unit to ask, and hard-
+                    # coding the default here is what split ownership on every
+                    # deployment that names a successor per unit: the targeted
+                    # applies wrote as the successor, this one wrote as `ekn`,
+                    # and neither could drop a field the other owned. The
+                    # symptom is an object the API server refuses for ever --
+                    # a probe that changed handler type keeps both handlers.
+                    "field_manager": instance_manager,
                     "objects": [*generated, *_load_raw_manifests(raw_file_paths)],
                 }
             ]
 
-        deployment = proxy.attr("deployment")
         # Absent on an easykubenix older than the option. Left as `None`, which
         # a whole-instance `--prune` reads as "the exclusion set is unknown"
         # and refuses to run on. Defaulting to `[]` here would instead delete
