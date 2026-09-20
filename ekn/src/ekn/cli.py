@@ -25,7 +25,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from ekn import enginepause, seeds, storecheck
 from ekn._cli import Command, build_parser, complete, dispatch, opt, pos
-from ekn.apply import DEFAULT_DELIVERY_MANAGERS, apply_and_prune, prune_generation
+from ekn.apply import DEFAULT_DELIVERY_MANAGERS, DEFAULT_FIELD_MANAGER, apply_and_prune, prune_generation
 from ekn.clusterdiff import cluster_diff
 from ekn.converge import DEFAULT_CONCURRENCY, DEFAULT_SETTLE_SECONDS
 from ekn.directapply import converge_direct, report_failures
@@ -68,6 +68,7 @@ from ekn.gitops import (
     file_groups as gitops_file_groups,
     flatten_manifests,
 )
+from ekn.reclaim import reclaim
 from ekn.sops import ensure_age_identities, maybe_decrypt
 from ekn.tofu import (
     TofuError,
@@ -1596,6 +1597,69 @@ class ClusterDiff(AttrCommand):
             _log.info("no differences")
 
 
+class Reclaim(AttrCommand):
+    """Move server-side-apply ownership onto this instance's field manager.
+
+    **A one-time repair, for objects that crossed a field-manager change.**
+    Server-side apply removes a field only when its *owning* manager stops
+    declaring it. So a field written under an old manager and not declared by
+    the new one stays on the object for ever: the new manager cannot drop
+    what it does not own, and `--force-conflicts` is no help, because two
+    different fields are not a conflict.
+
+    The visible form is an object the API server refuses outright. A probe
+    whose handler type changed keeps both handlers, and every apply after it
+    fails with `may not specify more than 1 handler type`.
+
+    This renames the old manager's Apply records to the new one, so the new
+    manager owns what the old one did and its next apply drops what it no
+    longer declares. Records are renamed and never deleted: nothing removes
+    an unowned field, so deleting them would leave the bug in place.
+
+    `Update` records are left alone -- `kube-controller-manager`'s `status`
+    is one, and server-side apply does not consult them for removal anyway.
+
+    Set `deployment.fieldManager` so the transition does not happen again,
+    then run this once.
+    """
+
+    cli_name = "reclaim"
+
+    target: str | None = opt(
+        None,
+        help="Reclaim only this GitOps target's objects (kubernetes.deploymentUnits). Omit for the full kubernetes.generated set.",
+    )
+    field_manager_from: list[str] = opt(
+        help=f"Manager to take ownership from, repeatable. Empty means {DEFAULT_FIELD_MANAGER!r}, which is what a whole-instance apply wrote before deployment.fieldManager existed.",
+    )
+    dry_run: bool = opt(
+        False,
+        help="Report which objects would change and write nothing.",
+    )
+
+    async def run(self) -> None:
+        uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
+        try:
+            cfg = await evaluate_kubeapply_config(self.file, uri, customer, self.attr, self.target)
+        except NixError as exc:
+            _report_nix_error(exc)
+        except ValidationError as exc:
+            _report_validation_error("kubeapply config", exc)
+        # The manager this apply would write as, which is the one ownership
+        # has to end up on. `field_manager` is the last group's -- the named
+        # target's, or the instance's for a whole-instance run.
+        new = cfg.field_manager
+        old = self.field_manager_from or [DEFAULT_FIELD_MANAGER]
+        if new in set(old):
+            raise SystemExit(f"refusing to reclaim {new!r} onto itself; --field-manager-from names the *old* manager")
+        api = await kr8s.asyncio.api()
+        try:
+            changed = await reclaim(cfg.objects, api, old=old, new=new, dry_run=self.dry_run)
+        except kr8s.ServerError as exc:
+            _report_server_error("reclaim", exc)
+        _log.info("reclaim complete", objects=len(cfg.objects), changed=changed, new=new, dry_run=self.dry_run)
+
+
 class PushCache(NixCommand):
     """Build a Nix attribute and copy its realised closure to a remote store.
 
@@ -1847,6 +1911,7 @@ class Ekn(AttrCommand):
         Tofu,
         Secrets,
         ClusterDiff,
+        Reclaim,
         PushCache,
         AssertCached,
         SplitManifest,
