@@ -817,6 +817,82 @@ class TestGitOpsTargetMetadata:
             await evaluate_file(NIX_TEST_FILE, "badUnitNameThrows")
 
 
+class TestTheInstanceFieldManager:
+    """`deployment.fieldManager`, which names the manager for the whole
+    instance rather than for one unit at a time.
+
+    The case it exists for: a whole-instance apply is a single group, so it
+    applied everything as `ekn` even where every unit declared a successor.
+    Server-side apply only drops a field when its *owning* manager stops
+    declaring it, so a field written as `ekn` and later removed from the
+    configuration is orphaned for ever -- the successor re-applying as its own
+    name does not remove it. `ekn reclaim` is the repair; this is what stops
+    it happening.
+    """
+
+    @staticmethod
+    def _probe(tmp_path: Path, body: str) -> Path:
+        probe = tmp_path / "field-manager.nix"
+        probe.write_text(f"""
+            import {PROJECT_ROOT} {{
+              modules = [{{
+                ekn.environment = "easykubenix";
+                deployment.deployBranch = "deploy";
+                {body}
+                kubernetes.objects.app.ConfigMap.owned = {{
+                  ekn.deploymentUnit = "routed";
+                  data.key = "value";
+                }};
+              }}];
+            }}
+        """)
+        return probe
+
+    async def test_the_default_is_ekn(self, tmp_path: Path) -> None:
+        """The value `apply.DEFAULT_FIELD_MANAGER` carries, reached through the
+        module system rather than asserted twice in Python."""
+        probe = self._probe(tmp_path, "deployment.units.routed = { };")
+
+        cfg = await evaluate_kubeapply_config(probe, None, None, None, None)
+
+        assert [group.field_manager for group in cfg.groups] == ["ekn"]
+
+    async def test_it_names_the_manager_of_a_whole_instance_apply(self, tmp_path: Path) -> None:
+        probe = self._probe(
+            tmp_path,
+            'deployment.fieldManager = "argocd-controller"; deployment.units.routed = { };',
+        )
+
+        cfg = await evaluate_kubeapply_config(probe, None, None, None, None)
+
+        assert [group.field_manager for group in cfg.groups] == ["argocd-controller"]
+
+    async def test_a_unit_inherits_it(self, tmp_path: Path) -> None:
+        """A unit that names no manager of its own takes the instance's. The
+        per-unit option existed first, so this is the direction that was
+        missing: setting one value must not leave the units on `ekn`."""
+        probe = self._probe(
+            tmp_path,
+            'deployment.fieldManager = "argocd-controller"; deployment.units.routed = { };',
+        )
+
+        cfg = await evaluate_kubeapply_config(probe, None, None, None, None)
+
+        assert cfg.unit_field_managers["routed"] == "argocd-controller"
+
+    async def test_a_unit_can_still_name_its_own(self, tmp_path: Path) -> None:
+        """The narrower value wins. Without this the instance-wide option
+        would silently overwrite a unit that had already been handed over."""
+        probe = self._probe(
+            tmp_path,
+            'deployment.fieldManager = "argocd-controller"; deployment.units.routed.fieldManager = "flux";',
+        )
+
+        cfg = await evaluate_kubeapply_config(probe, None, None, None, None)
+
+        assert cfg.unit_field_managers["routed"] == "flux"
+
+
 class TestGitOpsTargetSubmoduleEndToEnd:
     """The two CLI paths a bootstrap target is actually used through, against
     a real evaluation rather than a hand-built shape.
