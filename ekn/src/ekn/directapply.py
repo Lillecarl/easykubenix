@@ -22,6 +22,7 @@ from .apply import (
     DEFAULT_FIELD_MANAGER,
     build_object,
     field_manager_for,
+    resource_version,
     ssa_apply,
     with_environment_label,
 )
@@ -79,7 +80,7 @@ def _applier(  # noqa: PLR0913 -- one caller, and each argument is a piece of wh
         if cache is not None:
             # After the apply and never before it. A recorded object that was
             # never sent is one this cache skips for ever.
-            cache.record(spec, field_manager=manager)
+            cache.record(spec, field_manager=manager, resource_version=resource_version(obj))
         return obj
 
     return apply
@@ -104,16 +105,26 @@ def _skipper(  # noqa: PLR0913 -- one caller, and each argument is part of what 
 
     So a skipped object is still built. That is what resolves a namespaced
     manifest with no namespace to the API's default, which is what the prune
-    scan reports, and it costs a request only for a kind nothing has
-    discovered yet.
+    scan reports and what the sweep saw, and it costs a request only for a
+    kind nothing has discovered yet.
+
+    **The two halves of the cache's question, with the build between them.**
+    The bytes are checked first because that costs nothing, and only then is
+    the object built to ask where it lives. Building first would put a
+    discovery request -- an *uncached* one, per attempt -- in front of every
+    object whose CustomResourceDefinition this same run has not applied yet,
+    which is the ordinary state of a bootstrap.
     """
 
     async def should_skip(spec: Manifest) -> bool:
         manager = field_manager_for(spec, default=field_manager, unit_managers=unit_managers)
-        if not cache.unchanged(spec, field_manager=manager):
+        if not cache.sent_before(spec, field_manager=manager):
             return False
         obj = await build_object(with_environment_label(spec, environment_label, environment), api)
-        desired[(obj.namespace or "none", obj.kind, obj.name)] = type(obj)
+        key = (obj.namespace or "none", obj.kind, obj.name)
+        if not cache.unchanged(spec, field_manager=manager, key=key):
+            return False
+        desired[key] = type(obj)
         return True
 
     return should_skip

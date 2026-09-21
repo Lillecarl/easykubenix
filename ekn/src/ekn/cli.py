@@ -22,9 +22,15 @@ from nanopynix.models import JsonValue
 from nanopynix.primops import from_go_like_yaml_stream, from_yaml11_stream, from_yaml_stream, to_yaml
 from pydantic import TypeAdapter, ValidationError
 
-from ekn import clusterfence, enginepause, fastcache, seeds, storecheck
+from ekn import clusterfence, enginepause, fastcache, livestate, seeds, storecheck
 from ekn._cli import Command, build_parser, complete, dispatch, opt, pos
-from ekn.apply import DEFAULT_DELIVERY_MANAGERS, DEFAULT_FIELD_MANAGER, apply_and_prune, prune_generation
+from ekn.apply import (
+    DEFAULT_DELIVERY_MANAGERS,
+    DEFAULT_ENVIRONMENT_LABEL,
+    DEFAULT_FIELD_MANAGER,
+    apply_and_prune,
+    prune_generation,
+)
 from ekn.clusterdiff import cluster_diff
 from ekn.converge import DEFAULT_CONCURRENCY, DEFAULT_SETTLE_SECONDS
 from ekn.directapply import converge_direct, report_failures
@@ -1109,21 +1115,16 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
         except (storecheck.StorePathsUnavailableError, storecheck.NoSubstitutersError) as exc:
             raise SystemExit(str(exc)) from exc
 
-    cache = await fastcache.open_cache(
+    cache = await _open_apply_cache(
         api,
         environment=cfg.environment,
+        kinds=_kinds_of(prepared),
         # The fence already read it. `None` here is a caller that has none --
         # no fenced command -- and `open_cache` reads it itself.
         cluster=cluster,
         assume_unchanged=assume_unchanged,
         never_record=_uncacheable(cfg),
     )
-    if cache is not None and assume_unchanged:
-        _log.warning(
-            "--assume-unchanged: an object this machine last applied unchanged is not sent, "
-            "so anything that edited or deleted it since is invisible to this run",
-            cache=str(cache.path),
-        )
     try:
         await _apply_prepared(
             prepared,
@@ -1151,6 +1152,60 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
                 assume_unchanged=assume_unchanged,
                 path=str(cache.path),
             )
+
+
+async def _open_apply_cache(  # noqa: PLR0913 -- one cache, and each argument is a different thing it must not get wrong
+    api: kr8s.asyncio.Api,
+    *,
+    environment: str,
+    kinds: set[tuple[str, str]],
+    cluster: str | None = None,
+    assume_unchanged: bool = False,
+    never_record: set[tuple[str, str, str]] | None = None,
+) -> fastcache.ApplyCache | None:
+    """The record of what this machine applied, and what the cluster holds now.
+
+    The sweep runs only under `--assume-unchanged`, because it is the only
+    thing that reads it: an ordinary apply sends every object regardless and
+    would pay one LIST per kind for an answer it never asks for.
+    """
+    cache = await fastcache.open_cache(
+        api,
+        environment=environment,
+        cluster=cluster,
+        assume_unchanged=assume_unchanged,
+        never_record=never_record or set(),
+    )
+    if cache is None or not assume_unchanged:
+        return cache
+    cache.live = await livestate.sweep(
+        api,
+        kinds,
+        # Everything `ekn` applies carries it, so an object without it is not
+        # one this cache has an entry for. It narrows the sweep to this
+        # environment on a cluster that holds several.
+        selector=f"{DEFAULT_ENVIRONMENT_LABEL}={environment}",
+    )
+    if not cache.primed():
+        _log.info(
+            "--assume-unchanged: nothing recorded for this environment yet, so this run applies "
+            "everything and records where each object landed. Later runs skip what nothing has written.",
+            cache=str(cache.path),
+        )
+    return cache
+
+
+def _kinds_of(prepared: list[tuple[ApplyGroup, seeds.SeedPlan]]) -> set[tuple[str, str]]:
+    """Every `(kind, apiVersion)` this run could skip an object of.
+
+    The sweep's scope, and deliberately not `kubernetes.apiMappings`: a prune
+    scans every kind the configuration knows, because a removed object is one
+    this run does not mention. A skip is only ever about an object this run
+    does mention.
+    """
+    return {
+        (str(spec.get("kind")), str(spec.get("apiVersion", "v1"))) for _group, plan in prepared for spec in plan.objects
+    }
 
 
 def _uncacheable(cfg: KubeApplyConfigResult) -> set[tuple[str, str, str]]:
@@ -1293,10 +1348,11 @@ class KubeApply(CachePushCommand, FencedCommand):
     assume_unchanged: bool = opt(
         False,
         help="Do not send an object whose bytes and field manager are what this machine last applied to "
-        "this cluster. The record is local (see ekn.fastcache), so it says nothing about the live object: "
-        "a GitOps engine syncing another commit, a kubectl edit or a delete since the last run is invisible. "
-        "Recording happens on every apply; this flag only turns the skipping on. Never skips a SOPS-encrypted "
-        "or seeded object.",
+        "this cluster AND whose resourceVersion is still the one that apply returned. The first half is a "
+        "local record (see ekn.fastcache); the second is one metadata LIST per kind, which is what makes a "
+        "kubectl edit, a GitOps engine syncing another commit or a delete visible. Recording happens on "
+        "every apply; this flag turns on the sweep and the skipping. The first run after it records "
+        "applies everything. Never skips a SOPS-encrypted or seeded object.",
     )
     pause_engine: bool = opt(
         False,
@@ -1961,6 +2017,12 @@ class ApplyManifest(Command):
         None,
         help="JSON file holding kubernetes.novalidateKeys ({kind, namespace, name} objects) to skip.",
     )
+    assume_unchanged: bool = opt(
+        False,
+        help="As ekn kubeapply --assume-unchanged. Without it this command opens no cache at all, "
+        "so it records nothing either: ekn validate runs it against a fresh API server every time, "
+        "and each of those would leave a cache file named after a cluster that no longer exists.",
+    )
 
     async def run(self) -> None:
         resource_priority: dict[str, int] = {}
@@ -1983,6 +2045,16 @@ class ApplyManifest(Command):
 
         objects = await prepare_validation_objects(str(self.manifest_file), novalidate_keys)
         api = await kr8s.asyncio.api()
+        cache = (
+            await _open_apply_cache(
+                api,
+                environment=self.environment,
+                kinds={(str(spec.get("kind")), str(spec.get("apiVersion", "v1"))) for spec in objects},
+                assume_unchanged=True,
+            )
+            if self.assume_unchanged
+            else None
+        )
         try:
             await apply_and_prune(
                 objects,
@@ -1991,9 +2063,14 @@ class ApplyManifest(Command):
                 unit=self.unit,
                 hand_applied=self.hand_applied,
                 resource_priority=resource_priority,
+                cache=cache,
             )
         except kr8s.ServerError as exc:
             _report_server_error("apply", exc)
+        finally:
+            if cache is not None:
+                cache.save()
+                _log.info("apply cache", skipped=cache.skipped, recorded=cache.recorded, path=str(cache.path))
 
 
 _json_value_adapter: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)

@@ -1047,3 +1047,86 @@ class TestTheExitCode:
         )
 
         assert done.returncode == 0, done.stdout + done.stderr
+
+
+class TestTheSweepUnderAssumeUnchanged:
+    """`--assume-unchanged` is two questions, and the sweep is the half this
+    command owns: without it nothing is skippable, and with it a skip needs
+    the object still to be at the version the last apply returned.
+    """
+
+    @staticmethod
+    def _config() -> KubeApplyConfigResult:
+        return KubeApplyConfigResult.model_validate(
+            {
+                "groups": [
+                    {
+                        "unit": None,
+                        "field_manager": "ekn",
+                        "objects": [
+                            {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "a"}},
+                            {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "b"}},
+                            {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "c"}},
+                        ],
+                    }
+                ],
+                "environment": "test",
+                "resource_priority": {},
+                "sops_age_identities": [],
+                "handAppliedUnits": [],
+                "declaredUnits": [],
+            }
+        )
+
+    async def _run(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, assume_unchanged: bool) -> dict[str, Any]:
+        import ekn.cli as cli_module
+        from ekn.fastcache import ApplyCache
+
+        seen: dict[str, Any] = {}
+        store = ApplyCache(path=tmp_path / "c.json", environment="test", assume_unchanged=assume_unchanged)
+
+        async def _open_cache(*_args: Any, **_kwargs: Any) -> ApplyCache:
+            return store
+
+        async def _sweep(_api: Any, kinds: Any, *, selector: str | None = None) -> dict[Any, Any]:
+            seen["kinds"] = set(kinds)
+            seen["selector"] = selector
+            return {}
+
+        async def _apply_and_prune(*_args: Any, **_kwargs: Any) -> None:
+            seen["cache"] = _kwargs["cache"]
+
+        monkeypatch.setattr(cli_module.fastcache, "open_cache", _open_cache)
+        monkeypatch.setattr(cli_module.livestate, "sweep", _sweep)
+        monkeypatch.setattr(cli_module, "apply_and_prune", _apply_and_prune)
+
+        await _apply_groups(
+            self._config(),
+            api=None,  # type: ignore[arg-type]
+            target=None,
+            prune=False,
+            assume_unchanged=assume_unchanged,
+        )
+        seen["store"] = store
+        return seen
+
+    async def test_it_sweeps_the_kinds_this_run_could_skip(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """One LIST per kind, not per object, and only kinds this run
+        mentions -- a prune scans every kind the configuration knows, because
+        a removed object is one the run does not mention, and a skip is only
+        ever about one it does."""
+        seen = await self._run(monkeypatch, tmp_path, assume_unchanged=True)
+
+        assert seen["kinds"] == {("ConfigMap", "v1"), ("Secret", "v1")}
+        assert seen["selector"] == "ekn.dev/environment=test"
+        assert seen["store"].live == {}
+
+    async def test_without_the_flag_nothing_is_swept(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Negative control. An ordinary apply pays for no LIST, and its
+        cache stays unable to skip anything."""
+        seen = await self._run(monkeypatch, tmp_path, assume_unchanged=False)
+
+        assert "kinds" not in seen
+        assert seen["store"].live is None

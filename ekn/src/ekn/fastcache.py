@@ -1,20 +1,24 @@
-"""What this machine last applied, recorded locally, so an unchanged object
-costs no request at all.
+"""What this machine last applied, checked against what the cluster holds now,
+so an unchanged object costs no PATCH.
 
-`ekn kubeapply --assume-unchanged` reads it. An object whose bytes, field
-manager, environment and cluster all match the last successful apply is left
-alone -- no PATCH, and nothing read to decide it.
+`ekn kubeapply --assume-unchanged` reads it. An object is left alone only when
+two independent things agree:
 
-**It is a claim about the cluster, made from a file on a laptop.** Nothing
-validates it, so it is wrong the moment anybody else writes: a GitOps engine
-syncing a different commit, a `kubectl edit`, a deleted object. That is why
-the skip is opt-in and the recording is not, and why the escape is to leave
-the flag off.
+- **the bytes**, from this file: the manifest and field manager are what this
+  machine last applied to this cluster;
+- **the `resourceVersion`**, from `livestate.sweep`: the object is still at
+  the version that apply returned, so nothing has written it since.
 
-`livestate` answers the same question exactly, with one metadata LIST per
-kind -- 2.56 MB for a 997-object cluster, and it sees drift. This one costs a
-single GET. Issue #28 holds that design; a `--prune` run pays for its sweep
-anyway, so that is where to go if this blindness ever bites.
+Either half alone is wrong. The file is a claim about the cluster made from a
+laptop, and it is stale the moment anybody else writes -- a GitOps engine
+syncing another commit, a `kubectl edit`, a delete. The sweep sees those, and
+sees nothing about whether the manifest itself changed.
+
+**`resourceVersion` and not the manifest hash.** It moves on a write by
+anyone, including a writer reusing our own field-manager name, and a
+server-side apply that changes nothing does not move it -- so `ekn` does not
+invalidate its own record every run. Measured on nixlab2 over three idle
+minutes: 0 of 1000 objects moved.
 
 **Keyed by the cluster's own identity, never by the kubeconfig context
 name.** `ekn validate` boots a fresh API server under a fixed context, so a
@@ -44,20 +48,25 @@ from .converge import object_key
 from .livestate import canonical_json
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Collection, Mapping
 
     from kr8s.asyncio import Api
 
     from .apply import Manifest
+    from .livestate import LiveObject
 
 _log = structlog.get_logger()
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 """Bumped when the file's shape changes. An older file is discarded, not read.
 
 A digest whose meaning moved -- a new input, a different canonicalisation --
 answers "unchanged" for an object that is not, which is the one failure this
 cache must not have.
+
+Version 2 added the `resourceVersion` beside the digest. A version 1 entry is
+a digest with no version to check it against, which this refuses to skip on,
+so discarding the file and applying once is also the cheaper of the two.
 """
 
 IDENTITY_NAMESPACE = "kube-system"
@@ -98,6 +107,17 @@ def cache_root() -> Path:
     return base / "ekn" / "apply-cache"
 
 
+@dataclass(frozen=True)
+class Entry:
+    """One object as this machine last applied it."""
+
+    digest: str
+    resource_version: str | None = None
+    """What the apply response reported. `None` is an entry nothing can skip
+    on: a version 1 file, or an apply whose response carried no version.
+    """
+
+
 @dataclass
 class ApplyCache:
     """One cluster's record, for the length of one command.
@@ -106,6 +126,10 @@ class ApplyCache:
     a cluster holds several environments, and a uid is a safe file name where
     an environment name is not.
 
+    `live` is `livestate.sweep`'s result, set by the caller before the first
+    apply. `None` means no sweep ran, and then **nothing is skippable** --
+    this cache alone cannot tell a correct object from one somebody edited.
+
     `skipped` and `recorded` are counted here because both apply paths funnel
     through these two methods, and the run has to be able to say how much it
     left alone.
@@ -113,32 +137,72 @@ class ApplyCache:
 
     path: Path
     environment: str
-    entries: dict[str, dict[str, str]] = field(default_factory=dict)
+    entries: dict[str, dict[str, Entry]] = field(default_factory=dict)
     assume_unchanged: bool = False
     never_record: frozenset[tuple[str, str, str]] = frozenset()
+    live: Mapping[tuple[str, str, str], LiveObject] | None = None
     skipped: int = 0
     recorded: int = 0
     _dirty: bool = False
 
-    def _section(self) -> dict[str, str]:
+    def _section(self) -> dict[str, Entry]:
         return self.entries.setdefault(self.environment, {})
 
-    def unchanged(self, spec: Manifest, *, field_manager: str) -> bool:
-        """True when this object may be left alone.
+    def primed(self) -> bool:
+        """True when some object of this environment can be skipped at all.
 
-        False whenever the operator did not ask for the skip, so a caller can
-        hold one cache and let this decide.
+        False on the first run after this file was created or its format
+        changed: every entry then has a digest and no `resourceVersion`, so
+        the run applies everything and records it. That is a one-time cost and
+        the caller says so, because `applied=1241` under a flag called
+        "assume unchanged" reads as a regression otherwise.
+        """
+        return any(entry.resource_version for entry in self._section().values())
+
+    def sent_before(self, spec: Manifest, *, field_manager: str) -> bool:
+        """True when this machine last sent exactly these bytes as this manager.
+
+        Half of `unchanged`, and never a reason to skip on its own. It is
+        public because it costs nothing, where the other half needs the object
+        built: a caller that would have to discover an unserved kind to build
+        one asks this first.
         """
         identity = object_key(spec)
         if not self.assume_unchanged or identity in self.never_record:
             return False
-        if self._section().get(_entry_key(identity)) != digest(spec, field_manager=field_manager):
+        entry = self._section().get(_entry_key(identity))
+        return entry is not None and entry.digest == digest(spec, field_manager=field_manager)
+
+    def unchanged(self, spec: Manifest, *, field_manager: str, key: tuple[str, str, str]) -> bool:
+        """True when this object may be left alone.
+
+        *key* is the **built** object's `(namespace, kind, name)`, which is
+        what the sweep saw. A manifest that names no namespace resolves to the
+        API's default one, so a key taken from the manifest reads `none` where
+        the cluster reads `default` -- and this would then skip nothing, for
+        ever, while looking healthy.
+
+        False whenever the operator did not ask for the skip, so a caller can
+        hold one cache and let this decide.
+        """
+        if not self.sent_before(spec, field_manager=field_manager):
+            return False
+        entry = self._section()[_entry_key(object_key(spec))]
+        if self.live is None or entry.resource_version is None:
+            return False
+        seen = self.live.get(key)
+        if seen is None or seen.resource_version != entry.resource_version:
             return False
         self.skipped += 1
         return True
 
-    def record(self, spec: Manifest, *, field_manager: str) -> None:
+    def record(self, spec: Manifest, *, field_manager: str, resource_version: str | None) -> None:
         """Remember that this object was applied, exactly as it was sent.
+
+        *resource_version* is the one the apply response carried. `None`
+        records an entry that can never be skipped on, which is right: a run
+        that did not learn where the object landed cannot tell later whether
+        it moved.
 
         Called on every successful apply, whether or not the skip is on:
         otherwise the first `--assume-unchanged` run after an ordinary one has
@@ -147,7 +211,10 @@ class ApplyCache:
         identity = object_key(spec)
         if identity in self.never_record:
             return
-        self._section()[_entry_key(identity)] = digest(spec, field_manager=field_manager)
+        self._section()[_entry_key(identity)] = Entry(
+            digest=digest(spec, field_manager=field_manager),
+            resource_version=resource_version,
+        )
         self.recorded += 1
         self._dirty = True
 
@@ -160,7 +227,11 @@ class ApplyCache:
         """
         if not self._dirty:
             return
-        body = json.dumps({"version": FORMAT_VERSION, "entries": self.entries}, indent=1, sort_keys=True)
+        written = {
+            environment: {key: _unparse(entry) for key, entry in section.items()}
+            for environment, section in self.entries.items()
+        }
+        body = json.dumps({"version": FORMAT_VERSION, "entries": written}, indent=1, sort_keys=True)
         temporary = self.path.with_name(f"{self.path.name}.new")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -181,7 +252,21 @@ def _entry_key(identity: tuple[str, str, str]) -> str:
     return "/".join(identity)
 
 
-def _read(path: Path) -> dict[str, dict[str, str]]:
+def _unparse(entry: Entry) -> dict[str, str | None]:
+    return {"digest": entry.digest, "resourceVersion": entry.resource_version}
+
+
+def _parse(value: Any) -> Entry | None:
+    if not isinstance(value, dict):
+        return None
+    stored = value.get("digest")
+    version = value.get("resourceVersion")
+    if not isinstance(stored, str):
+        return None
+    return Entry(digest=stored, resource_version=version if isinstance(version, str) else None)
+
+
+def _read(path: Path) -> dict[str, dict[str, Entry]]:
     """The file's entries, or nothing at all.
 
     Every failure answers the same way, and the answer is always the safe one:
@@ -197,11 +282,13 @@ def _read(path: Path) -> dict[str, dict[str, str]]:
     entries = loaded.get("entries")
     if not isinstance(entries, dict):
         return {}
-    return {
-        str(environment): {str(key): str(value) for key, value in section.items()}
-        for environment, section in entries.items()
-        if isinstance(section, dict)
-    }
+    read: dict[str, dict[str, Entry]] = {}
+    for environment, section in entries.items():
+        if not isinstance(section, dict):
+            continue
+        parsed = {str(key): entry for key, value in section.items() if (entry := _parse(value)) is not None}
+        read[str(environment)] = parsed
+    return read
 
 
 class ClusterIdUnreadableError(RuntimeError):
@@ -288,6 +375,7 @@ __all__ = [
     "IDENTITY_NAMESPACE",
     "ApplyCache",
     "ClusterIdUnreadableError",
+    "Entry",
     "cache_root",
     "cluster_id",
     "digest",

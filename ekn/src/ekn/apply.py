@@ -251,6 +251,22 @@ def _object_key(obj: APIObject) -> tuple[str, str, str]:
     return (obj.namespace or "none", obj.kind, obj.name)
 
 
+def resource_version(obj: APIObject) -> str | None:
+    """Where the API server says this object landed, after an apply.
+
+    `async_apply` replaces `obj.raw` with the merged object the server
+    returned, so this is the live version and not the one the manifest
+    carried -- a rendered manifest carries none at all.
+
+    `None` for a response that named no version. `fastcache` records it as an
+    entry it will never skip on, which is the only safe reading of "this run
+    does not know where the object is".
+    """
+    metadata = obj.raw.get("metadata")
+    version = metadata.get("resourceVersion") if isinstance(metadata, dict) else None
+    return version if isinstance(version, str) else None
+
+
 def field_manager_for(
     spec: Manifest,
     *,
@@ -437,20 +453,24 @@ async def apply_and_prune(  # noqa: PLR0913 -- tracked complexity/arg-count debt
         applied: list[APIObject] = []
         for spec in tier:
             labeled = with_environment_label(spec, environment_label, environment)
-            if cache is not None and cache.unchanged(spec, field_manager=field_manager):
-                # Built, so the key matches what the prune scan reports, and
-                # kept out of `applied`: a skipped CustomResourceDefinition was
+            # Built before the cache is asked, because the cache's question is
+            # about the object's live identity and only the built object knows
+            # it -- a manifest naming no namespace resolves to the API's
+            # default one here. Both branches built it anyway.
+            obj = await build_object(labeled, api)
+            key = _object_key(obj)
+            if cache is not None and cache.unchanged(spec, field_manager=field_manager, key=key):
+                # Kept out of `applied`: a skipped CustomResourceDefinition was
                 # applied by an earlier run, so it is Established already and
                 # nothing is waiting for it.
-                skipped = await build_object(labeled, api)
-                desired[_object_key(skipped)] = type(skipped)
-                _log.debug("unchanged", kind=skipped.kind, namespace=skipped.namespace, name=skipped.name)
+                desired[key] = type(obj)
+                _log.debug("unchanged", kind=obj.kind, namespace=obj.namespace, name=obj.name)
                 continue
-            obj = await apply_one(labeled, api, field_manager=field_manager)
+            await ssa_apply(obj, field_manager=field_manager)
             applied.append(obj)
-            desired[_object_key(obj)] = type(obj)
+            desired[key] = type(obj)
             if cache is not None:
-                cache.record(spec, field_manager=field_manager)
+                cache.record(spec, field_manager=field_manager, resource_version=resource_version(obj))
             _log.debug("applied", kind=obj.kind, namespace=obj.namespace, name=obj.name)
 
         crds = [obj for obj in applied if obj.kind == "CustomResourceDefinition"]
@@ -837,6 +857,7 @@ __all__ = [
     "field_manager_for",
     "prune_generation",
     "prune_selector",
+    "resource_version",
     "ssa_apply",
     "with_environment_label",
 ]
