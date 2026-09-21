@@ -64,9 +64,9 @@ A digest whose meaning moved -- a new input, a different canonicalisation --
 answers "unchanged" for an object that is not, which is the one failure this
 cache must not have.
 
-Version 2 added the `resourceVersion` beside the digest. A version 1 entry is
-a digest with no version to check it against, which this refuses to skip on,
-so discarding the file and applying once is also the cheaper of the two.
+A version 1 entry is a digest with no `resourceVersion` to check it against,
+which nothing may skip on. Discarding the file and applying once is the
+cheaper of the two ways to answer that.
 """
 
 IDENTITY_NAMESPACE = "kube-system"

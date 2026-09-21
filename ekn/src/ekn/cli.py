@@ -84,10 +84,10 @@ from ekn.tofu import (
     output as tofu_output,
     run_chain,
 )
-from ekn.validation import EphemeralControlPlane, exec_capture, prepare_validation_objects
+from ekn.validation import EphemeralControlPlane, exec_capture, load_manifest_objects, prepare_validation_objects
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 
     from ekn.eval import TofuUnit
 
@@ -1208,7 +1208,7 @@ def _kinds_of(prepared: list[tuple[ApplyGroup, seeds.SeedPlan]]) -> set[tuple[st
     }
 
 
-def _uncacheable(cfg: KubeApplyConfigResult) -> set[tuple[str, str, str]]:
+def _uncacheable_objects(objects: Iterable[dict[str, Any]]) -> set[tuple[str, str, str]]:
     """Objects `fastcache` must never write a digest for.
 
     A SOPS-encrypted object and a seeded one both carry a value that is not in
@@ -1216,15 +1216,16 @@ def _uncacheable(cfg: KubeApplyConfigResult) -> set[tuple[str, str, str]]:
     brute-force oracle for that one field, and the cheap answer is to send
     these every time -- there are tens of them, not hundreds.
 
-    Read from `cfg.groups`, which is the manifest before decryption and before
-    seed resolution: after either step the marker is gone.
+    **The manifest as rendered, before decryption and before seed
+    resolution.** Both steps remove the marker that says which object this is
+    about, so the same set computed one step later is empty and says nothing.
     """
-    return {
-        _object_identity(obj)
-        for group in cfg.groups
-        for obj in group.objects
-        if isinstance(obj.get("sops"), dict) or seeds.is_seeded(obj)
-    }
+    return {_object_identity(obj) for obj in objects if isinstance(obj.get("sops"), dict) or seeds.is_seeded(obj)}
+
+
+def _uncacheable(cfg: KubeApplyConfigResult) -> set[tuple[str, str, str]]:
+    """`_uncacheable_objects` over every group's rendered manifest."""
+    return _uncacheable_objects(obj for group in cfg.groups for obj in group.objects)
 
 
 async def _apply_prepared(  # noqa: PLR0913 -- the state `_apply_groups` built, handed on whole
@@ -2019,9 +2020,10 @@ class ApplyManifest(Command):
     )
     assume_unchanged: bool = opt(
         False,
-        help="As ekn kubeapply --assume-unchanged. Without it this command opens no cache at all, "
-        "so it records nothing either: ekn validate runs it against a fresh API server every time, "
-        "and each of those would leave a cache file named after a cluster that no longer exists.",
+        help="As ekn kubeapply --assume-unchanged, including never recording a SOPS-encrypted or "
+        "seeded object. Without it this command opens no cache at all, so it records nothing either: "
+        "ekn validate runs it against a fresh API server every time, and each of those would leave a "
+        "cache file named after a cluster that no longer exists.",
     )
 
     async def run(self) -> None:
@@ -2051,6 +2053,10 @@ class ApplyManifest(Command):
                 environment=self.environment,
                 kinds={(str(spec.get("kind")), str(spec.get("apiVersion", "v1"))) for spec in objects},
                 assume_unchanged=True,
+                # From the file, not from `objects`: these are the objects
+                # this cache must never hold a digest of, and the `sops:`
+                # block that says so is gone by the time `objects` exists.
+                never_record=_uncacheable_objects(await load_manifest_objects(str(self.manifest_file))),
             )
             if self.assume_unchanged
             else None

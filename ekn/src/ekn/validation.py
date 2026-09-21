@@ -87,6 +87,27 @@ async def terminate_process(process: anyio.abc.Process, grace: float = TERMINATE
         await process.aclose()
 
 
+async def load_manifest_objects(manifest_path: str) -> list[dict[str, Any]]:
+    """`internal.manifestJSONFile`'s objects, exactly as it holds them.
+
+    Separate from the preparation below because one caller needs the objects
+    *before* they are decrypted: a `sops:` block is what says "never write a
+    digest of this", and `maybe_decrypt` removes it. See `fastcache`.
+
+    `Any` rather than `Manifest`, because every caller indexes its way into a
+    manifest it has already decided the shape of -- `obj["metadata"]["name"]`
+    against `JsonValue` is a type error at every step and says nothing.
+    """
+    manifest_list: JsonValue = json.loads(await Path(manifest_path).read_text())
+    unwrapped = manifest_list["items"] if isinstance(manifest_list, dict) else manifest_list
+    if not isinstance(unwrapped, list):
+        _log.error("internal.manifestJSONFile did not produce a list of objects")
+        raise SystemExit(1)
+    # internal.manifestJSONFile always contains one k8s object dict per list
+    # entry -- see kubernetes.nix's `internal.nix`.
+    return cast("list[dict[str, Any]]", unwrapped)
+
+
 async def prepare_validation_objects(
     manifest_path: str,
     novalidate_keys: set[tuple[str, str, str]],
@@ -97,14 +118,7 @@ async def prepare_validation_objects(
     less apiserver, e.g. an aggregated APIService whose backing Service/Pod
     never actually runs here), and decrypt any that carry a `sops:` block.
     """
-    manifest_list: JsonValue = json.loads(await Path(manifest_path).read_text())
-    unwrapped = manifest_list["items"] if isinstance(manifest_list, dict) else manifest_list
-    if not isinstance(unwrapped, list):
-        _log.error("internal.manifestJSONFile did not produce a list of objects")
-        raise SystemExit(1)
-    # internal.manifestJSONFile always contains one k8s object dict per list
-    # entry -- see kubernetes.nix's `internal.nix`.
-    objects = cast("list[dict[str, Any]]", unwrapped)
+    objects = await load_manifest_objects(manifest_path)
     if novalidate_keys:
         skipped = [
             obj

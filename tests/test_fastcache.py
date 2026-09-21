@@ -510,3 +510,40 @@ def _install_namespace(monkeypatch: pytest.MonkeyPatch, raw: dict[str, Any] | No
             return cls(raw)
 
     monkeypatch.setattr("ekn.fastcache.Namespace", _Namespace)
+
+
+class TestTheCredentialRuleOnEveryPath:
+    """A digest of what was sent is a brute-force oracle for the one field a
+    SOPS-encrypted or seeded object does not keep in git. Both apply commands
+    have to answer that the same way, and they read the objects at different
+    points: `ekn kubeapply` before it decrypts, `_applyManifest` from the
+    file, because decryption removes the `sops:` block that says which object
+    this is about."""
+
+    ENCRYPTED: ClassVar[Any] = {
+        "kind": "Secret",
+        "apiVersion": "v1",
+        "metadata": {"name": "credential", "namespace": "default"},
+        "sops": {"age": []},
+    }
+
+    async def test_the_manifest_file_names_them_before_decryption(self, tmp_path: Path) -> None:
+        from ekn.cli import _uncacheable_objects
+        from ekn.validation import load_manifest_objects
+
+        path = tmp_path / "manifests.json"
+        path.write_text(json.dumps([self.ENCRYPTED, manifest()]))
+
+        from_file = _uncacheable_objects(await load_manifest_objects(str(path)))
+
+        assert from_file == {("default", "Secret", "credential")}
+
+    def test_a_decrypted_object_no_longer_names_itself(self) -> None:
+        """The negative control, and the reason `_applyManifest` reads the
+        file rather than what it is about to send: `sops.maybe_decrypt`
+        returns the object without the block that identifies it."""
+        from ekn.cli import _uncacheable_objects
+
+        decrypted = {key: value for key, value in self.ENCRYPTED.items() if key != "sops"}
+
+        assert _uncacheable_objects([decrypted]) == set()
