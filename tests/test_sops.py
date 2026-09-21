@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import subprocess
 from pathlib import Path
 
+import anyio
 import pytest
 
 from ekn.sops import SopsDecryptError, maybe_decrypt
@@ -82,7 +82,7 @@ class TestMaybeDecrypt:
         encrypted = _sops_encrypt(plain, age_key)
         # Point at a key file with no matching identity -- decrypt must fail.
         wrong_key = tmp_path / "wrong.txt"
-        await asyncio.to_thread(subprocess.run, ["age-keygen", "-o", str(wrong_key)], check=True, capture_output=True)
+        await anyio.run_process(["age-keygen", "-o", str(wrong_key)])
         monkeypatch.setenv("SOPS_AGE_KEY_FILE", str(wrong_key))
 
         with pytest.raises(SopsDecryptError):

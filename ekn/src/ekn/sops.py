@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import anyio
 import kr8s
 import structlog
 import yaml
@@ -75,31 +76,31 @@ async def maybe_decrypt(obj: Manifest) -> Manifest:
     if not isinstance(obj.get("sops"), dict):
         return obj
 
-    proc = await asyncio.create_subprocess_exec(
-        "sops",
-        "--decrypt",
-        "--ignore-mac",
-        "--input-type",
-        "json",
-        "--output-type",
-        "json",
-        "/dev/stdin",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    completed = await anyio.run_process(
+        [
+            "sops",
+            "--decrypt",
+            "--ignore-mac",
+            "--input-type",
+            "json",
+            "--output-type",
+            "json",
+            "/dev/stdin",
+        ],
+        input=json.dumps(obj).encode(),
+        check=False,
     )
-    stdout, stderr = await proc.communicate(json.dumps(obj).encode())
-    if proc.returncode != 0:
+    if completed.returncode != 0:
         kind = obj.get("kind", "?")
         metadata_value = obj.get("metadata") or {}
         metadata: Manifest = metadata_value if isinstance(metadata_value, dict) else {}
         name = metadata.get("name", "?")
         raise SopsDecryptError(
-            f"sops --decrypt failed for {kind}/{name}: {stderr.decode()}",
+            f"sops --decrypt failed for {kind}/{name}: {completed.stderr.decode()}",
         )
-    decrypted: JsonValue = json.loads(stdout)
+    decrypted: JsonValue = json.loads(completed.stdout)
     if not isinstance(decrypted, dict):
-        raise SopsDecryptError(f"sops --decrypt returned non-object JSON: {stdout!r}")
+        raise SopsDecryptError(f"sops --decrypt returned non-object JSON: {completed.stdout!r}")
     return decrypted
 
 
@@ -110,16 +111,13 @@ def _public_key_from_identity_text(key_text: str) -> str:
 async def _generate_age_identity() -> str:
     with tempfile.TemporaryDirectory() as tmp:
         key_file = Path(tmp) / "key.txt"
-        proc = await asyncio.create_subprocess_exec(
-            "age-keygen",
-            "-o",
-            str(key_file),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+        completed = await anyio.run_process(
+            ["age-keygen", "-o", str(key_file)],
+            stdout=subprocess.DEVNULL,
+            check=False,
         )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise AgeKeygenError(f"age-keygen failed: {stderr.decode()}")
+        if completed.returncode != 0:
+            raise AgeKeygenError(f"age-keygen failed: {completed.stderr.decode()}")
         return key_file.read_text()
 
 
@@ -169,20 +167,13 @@ def _add_recipient_to_sops_config(
 
 async def _run_sops_updatekeys(config_file: str, sops_files: list[str]) -> None:
     for sops_file in sops_files:
-        proc = await asyncio.create_subprocess_exec(
-            "sops",
-            "--config",
-            config_file,
-            "updatekeys",
-            "--yes",
-            sops_file,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        completed = await anyio.run_process(
+            ["sops", "--config", config_file, "updatekeys", "--yes", sops_file],
+            check=False,
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
+        if completed.returncode != 0:
             raise SopsUpdateKeysError(
-                f"sops updatekeys failed for {sops_file}: {stderr.decode() or stdout.decode()}",
+                f"sops updatekeys failed for {sops_file}: {completed.stderr.decode() or completed.stdout.decode()}",
             )
 
 

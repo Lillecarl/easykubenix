@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import shutil
 import socket
+import subprocess
 import tempfile
 from typing import TYPE_CHECKING, Any, cast
 
 import anyio
+import anyio.abc
 import structlog
 from anyio import Path
 
@@ -23,6 +24,10 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger()
 
+#: How long a child gets to answer SIGTERM before it is killed. It only has to
+#: cover etcd and kube-apiserver shutting down a store nothing will read again.
+TERMINATE_GRACE = 5.0
+
 
 def _free_port() -> int:
     with socket.socket() as s:
@@ -35,19 +40,51 @@ async def exec_capture(
     env: dict[str, str] | None = None,
     stdin: str | None = None,
 ) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdin=asyncio.subprocess.PIPE if stdin is not None else None,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    completed = await anyio.run_process(
+        list(args),
+        input=stdin.encode() if stdin else None,
+        # `anyio.run_process` opens a stdin pipe only for a *truthy* `input`,
+        # so an empty string would leave the child reading this process' own
+        # stdin and waiting on a terminal. DEVNULL is the same EOF with no
+        # pipe, and the two arguments cannot both be set.
+        stdin=subprocess.DEVNULL if stdin == "" else None,
         env=env,
+        check=False,
     )
-    stdout, stderr = await proc.communicate(
-        input=stdin.encode() if stdin is not None else None,
-    )
-    if proc.returncode is None:
-        raise RuntimeError("subprocess returncode is unset after communicate() completed")
-    return proc.returncode, stdout.decode(), stderr.decode()
+    return completed.returncode, completed.stdout.decode(), completed.stderr.decode()
+
+
+async def drain(stream: anyio.abc.ByteReceiveStream | None) -> str:
+    """Whatever is left on *stream*, as text.
+
+    anyio's process streams are `ByteReceiveStream`s and have no `read()`:
+    the stream is an iterator of chunks, and it ends when the child closes
+    its end.
+    """
+    if stream is None:
+        return ""
+    chunks = [chunk async for chunk in stream]
+    return b"".join(chunks).decode(errors="replace")
+
+
+async def terminate_process(process: anyio.abc.Process, grace: float = TERMINATE_GRACE) -> None:
+    """Stop *process*, politely first and then not.
+
+    **The whole body is shielded, and that is the point.** Ctrl-C reaches an
+    anyio program as a cancellation, and a cancel scope re-delivers it at
+    every checkpoint until the scope exits -- so an unshielded `await
+    process.wait()` here would be cancelled the instant it started and leave
+    etcd and kube-apiserver running with nobody holding them. The shield is
+    bounded by *grace* so it cannot become a hang of its own.
+    """
+    with anyio.CancelScope(shield=True):
+        if process.returncode is None:
+            process.terminate()
+            with anyio.move_on_after(grace):
+                await process.wait()
+        if process.returncode is None:
+            process.kill()
+        await process.aclose()
 
 
 async def prepare_validation_objects(
@@ -181,8 +218,11 @@ class EphemeralControlPlane:
         self._service_subnet = service_subnet
         self._kubeadm_config = kubeadm_config
         self._tmp: Path | None = None
-        self._etcd_proc: asyncio.subprocess.Process | None = None
-        self._apiserver_proc: asyncio.subprocess.Process | None = None
+        # Held across method calls rather than entered with `async with`: the
+        # pair has to outlive `_start`, and leaving the block would close them.
+        # `_teardown` is what ends them, on every path -- see `__aenter__`.
+        self._etcd_proc: anyio.abc.Process | None = None
+        self._apiserver_proc: anyio.abc.Process | None = None
         self.kubeconfig: str = ""
         self.schema_file: str = ""
         self.env: dict[str, str] = {}
@@ -283,8 +323,8 @@ class EphemeralControlPlane:
 
     async def _start_etcd(self, tmp: Path) -> None:
         _log.info("starting etcd")
-        self._etcd_proc = await asyncio.create_subprocess_exec(
-            *[
+        self._etcd_proc = await anyio.open_process(
+            [
                 "etcd",
                 f"--data-dir={tmp}/etcd-data",
                 "--name=default",
@@ -304,8 +344,8 @@ class EphemeralControlPlane:
                 "--log-level=error",
             ],
             env=self.env,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
 
         err = ""
@@ -325,15 +365,14 @@ class EphemeralControlPlane:
             await anyio.sleep(attempt * 0.5)
         else:
             _log.error("etcd failed to start\n%s", err)
-            if self._etcd_proc.returncode is not None and self._etcd_proc.stderr is not None:
-                etcd_err = await self._etcd_proc.stderr.read()
-                _log.error(etcd_err.decode())
+            if self._etcd_proc.returncode is not None:
+                _log.error(await drain(self._etcd_proc.stderr))
             raise SystemExit(1)
 
     async def _start_apiserver(self) -> None:
         _log.info("starting kube-apiserver")
-        self._apiserver_proc = await asyncio.create_subprocess_exec(
-            *[
+        self._apiserver_proc = await anyio.open_process(
+            [
                 "kube-apiserver",
                 "--watch-cache=false",
                 "--anonymous-auth=false",
@@ -361,8 +400,8 @@ class EphemeralControlPlane:
                 f"--tls-private-key-file={self._cert_dir}/apiserver.key",
             ],
             env=self.env,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
 
         err = ""
@@ -379,18 +418,13 @@ class EphemeralControlPlane:
             await anyio.sleep(attempt * 0.5)
         else:
             _log.error("kube-apiserver failed to start\n%s", err)
-            if self._apiserver_proc.returncode is not None and self._apiserver_proc.stderr is not None:
-                apiserver_err = await self._apiserver_proc.stderr.read()
-                _log.error(apiserver_err.decode())
+            if self._apiserver_proc.returncode is not None:
+                _log.error(await drain(self._apiserver_proc.stderr))
             raise SystemExit(1)
 
     async def _teardown(self) -> None:
         for proc in (self._etcd_proc, self._apiserver_proc):
-            if proc and proc.returncode is None:
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5)
-                except TimeoutError:
-                    proc.kill()
+            if proc is not None:
+                await terminate_process(proc)
         if self._tmp is not None:
             shutil.rmtree(self._tmp, ignore_errors=True)

@@ -461,8 +461,15 @@ async def _git_push(remote: str, deploy_branch: str, source_branch: str | None) 
     _log.info(f"pushing {', '.join(branches)} to {remote}")
     # --atomic (a no-op with a single ref) keeps deploy_branch/source_branch
     # from ever updating independently on the remote when both are pushed.
-    proc = await asyncio.create_subprocess_exec("git", "push", "--atomic", remote, *branches)
-    rc = await proc.wait()
+    # `stdout=None, stderr=None`: git's progress belongs on this terminal, and
+    # `anyio.run_process` pipes both unless told otherwise.
+    completed = await anyio.run_process(
+        ["git", "push", "--atomic", remote, *branches],
+        stdout=None,
+        stderr=None,
+        check=False,
+    )
+    rc = completed.returncode
     if rc != 0:
         _log.error(f"git push --atomic {remote} {' '.join(branches)} failed (rc={rc})")
         raise SystemExit(1)
@@ -563,8 +570,15 @@ async def _run_pre_apply(
         }
         _log.info(f"running ekn.preApplyCommand: {command}")
         with timed_stage("kubeapply: preApplyCommand"):
-            proc = await asyncio.create_subprocess_exec(command, str(manifest), env=env)
-            rc = await proc.wait()
+            # The hook's own output goes to this terminal; see `_git_push`.
+            completed = await anyio.run_process(
+                [command, str(manifest)],
+                stdout=None,
+                stderr=None,
+                env=env,
+                check=False,
+            )
+            rc = completed.returncode
     if rc != 0:
         _log.error(f"ekn.preApplyCommand exited {rc} -- nothing has been applied")
         raise SystemExit(1)

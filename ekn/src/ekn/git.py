@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import io
 import os
 import re
@@ -10,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pygit2
 from anyio import Path as AsyncPath
 
@@ -376,13 +376,6 @@ async def try_jj_status(repo_path: str | None = None) -> None:
         return
     if shutil.which("jj") is None:
         return
-    proc = await asyncio.create_subprocess_exec(
-        "jj",
-        "st",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=root,
-    )
-    stdout, _ = await proc.communicate()
-    if proc.returncode == 0 and stdout:
-        sys.stdout.write(stdout.decode())
+    completed = await anyio.run_process(["jj", "st"], cwd=root, check=False)
+    if completed.returncode == 0 and completed.stdout:
+        sys.stdout.write(completed.stdout.decode())

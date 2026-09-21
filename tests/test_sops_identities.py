@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import os
@@ -9,6 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import anyio
 import httpx
 import kr8s
 import pytest
@@ -178,18 +178,18 @@ class TestEnsureAgeIdentities:
         # of how it was originally written, so a YAML-named file must
         # actually be YAML for this round-trip to be representative.
         encrypted_file.write_text("password: hunter2\n")
-        encrypt_proc = await asyncio.create_subprocess_exec(
-            "sops",
-            "--encrypt",
-            "--in-place",
-            "--age",
-            _public_key_from_original(age_key),
-            str(encrypted_file),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        encrypted_result = await anyio.run_process(
+            [
+                "sops",
+                "--encrypt",
+                "--in-place",
+                "--age",
+                _public_key_from_original(age_key),
+                str(encrypted_file),
+            ],
+            check=False,
         )
-        _, encrypt_stderr = await encrypt_proc.communicate()
-        assert encrypt_proc.returncode == 0, encrypt_stderr.decode()
+        assert encrypted_result.returncode == 0, encrypted_result.stderr.decode()
 
         config_file = tmp_path / ".sops.yaml"
         config_file.write_text(
@@ -251,17 +251,13 @@ class TestEnsureAgeIdentities:
         new_identity_text = captured["body"]["stringData"]["key.txt"]
         new_key_file = tmp_path / "new-identity.txt"
         new_key_file.write_text(new_identity_text)
-        decrypt_proc = await asyncio.create_subprocess_exec(
-            "sops",
-            "--decrypt",
-            str(encrypted_file),
+        decrypted = await anyio.run_process(
+            ["sops", "--decrypt", str(encrypted_file)],
             env=os.environ | {"SOPS_AGE_KEY_FILE": str(new_key_file)},
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            check=False,
         )
-        decrypt_stdout, decrypt_stderr = await decrypt_proc.communicate()
-        assert decrypt_proc.returncode == 0, decrypt_stderr.decode()
-        assert yaml.safe_load(decrypt_stdout) == {"password": "hunter2"}
+        assert decrypted.returncode == 0, decrypted.stderr.decode()
+        assert yaml.safe_load(decrypted.stdout) == {"password": "hunter2"}
 
     async def test_raises_when_sops_updatekeys_fails(self, tmp_path: Path) -> None:
         config_file = tmp_path / ".sops.yaml"

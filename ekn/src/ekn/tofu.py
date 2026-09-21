@@ -28,7 +28,6 @@ command.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json
 import os
@@ -38,6 +37,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path as SyncPath, PurePosixPath
 from typing import TYPE_CHECKING, NamedTuple
 
+import anyio
+import anyio.to_thread
 import structlog
 from anyio import Path
 
@@ -91,10 +92,20 @@ def _child_env() -> dict[str, str]:
 async def _run(unit: TofuUnit, workdir: Path, args: Sequence[str]) -> None:
     """Run `tofu` with *args* in *workdir*, or raise."""
     _log.info(f"{unit.name}: tofu {' '.join(args)}")
-    process = await asyncio.create_subprocess_exec(unit.tofu, *args, cwd=str(workdir), env=_child_env())
-    code = await process.wait()
-    if code != 0:
-        raise TofuError(f"{unit.name}: tofu {' '.join(args)} exited {code}")
+    # `stdout=None, stderr=None` inherits this process' own. `anyio.run_process`
+    # pipes both by default, and a piped `tofu apply` shows nothing at all
+    # until it has finished -- the progress lines are the whole point of
+    # watching one run.
+    completed = await anyio.run_process(
+        [unit.tofu, *args],
+        stdout=None,
+        stderr=None,
+        cwd=str(workdir),
+        env=_child_env(),
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise TofuError(f"{unit.name}: tofu {' '.join(args)} exited {completed.returncode}")
 
 
 async def state_location(workdir: Path) -> str:
@@ -146,7 +157,7 @@ async def prepare(unit: TofuUnit, root: Path | None = None) -> Path:
         _log.info(f"{unit.name}: state at {await state_location(workdir)}")
         return workdir
 
-    await asyncio.to_thread(shutil.copyfile, str(source), str(target))
+    await anyio.to_thread.run_sync(shutil.copyfile, str(source), str(target), abandon_on_cancel=True)
     # `copyfile` copies contents and not permission bits, so the store's 0444
     # does not come along: the destination lands at 0666 before the umask, and
     # on a machine with a loose umask that is a world-writable file. Measured,
@@ -175,7 +186,7 @@ async def prepare(unit: TofuUnit, root: Path | None = None) -> Path:
     try:
         await _run(unit, workdir, ["init", "-input=false"])
     except TofuError:
-        await asyncio.to_thread(shutil.rmtree, str(workdir / ".terraform"), True)
+        await anyio.to_thread.run_sync(shutil.rmtree, str(workdir / ".terraform"), True, abandon_on_cancel=True)
         raise
     location = await state_location(workdir)
     _log.info(f"{unit.name}: state at {location}")
@@ -231,19 +242,16 @@ async def output(unit: TofuUnit, name: str, root: Path | None = None) -> str:
     """
     workdir = await prepare(unit, root)
     _log.info(f"{unit.name}: tofu output -raw {name}")
-    process = await asyncio.create_subprocess_exec(
-        unit.tofu,
-        "output",
-        "-raw",
-        name,
+    completed = await anyio.run_process(
+        [unit.tofu, "output", "-raw", name],
         cwd=str(workdir),
-        stdout=asyncio.subprocess.PIPE,
+        stderr=None,
         env=_child_env(),
+        check=False,
     )
-    stdout, _ = await process.communicate()
-    if process.returncode != 0:
-        raise TofuError(f"{unit.name}: tofu output -raw {name} exited {process.returncode}")
-    return stdout.decode()
+    if completed.returncode != 0:
+        raise TofuError(f"{unit.name}: tofu output -raw {name} exited {completed.returncode}")
+    return completed.stdout.decode()
 
 
 #: What `ekn commit` takes from a unit's rendered directory. `config.tf.json`
