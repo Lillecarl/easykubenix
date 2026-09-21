@@ -102,6 +102,31 @@ as it requires running `helm template` during Nix evaluation.
 
 See the demo for examples
 
+### Naming the cluster
+
+`ekn.clusterUid` is the `uid` of the target cluster's `kube-system` Namespace.
+`ekn kubeapply`, `ekn reclaim`, `ekn clusterdiff` and `ekn secrets` refuse to
+act against any other one.
+
+```console
+$ kubectl get namespace kube-system -o jsonpath='{.metadata.uid}'
+```
+
+The ambient kubeconfig is not a neutral default. It is usually a valid,
+reachable, credentialed cluster that happens to be the wrong one, and there is
+no error to notice — the apply succeeds object by object until something
+unrelated collides, by which time a cluster nobody meant to touch is carrying
+an environment's worth of objects. This option removes the default rather than
+guarding it.
+
+Left unset, those commands refuse and print the line to paste.
+`--i-dont-know-which-cluster-this-is` runs anyway. It does not override a
+*mismatch*: a configuration that names a different cluster is a disagreement,
+not a missing answer, and the fix is changing the declared line.
+
+A rebuilt cluster gets a new `uid`, so this value changes with it. That is the
+correct answer rather than an inconvenience.
+
 ### Applying and pruning
 
 `ekn kubeapply` server-side-applies the generated objects and can prune what a

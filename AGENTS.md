@@ -157,6 +157,12 @@ what to inspect next, then query `/tmp/pytest.log` for the full failure context.
   per-request work that may fail needs a wrapper that keeps `Exception` inside.
 - For a duration, use `time.monotonic()`. For a value a cancel scope is measured
   against, use `anyio.current_time()`, which is the event loop's own clock.
+- A command that opens an API against a real cluster subclasses
+  `cli.FencedCommand` and calls `self._fence(api, cfg)` immediately after
+  `kr8s.asyncio.api(...)`, above anything that writes. `ekn.clusterUid` is what
+  it checks; `clusterfence.require` is the rule. `_applyManifest` and `validate`
+  are exempt — both run against the throwaway apiserver in a Nix build, whose
+  `kube-system` uid is fresh every time.
 - Ending a process you hold across method calls needs
   `with anyio.CancelScope(shield=True):` around the whole teardown, bounded by
   `move_on_after`. A cancel scope re-delivers cancellation at every checkpoint,
