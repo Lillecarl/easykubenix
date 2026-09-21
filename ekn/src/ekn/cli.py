@@ -1358,6 +1358,20 @@ class KubeApply(CachePushCommand, FencedCommand):
 
     async def run(self) -> None:
         if self.confirm_context is not None:
+            # **It reads the *ambient* context.** `--kubeconfig-from-tofu`
+            # supplies a different kubeconfig further down, and this check
+            # runs here -- before the apply, and before `ekn.cacheTo` is
+            # pushed -- so it cannot see that file. Checking the ambient one
+            # and reporting it as the apply's target is worse than not
+            # checking: it answers confidently about a cluster this run will
+            # not touch.
+            if self.kubeconfig_from_tofu is not None:
+                raise SystemExit(
+                    "--confirm-context cannot check a --kubeconfig-from-tofu apply: it reads the "
+                    "ambient kubectl context, and the credential this run uses comes out of a tofu "
+                    "output instead.\nDeclare ekn.clusterUid, which checks the cluster the apply "
+                    "actually reaches."
+                )
             rc, out, _ = await exec_capture("kubectl", "config", "current-context")
             current = out.strip()
             if rc != 0 or not current.endswith(self.confirm_context):
