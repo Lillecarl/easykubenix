@@ -1,3 +1,7 @@
+# The anyio banned-api table, shared with `ruff-strict.toml`. Settings only,
+# so this file's own rule list below is untouched.
+extend = "ruff-anyio.toml"
+
 target-version = "py313"
 line-length = 120
 
@@ -6,6 +10,11 @@ select = [
     "E", "W",
     "F",
     "I",
+    # The `banned-api` table `extend` brings in reports under this rule, and
+    # nothing else here selects it. `TID251` alone, not `TID`: `TID252` bans
+    # the relative imports `ekn` uses, which `ruff-strict.toml` ignores by
+    # name.
+    "TID251",
 ]
 
 ignore = [

@@ -1,0 +1,36 @@
+# The anyio vocabulary, shared by `ruff.toml` and `ruff-strict.toml`.
+#
+# Settings only, and deliberately no `select`: a config that extends this one
+# keeps its own rule list, and `extend` gives no reliable answer about how an
+# `extend-select` here would merge with a `select` there. `ruff-strict.toml`
+# already selects `TID`; `ruff.toml` names `TID251` itself.
+#
+# Not a name ruff discovers on its own -- only `ruff.toml`, `.ruff.toml` and
+# `pyproject.toml` are, and a fourth discovered config in this directory would
+# change which of them is the project root.
+#
+# `kr8s.asyncio` is untouched by any of these: `flake8-tidy-imports` matches a
+# fully qualified name, and `kr8s.asyncio.api` is not `asyncio.api`.
+
+[lint.flake8-tidy-imports.banned-api]
+"asyncio.create_subprocess_exec".msg = "Use anyio.run_process or anyio.open_process."
+"asyncio.create_subprocess_shell".msg = "Use anyio.run_process or anyio.open_process."
+"asyncio.run".msg = "Use anyio.run(func, backend=\"asyncio\")."
+"asyncio.to_thread".msg = "Use anyio.to_thread.run_sync(..., abandon_on_cancel=True)."
+"asyncio.sleep".msg = "Use anyio.sleep."
+"asyncio.Lock".msg = "Use anyio.Lock."
+"asyncio.Event".msg = "Use anyio.Event."
+"asyncio.Semaphore".msg = "Use anyio.Semaphore(initial_value), or anyio.Lock for a mutex."
+"asyncio.BoundedSemaphore".msg = "Use anyio.Semaphore(initial_value, max_value=...)."
+"asyncio.Condition".msg = "Use anyio.Condition."
+"asyncio.Queue".msg = "Use anyio.create_memory_object_stream."
+"asyncio.TaskGroup".msg = "Use anyio.create_task_group."
+"asyncio.create_task".msg = "Use a task group's start_soon."
+"asyncio.gather".msg = "Use anyio.create_task_group."
+"asyncio.wait_for".msg = "Use anyio.fail_after or anyio.move_on_after."
+"asyncio.timeout".msg = "Use anyio.fail_after."
+"asyncio.timeout_at".msg = "Use anyio.fail_after against anyio.current_time()."
+"asyncio.get_event_loop".msg = "anyio owns the loop; there is nothing to reach for here."
+"asyncio.new_event_loop".msg = "anyio owns the loop; use anyio.run."
+"asyncio.set_event_loop".msg = "anyio owns the loop; use anyio.run."
+"asyncio.CancelledError".msg = "Use anyio.get_cancelled_exc_class(), which is right on either backend."

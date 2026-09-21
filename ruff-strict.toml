@@ -1,3 +1,7 @@
+# The anyio banned-api table, shared with `ruff.toml`. `TID` below is what
+# reports it.
+extend = "ruff-anyio.toml"
+
 target-version = "py313"
 line-length = 120
 
