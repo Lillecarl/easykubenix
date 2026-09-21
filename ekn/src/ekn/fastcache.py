@@ -204,6 +204,29 @@ def _read(path: Path) -> dict[str, dict[str, str]]:
     }
 
 
+class ClusterIdUnreadableError(RuntimeError):
+    """The `kube-system` Namespace could not be read, or carried no uid."""
+
+
+async def read_cluster_id(api: Api) -> str:
+    """The uid of the `kube-system` Namespace, or raise saying why.
+
+    Separate from `cluster_id` below because two callers want opposite
+    things from the same read. The cache may carry on without an identity;
+    `clusterfence` must refuse, and a refusal that cannot say *why* the
+    cluster could not be named sends the reader looking in the wrong place.
+    """
+    try:
+        namespace = await Namespace.async_get(IDENTITY_NAMESPACE, api=api)
+    except Exception as exc:
+        raise ClusterIdUnreadableError(f"cannot read the {IDENTITY_NAMESPACE} Namespace: {exc}") from exc
+    metadata = namespace.raw.get("metadata")
+    uid = metadata.get("uid") if isinstance(metadata, dict) else None
+    if not isinstance(uid, str) or not uid:
+        raise ClusterIdUnreadableError(f"the {IDENTITY_NAMESPACE} Namespace carries no uid")
+    return uid
+
+
 async def cluster_id(api: Api) -> str | None:
     """The uid of the `kube-system` Namespace, or None if it cannot be read.
 
@@ -212,26 +235,30 @@ async def cluster_id(api: Api) -> str | None:
     applies everything instead.
     """
     try:
-        namespace = await Namespace.async_get(IDENTITY_NAMESPACE, api=api)
-    except Exception as exc:
+        return await read_cluster_id(api)
+    except ClusterIdUnreadableError as exc:
         # Every failure means the same thing here -- this command cannot name
         # the cluster -- and none of them is worth failing an apply over.
         _log.debug("cluster identity unreadable", namespace=IDENTITY_NAMESPACE, error=str(exc))
         return None
-    metadata = namespace.raw.get("metadata")
-    uid = metadata.get("uid") if isinstance(metadata, dict) else None
-    return uid if isinstance(uid, str) and uid else None
 
 
 async def open_cache(
     api: Api,
     *,
     environment: str,
+    cluster: str | None = None,
     assume_unchanged: bool = False,
     never_record: Collection[tuple[str, str, str]] = (),
 ) -> ApplyCache | None:
-    """This cluster's cache, or None when the cluster cannot be identified."""
-    cluster = await cluster_id(api)
+    """This cluster's cache, or None when the cluster cannot be identified.
+
+    *cluster* is the uid when the caller already read it -- `clusterfence`
+    does, on every fenced command -- so an apply asks the API server for the
+    `kube-system` Namespace once rather than twice.
+    """
+    if cluster is None:
+        cluster = await cluster_id(api)
     if cluster is None:
         if assume_unchanged:
             _log.warning(
@@ -260,8 +287,10 @@ __all__ = [
     "FORMAT_VERSION",
     "IDENTITY_NAMESPACE",
     "ApplyCache",
+    "ClusterIdUnreadableError",
     "cache_root",
     "cluster_id",
     "digest",
     "open_cache",
+    "read_cluster_id",
 ]
