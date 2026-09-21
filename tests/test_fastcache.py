@@ -700,3 +700,46 @@ class TestASkipRecordsWhereItLooked:
         store.save()
 
         assert store.path.stat().st_mtime_ns == written
+
+
+class TestTheColdRouteUnderConverge:
+    """`--converge` asks the skip check before it applies, and does not wrap
+    that call. An exception from it kills the whole run rather than one
+    object.
+
+    The cold route made this reachable: before it, the check only built an
+    object this machine had already applied, so its kind was necessarily
+    served. Now every rendered object carries a hash, so the check builds a
+    custom resource whose CustomResourceDefinition is later in this same
+    run -- which is the case `--converge` exists for.
+    """
+
+    SPEC: ClassVar[Any] = {
+        "apiVersion": "converge.test/v1",
+        "kind": "NotYetServed",
+        "metadata": {"name": "cr", "namespace": "default"},
+        "annotations": {},
+    }
+
+    async def test_an_unserved_kind_does_not_kill_the_run(self, tmp_path: Path) -> None:
+        spec = dict(self.SPEC)
+        spec["metadata"] = {
+            "name": "cr",
+            "namespace": "default",
+            "annotations": {HASH_ANNOTATION: "sha256:whatever"},
+        }
+        store = cache(tmp_path, assume_unchanged=True, live={})
+        # The cheap check says yes -- it reads the manifest, which carries a
+        # hash -- so the build happens and discovery fails.
+        assert store.may_skip(spec, field_manager="ekn")
+
+        report, _desired = await converge_direct(
+            [spec],
+            api=FakeApi(resources=[]),  # type: ignore[arg-type]
+            environment="prod",
+            cache=store,
+            settle_seconds=0.0,
+        )
+
+        assert report.skipped == 0
+        assert not report.ok

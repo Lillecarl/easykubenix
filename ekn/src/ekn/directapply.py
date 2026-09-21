@@ -20,6 +20,7 @@ import structlog
 from .apply import (
     DEFAULT_ENVIRONMENT_LABEL,
     DEFAULT_FIELD_MANAGER,
+    KindNotServedError,
     build_object,
     field_manager_for,
     resource_version,
@@ -120,7 +121,17 @@ def _skipper(  # noqa: PLR0913 -- one caller, and each argument is part of what 
         manager = field_manager_for(spec, default=field_manager, unit_managers=unit_managers)
         if not cache.may_skip(spec, field_manager=manager):
             return False
-        obj = await build_object(with_environment_label(spec, environment_label, environment), api)
+        try:
+            obj = await build_object(with_environment_label(spec, environment_label, environment), api)
+        except KindNotServedError:
+            # Nothing of a kind the cluster does not serve can be skipped, and
+            # `converge_queue` does not wrap this call: raising here kills the
+            # whole run rather than one object. The apply step then raises the
+            # same error, where `classify` answers RETRY and the next sweep
+            # gets it -- which is the case `--converge` exists for, a
+            # CustomResourceDefinition and a custom resource of its kind in
+            # one run.
+            return False
         key = (obj.namespace or "none", obj.kind, obj.name)
         if not cache.unchanged(spec, field_manager=manager, key=key):
             return False
