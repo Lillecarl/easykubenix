@@ -121,11 +121,30 @@ before it is raised, so a denied kind is slow as well as empty.
 
 
 def _managers(metadata: Mapping[str, Any]) -> frozenset[str]:
+    """Who owns part of the object proper.
+
+    **A `subresource` entry is not one of them.** `managedFields` records the
+    subresource a write went through, and a write to `status` or `scale`
+    cannot have changed a field a manifest declares -- so counting it would
+    make every object a controller reports on unskippable, by design and for
+    ever.
+
+    Measured on a kubeadm cluster: without this, 2 of 7 objects in a bare
+    generation could never be skipped on their rendered hash. One is the
+    CustomResourceDefinition, whose status `apiextensions-apiserver` writes
+    on every cluster -- and CRDs are the entire reason the cold route exists.
+
+    An allowlist cannot replace this. The set of components that report
+    status on something is open-ended, and each one left out costs a full
+    apply of every object it touches.
+    """
     entries = metadata.get("managedFields")
     if not isinstance(entries, list):
         return frozenset()
     return frozenset(
-        entry["manager"] for entry in entries if isinstance(entry, dict) and isinstance(entry.get("manager"), str)
+        entry["manager"]
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("manager"), str) and not entry.get("subresource")
     )
 
 

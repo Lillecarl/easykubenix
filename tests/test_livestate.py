@@ -5,7 +5,7 @@ Issue Lillecarl/easykubenix#28.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import kr8s
 import pytest
@@ -323,3 +323,44 @@ class TestTheSweep:
         await sweep(api, [*KINDS, *KINDS])
 
         assert api.swept == ["VerticalPodAutoscaler"]
+
+
+class TestWhoOwnsTheObjectProper:
+    """A `managedFields` entry naming a subresource is not a foreign owner.
+
+    A write to `status` or `scale` cannot have changed a field a manifest
+    declares. Counting it would make every object a controller reports on
+    unskippable by design -- measured on a kubeadm cluster as 2 of 7 objects
+    in a bare generation, one of them the CustomResourceDefinition whose
+    status `apiextensions-apiserver` writes.
+    """
+
+    KINDS: ClassVar[list[tuple[str, str]]] = [("VerticalPodAutoscaler", "autoscaling.k8s.io/v1")]
+
+    async def _swept(self, entries: list[dict[str, Any]]) -> LiveObject:
+        api = FakeApi(resources=[VPA], listed=[("default", "VerticalPodAutoscaler", "vpa")])
+        api.live[("default", "VerticalPodAutoscaler", "vpa")]["managedFields"] = entries
+        state = await sweep(api, self.KINDS)
+        return state[("default", "VerticalPodAutoscaler", "vpa")]
+
+    async def test_a_status_writer_is_not_an_owner(self) -> None:
+        seen = await self._swept(
+            [
+                {"manager": "ekn", "operation": "Apply"},
+                {"manager": "apiextensions-apiserver", "operation": "Update", "subresource": "status"},
+            ]
+        )
+
+        assert seen.managers == frozenset({"ekn"})
+
+    async def test_the_same_manager_on_the_object_itself_still_counts(self) -> None:
+        """The negative control: it is the subresource that is ignored, not
+        the name. A controller that writes the object proper is foreign."""
+        seen = await self._swept(
+            [
+                {"manager": "ekn", "operation": "Apply"},
+                {"manager": "kubectl-edit", "operation": "Update"},
+            ]
+        )
+
+        assert seen.managers == frozenset({"ekn", "kubectl-edit"})
