@@ -579,6 +579,29 @@ class _Pass:
     coming back before the API server said to is what it is asking us not
     to do.
     """
+    remaining: Counter[str] = field(default_factory=Counter)
+    """How many objects of each kind this sweep has left to reach."""
+    announced: set[str] = field(default_factory=set)
+    """Kinds `announce` has already logged, so each is said once."""
+
+    async def announce(self, kind: str) -> None:
+        """Log the first object of *kind* this sweep reaches.
+
+        The only thing a converging run says while it is running, and it
+        exists to be aligned against something else. A window of about
+        `concurrency` adjacent objects is in flight, so this is the front
+        of that window rather than a boundary -- near enough to put a
+        measurement taken beside the run on the right kind, which is what
+        it is for. Reported from nixlab2, where an apiserver gained 982
+        MiB in one 15-second sampling window of a 74-second apply and the
+        log held nothing to say which objects were in flight at the time.
+        """
+        async with self.lock:
+            if kind in self.announced:
+                return
+            self.announced.add(kind)
+            count = self.remaining[kind]
+        _log.info("converging kind", kind=kind, objects=count)
 
 
 async def converge_queue(  # noqa: PLR0913 -- every argument is an injected seam; see the Protocols above
@@ -640,7 +663,11 @@ async def converge_queue(  # noqa: PLR0913 -- every argument is an injected seam
     while pending:
         for spec in pending:
             attempts[object_key(spec)] += 1
-        state = _Pass(lock=anyio.Lock(), last_progress=last_progress)
+        state = _Pass(
+            lock=anyio.Lock(),
+            last_progress=last_progress,
+            remaining=Counter(str(spec.get("kind", "?")) for spec in pending),
+        )
         # Buffered to the whole sweep and closed before any worker starts, so
         # a send never blocks and `receive_nowait` ends cleanly on EndOfStream.
         # Nothing is put back during a sweep: a retry goes to the next one,
@@ -718,6 +745,7 @@ async def _worker(  # noqa: PLR0913 -- the shared state of one sweep, passed rat
             spec = receive.receive_nowait()
         except (anyio.EndOfStream, anyio.WouldBlock):
             return
+        await state.announce(str(spec.get("kind", "?")))
         await _process(
             spec,
             state=state,

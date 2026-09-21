@@ -23,6 +23,7 @@ import anyio.lowlevel
 import httpx
 import kr8s
 import pytest
+from structlog.testing import capture_logs
 
 from ekn.apply import KindNotServedError
 from ekn.converge import (
@@ -664,6 +665,33 @@ class TestTheQueue:
         await converge_queue([manifest(name=f"cm{i}") for i in range(5)], apply=apply, concurrency=1)
 
         assert peak[0] == 1
+
+    async def test_it_names_each_kind_as_it_reaches_it(self) -> None:
+        """The only thing a converging run says while it is running.
+
+        It exists to be lined up against a measurement taken beside the
+        run -- on nixlab2 an apiserver gained 982 MiB inside one sampling
+        window and nothing in the log said which objects were in flight.
+        So what this pins is that every kind is named, once, with how many
+        of it there are.
+        """
+
+        async def apply(_spec: Manifest) -> Any:
+            return applied_object()
+
+        specs = [
+            *[manifest(kind="CustomResourceDefinition", name=f"crd{i}") for i in range(3)],
+            *[manifest(kind="ConfigMap", name=f"cm{i}") for i in range(2)],
+        ]
+        with capture_logs() as logs:
+            report = await converge_queue(specs, apply=apply, concurrency=1)
+
+        assert report.applied == 5
+        said = [entry for entry in logs if entry["event"] == "converging kind"]
+        assert [(entry["kind"], entry["objects"]) for entry in said] == [
+            ("CustomResourceDefinition", 3),
+            ("ConfigMap", 2),
+        ], "each kind once, in the order the queue reached it, with its count"
 
 
 class TestFastMode:
