@@ -24,6 +24,8 @@ import pathlib
 import shutil
 import subprocess
 
+import pytest
+
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 #: Long enough for a nanopynix session to start and fail.
@@ -86,6 +88,32 @@ def test_a_usage_error_is_not_success() -> None:
     """argparse's own exit, kept here so the three ways `ekn` can refuse to
     do something are pinned in one place."""
     assert _ekn("pushcache", "--to", "file:///nowhere").returncode != 0
+
+
+@pytest.mark.parametrize("command", ["diff", "kubeapply", "reclaim", "clusterdiff", "secrets"])
+def test_an_unrecognised_argument_is_not_success(command: str) -> None:
+    """A different argparse path from the one above: that one is a *missing*
+    required argument, rejected while the parser builds its namespace; this
+    is a *surplus* one, which `parse_args` reports afterwards.
+
+    Reported from a live repository as exiting 0 on `ekn diff`, which would
+    make a `&&` chain or a CI step carry on past a command that did nothing.
+    Not reproduced here on either build -- the dev environment's `ekn` and
+    the wrapped release `ekn` both exit 2 -- so this pins the path rather
+    than fixing anything.
+
+    Every fenced command is covered, because that is what makes the fence
+    worth having: a refusal nobody's exit code carries is not a refusal.
+
+    A flag no command has, rather than the `--confirm-context` that found
+    it: that one is real on `kubeapply`, so there it is recognised and the
+    command runs -- which is how a person reaches this by accident in the
+    first place, and is no use as a probe.
+    """
+    result = _ekn(command, "--file", ".", "--no-such-flag", "somewhere")
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "unrecognized arguments" in result.stderr
 
 
 def test_a_failed_git_push_is_not_success(tmp_path: pathlib.Path) -> None:
