@@ -24,6 +24,10 @@ from ekn.clusterfence import OVERRIDE_FLAG, require
 LIVE = "3b2a1f0e-9d8c-4b7a-8e6f-5d4c3b2a1f0e"
 OTHER = "00000000-1111-2222-3333-444444444444"
 
+#: `ekn.environment`. On every message, because a bare uid says only that the
+#: fence fired -- not which of two configurations the operator was pointed at.
+ENV = "nixlab2"
+
 
 @pytest.fixture
 def cluster(monkeypatch: pytest.MonkeyPatch):
@@ -53,13 +57,13 @@ class TestDeclared:
         apply asks for the Namespace once and not twice."""
         cluster(LIVE)
 
-        assert await require(FakeApi(), LIVE) == LIVE  # type: ignore[arg-type]
+        assert await require(FakeApi(), LIVE, environment=ENV) == LIVE  # type: ignore[arg-type]
 
     async def test_a_mismatch_names_both(self, cluster) -> None:
         cluster(LIVE)
 
         with pytest.raises(SystemExit) as caught:
-            await require(FakeApi(), OTHER)  # type: ignore[arg-type]
+            await require(FakeApi(), OTHER, environment=ENV)  # type: ignore[arg-type]
 
         message = str(caught.value)
         assert OTHER in message
@@ -73,7 +77,7 @@ class TestDeclared:
         cluster(LIVE)
 
         with pytest.raises(SystemExit) as caught:
-            await require(FakeApi(), OTHER, override=True)  # type: ignore[arg-type]
+            await require(FakeApi(), OTHER, environment=ENV, override=True)  # type: ignore[arg-type]
 
         assert OVERRIDE_FLAG in str(caught.value), "the message must say the flag does not apply here"
 
@@ -84,7 +88,7 @@ class TestDeclared:
         cluster(LIVE)
 
         with pytest.raises(SystemExit) as caught:
-            await require(FakeApi(), OTHER)  # type: ignore[arg-type]
+            await require(FakeApi(), OTHER, environment=ENV)  # type: ignore[arg-type]
 
         assert "rebuilt" in str(caught.value)
 
@@ -94,7 +98,7 @@ class TestNotDeclared:
         cluster(LIVE)
 
         with pytest.raises(SystemExit) as caught:
-            await require(FakeApi(), None)  # type: ignore[arg-type]
+            await require(FakeApi(), None, environment=ENV)  # type: ignore[arg-type]
 
         message = str(caught.value)
         assert f'ekn.clusterUid = "{LIVE}";' in message, "adopting must be a copy-paste, not a lookup"
@@ -104,7 +108,7 @@ class TestNotDeclared:
         cluster(LIVE)
 
         with capture_logs() as logs:
-            assert await require(FakeApi(), None, override=True) == LIVE  # type: ignore[arg-type]
+            assert await require(FakeApi(), None, environment=ENV, override=True) == LIVE  # type: ignore[arg-type]
 
         warnings = [entry for entry in logs if entry["log_level"] == "warning"]
         assert len(warnings) == 1
@@ -119,7 +123,7 @@ class TestUnreadable:
         cluster(None, error='namespaces "kube-system" is forbidden')
 
         with pytest.raises(SystemExit) as caught:
-            await require(FakeApi(), LIVE)  # type: ignore[arg-type]
+            await require(FakeApi(), LIVE, environment=ENV)  # type: ignore[arg-type]
 
         assert "forbidden" in str(caught.value), "the reason it could not be read has to reach the operator"
 
@@ -127,7 +131,7 @@ class TestUnreadable:
         cluster(None)
 
         with pytest.raises(SystemExit):
-            await require(FakeApi(), None, override=True)  # type: ignore[arg-type]
+            await require(FakeApi(), None, environment=ENV, override=True)  # type: ignore[arg-type]
 
     async def test_a_namespace_with_no_uid_is_unreadable_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Not an empty string compared against a declared value, which would
@@ -144,9 +148,54 @@ class TestUnreadable:
         monkeypatch.setattr("ekn.fastcache.Namespace", _Namespace)
 
         with pytest.raises(SystemExit) as caught:
-            await require(FakeApi(), LIVE)  # type: ignore[arg-type]
+            await require(FakeApi(), LIVE, environment=ENV)  # type: ignore[arg-type]
 
         assert "no uid" in str(caught.value)
+
+
+class TestTheEnvironmentIsOnEveryMessage:
+    """Asked for by the operator this fence exists for: "a bare uid mismatch
+    tells me the fence fired; the environment name tells me which of two
+    configurations I was pointed at, which is the thing I actually got
+    wrong."
+
+    One test per refusal rather than one for the pair, because a message that
+    drops it does so on its own and the others would still pass.
+    """
+
+    async def test_on_a_mismatch(self, cluster) -> None:
+        cluster(LIVE)
+
+        with pytest.raises(SystemExit) as caught:
+            await require(FakeApi(), OTHER, environment=ENV)  # type: ignore[arg-type]
+
+        assert ENV in str(caught.value)
+
+    async def test_on_an_undeclared_cluster(self, cluster) -> None:
+        cluster(LIVE)
+
+        with pytest.raises(SystemExit) as caught:
+            await require(FakeApi(), None, environment=ENV)  # type: ignore[arg-type]
+
+        assert ENV in str(caught.value)
+
+    async def test_on_an_unreadable_one(self, cluster) -> None:
+        """The case where it carries the most: nothing else in the message
+        identifies what was being applied."""
+        cluster(None)
+
+        with pytest.raises(SystemExit) as caught:
+            await require(FakeApi(), LIVE, environment=ENV)  # type: ignore[arg-type]
+
+        assert ENV in str(caught.value)
+
+    async def test_and_on_the_override_warning(self, cluster) -> None:
+        cluster(LIVE)
+
+        with capture_logs() as logs:
+            await require(FakeApi(), None, environment=ENV, override=True)  # type: ignore[arg-type]
+
+        assert logs[0]["environment"] == ENV
 
 
 def test_the_flag_name_is_what_the_cli_declares() -> None:

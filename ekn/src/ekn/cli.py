@@ -216,6 +216,7 @@ class FencedCommand(AttrCommand):
         return await clusterfence.require(
             api,
             cfg.cluster_uid,
+            environment=cfg.environment,
             override=self.i_dont_know_which_cluster_this_is,
         )
 
