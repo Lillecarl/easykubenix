@@ -1295,7 +1295,9 @@ class KubeApply(CachePushCommand, FencedCommand):
     )
     confirm_context: str | None = opt(
         None,
-        help="Prompt for confirmation unless the current kubectl context ends with this name.",
+        help="Removed. Declare ekn.clusterUid instead, which checks the cluster rather than the "
+        "operator's local name for one. Still accepted so that a caller passing it gets that "
+        "sentence rather than 'unrecognized arguments'.",
     )
     kubeconfig_from_tofu: str | None = opt(
         None,
@@ -1358,28 +1360,20 @@ class KubeApply(CachePushCommand, FencedCommand):
             raise SystemExit(1) from exc
 
     async def run(self) -> None:
+        # Declared and refused, rather than deleted. A caller who scripted it
+        # would otherwise get argparse's "unrecognized arguments", which is
+        # loud and non-zero but says nothing about the replacement. The same
+        # courtesy `lib.mkRemovedOptionModule` gives a removed Nix option.
         if self.confirm_context is not None:
-            # **It reads the *ambient* context.** `--kubeconfig-from-tofu`
-            # supplies a different kubeconfig further down, and this check
-            # runs here -- before the apply, and before `ekn.cacheTo` is
-            # pushed -- so it cannot see that file. Checking the ambient one
-            # and reporting it as the apply's target is worse than not
-            # checking: it answers confidently about a cluster this run will
-            # not touch.
-            if self.kubeconfig_from_tofu is not None:
-                raise SystemExit(
-                    "--confirm-context cannot check a --kubeconfig-from-tofu apply: it reads the "
-                    "ambient kubectl context, and the credential this run uses comes out of a tofu "
-                    "output instead.\nDeclare ekn.clusterUid, which checks the cluster the apply "
-                    "actually reaches."
-                )
-            rc, out, _ = await exec_capture("kubectl", "config", "current-context")
-            current = out.strip()
-            if rc != 0 or not current.endswith(self.confirm_context):
-                _log.warning(f"current kubectl context is {current!r}, not *{self.confirm_context}")
-                answer = await anyio.to_thread.run_sync(input, "Continue anyway? [y/N] ")
-                if answer.strip().lower() != "y":
-                    raise SystemExit("Aborted.")
+            raise SystemExit(
+                "--confirm-context has been removed. Declare ekn.clusterUid instead.\n\n"
+                "It compared the operator's current kubectl context against a name, which could "
+                "not see two things that matter: a kubeconfig supplied by --kubeconfig-from-tofu, "
+                "and a KUBECONFIG that was never set for `ekn` at all. The second is how an "
+                "environment reached the wrong cluster while every kubectl in the same session "
+                "was pointed correctly.\n"
+                "ekn.clusterUid asks the cluster which one it is, so neither gets past it."
+            )
 
         uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
         try:
