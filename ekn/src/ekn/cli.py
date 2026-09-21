@@ -1139,7 +1139,18 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
     finally:
         if cache is not None:
             cache.save()
-            _log.info("apply cache", skipped=cache.skipped, recorded=cache.recorded, path=str(cache.path))
+            # `assume_unchanged` on the line, because without it `skipped=0`
+            # has two readings and the operator cannot tell them apart:
+            # everything changed, or the flag was never passed. Reported
+            # after a full apply of 1235 objects took an apiserver to 4 GB
+            # and the `skipped=0` in the log said nothing about why.
+            _log.info(
+                "apply cache",
+                skipped=cache.skipped,
+                recorded=cache.recorded,
+                assume_unchanged=assume_unchanged,
+                path=str(cache.path),
+            )
 
 
 def _uncacheable(cfg: KubeApplyConfigResult) -> set[tuple[str, str, str]]:
