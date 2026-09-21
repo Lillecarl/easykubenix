@@ -34,7 +34,6 @@ import kr8s
 import structlog
 
 from .apply import DEFAULT_ENVIRONMENT_LABEL, DEFAULT_UNIT_LABEL, KindNotServedError, build_object
-from .converge import object_key
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -284,26 +283,25 @@ def desired_hash(spec: Manifest) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def skippable(  # noqa: PLR0913 -- four conditions and two manager sets; the docstring is the argument list
+def skippable(
     spec: Manifest,
-    live: Mapping[tuple[str, str, str], LiveObject],
+    seen: LiveObject | None,
     *,
     environment: str,
-    assume_unchanged: bool,
     engine_managers: Iterable[str],
     ours: Iterable[str] = OUR_MANAGERS,
 ) -> bool:
-    """True when this object may be left alone.
+    """True when this object may be left alone, knowing only what the sweep saw.
 
-    Four conditions, and the last two are the ones that are easy to leave
-    out:
+    The answer for an object no record on this machine covers: a first run, a
+    new checkout, a cache whose format moved. Three conditions, and the last
+    two are the ones that are easy to leave out:
 
-    1. the operator asked for it;
-    2. the live hash equals the rendered one;
-    3. **the live object already carries `ekn.dev/environment=<env>`;**
-    4. **no manager outside *ours* and *engine_managers* owns part of it.**
+    1. the live hash equals the rendered one;
+    2. **the live object already carries `ekn.dev/environment=<env>`;**
+    3. **no manager outside *ours* and *engine_managers* owns part of it.**
 
-    Without the third, a fast run skips objects a GitOps engine applied and
+    Without the second, a fast run skips objects a GitOps engine applied and
     `ekn` never stamped -- and a later `--prune` selects by exactly that
     label, so it deletes objects that are present and correct. The condition
     also makes the first converge honest: it applies every such object once,
@@ -313,30 +311,34 @@ def skippable(  # noqa: PLR0913 -- four conditions and two manager sets; the doc
     reading of this design had them mutually exclusive; the label condition
     is exact where that was merely conservative.
 
-    **Without the fourth, content drift is invisible.** Both hashes are
-    annotations: the rendered one from the render, the live one from what
-    `ekn` wrote when it last applied. Neither is recomputed from live
-    content, so a `kubectl edit` that changes a Deployment's image leaves
-    the annotation alone, the hashes match, and the object is skipped for
-    ever. What that edit does leave is a field manager -- `kubectl-edit`,
-    or `kubectl-client-side-apply` for an apply -- and the same sweep that
-    reads the hash reads those. Reported by the operator this mode exists
-    for.
+    **Without the third, content drift is invisible.** Both hashes are
+    annotations: the rendered one from the render, the live one from what was
+    applied. Neither is recomputed from live content, so a `kubectl edit` that
+    changes a Deployment's image leaves the annotation alone and the hashes
+    match. What that edit does leave is a field manager -- `kubectl-edit`, or
+    `kubectl-client-side-apply` for an apply -- and the same sweep that reads
+    the hash reads those. Reported by the operator this mode exists for.
 
-    *engine_managers* has no default on purpose. It decides how strict
-    this is, and getting it wrong is not symmetric: too narrow makes
-    nearly everything unskippable, because `kube-controller-manager` owns
-    fields on most objects by design, and the mode quietly stops being
-    fast. See `foreign_owners`, which answers the same question for
-    reporting.
+    **And one case even the third cannot see: a write under a manager we
+    already allow.** `ekn` itself is one, so `kubectl apply
+    --field-manager=ekn` leaves nothing this function can read. `fastcache`
+    catches it from the next run, because a skip here records where the
+    object was; a write that happened before this machine ever saw the object
+    is invisible to both, for ever.
+
+    *seen* is the sweep's record, keyed by the **built** object's identity
+    rather than the manifest's -- a manifest naming no namespace lives in the
+    API's default one. The caller does that lookup, because only the caller
+    has built the object.
+
+    *engine_managers* has no default on purpose. It decides how strict this
+    is, and getting it wrong is not symmetric: too narrow makes nearly
+    everything unskippable, because `kube-controller-manager` owns fields on
+    most objects by design, and the mode quietly stops being fast. See
+    `foreign_owners`, which answers the same question for reporting.
     """
-    if not assume_unchanged:
-        return False
     wanted = desired_hash(spec)
-    if wanted is None:
-        return False
-    seen = live.get(object_key(spec))
-    if seen is None or seen.manifest_hash != wanted:
+    if wanted is None or seen is None or seen.manifest_hash != wanted:
         return False
     if seen.environment != environment:
         return False

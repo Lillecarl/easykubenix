@@ -299,7 +299,7 @@ async def check_idempotent(cp: Machine, settings: dict[str, Any]) -> None:
 
 
 def cache_report(output: str) -> dict[str, int]:
-    """The `apply cache skipped=N recorded=M` line, as a dict of ints.
+    """The `apply cache skipped=N recorded=M cold=K` line, as a dict of ints.
 
     Read from the log rather than from a file, because the file is the thing
     under test: a run that wrote the cache and skipped nothing, and a run that
@@ -314,7 +314,7 @@ def cache_report(output: str) -> dict[str, int]:
         if "apply cache" not in line:
             continue
         found = {}
-        for field in ("skipped", "recorded"):
+        for field in ("skipped", "recorded", "cold"):
             marker = f"{field}="
             if marker in line:
                 found[field] = int(line.split(marker, 1)[1].split()[0].strip("'\""))
@@ -324,33 +324,47 @@ def cache_report(output: str) -> dict[str, int]:
 
 
 async def check_assume_unchanged(cp: Machine, settings: dict[str, Any]) -> None:
-    """`--assume-unchanged` against a real API server: the sweep, and the gate.
+    """`--assume-unchanged` against a real API server: both routes to a skip.
 
     Nothing else here can answer this.  The unit tests describe the gate
-    against a double this repository wrote, and the two things it depends on
-    are the API server's own behaviour: that a
-    `PartialObjectMetadataList` LIST at `resourceVersion=0` answers with
-    every object's metadata, and that a server-side apply which changes
-    nothing does not move a `resourceVersion`.  If either is untrue, the
-    first run below skips nothing and the second re-applies everything.
+    against a double this repository wrote, and what it rests on belongs to
+    the API server: that a `PartialObjectMetadataList` LIST at
+    `resourceVersion=0` answers with every object's metadata, and that a
+    server-side apply which changes nothing does not move a
+    `resourceVersion`.
 
-    Three runs, and the third is the one that matters.  A gate that only
-    proved the skip would pass just as well on a cache that skips
-    unconditionally -- which is the failure this whole design exists to
-    avoid.
+    Four runs, because there are two ways to decide a skip and they have to
+    be told apart:
+
+    1. **cold** -- nothing recorded on this machine.  Earlier checks applied
+       gen1 through an ordinary apply, so the objects are on the cluster
+       carrying the hash the render stamped and this environment's label.
+       Every skip here is decided by that, and `cold=` counts them.
+    2. **recorded** -- the cold run wrote down where it found each object, so
+       this run decides on the `resourceVersion` instead and `cold=` is zero.
+       That is what makes the write below visible at all.
+    3. **written** -- somebody edits one object, and exactly that object is
+       sent again.
     """
     environment = settings["environment"]
     namespace = settings["namespace"]
 
-    primed = cache_report(await apply(cp, settings, "gen1", environment, assume_unchanged=True))
-    expect("the first --assume-unchanged run skipped something", primed["skipped"], 0)
-
-    skipping = cache_report(await apply(cp, settings, "gen1", environment, assume_unchanged=True))
-    if skipping["skipped"] == 0:
+    cold = cache_report(await apply(cp, settings, "gen1", environment, assume_unchanged=True))
+    if cold["skipped"] == 0:
         raise MachineError(
-            f"the second --assume-unchanged run skipped nothing, of the {primed['recorded']} objects the "
-            "first recorded. Either the sweep read no metadata, or a no-op apply moved a resourceVersion."
+            "the first --assume-unchanged run skipped nothing. The render stamps every object with "
+            "ekn.dev/manifest-hash and these were applied earlier in this test, so a cold run has "
+            "everything it needs: either the sweep read no metadata, or the hash disagrees with the render."
         )
+    expect("skips decided by the rendered hash", cold["cold"], cold["skipped"])
+    expect("a cold run sent anything", cold["recorded"], 0)
+
+    warm = cache_report(await apply(cp, settings, "gen1", environment, assume_unchanged=True))
+    expect("the second run skipped a different number", warm["skipped"], cold["skipped"])
+    # The whole of why a skip records where it looked. Without it this run
+    # would take the cold route again, and a write under a manager that route
+    # allows would never be seen.
+    expect("skips still decided by the rendered hash", warm["cold"], 0)
     settled = await inventory(cp, settings, environment)
 
     # Somebody else writes one object.  Only its resourceVersion moves -- the
@@ -366,9 +380,13 @@ async def check_assume_unchanged(cp: Machine, settings: dict[str, Any]) -> None:
     # Deployment's own controller writes its status, and a run that skipped
     # one object fewer because of that would otherwise read as this working.
     expect("what the edit moved", ("ConfigMap", namespace, "settings") in moved, True)
-    expect("objects sent again", skipping["skipped"] - edited["skipped"], len(moved))
+    expect("objects sent again", warm["skipped"] - edited["skipped"], len(moved))
     expect("objects recorded again", edited["recorded"], len(moved))
-    print(f"[kubeapply] {edited['skipped']} skipped, {len(moved)} written since and applied again", flush=True)
+    print(
+        f"[kubeapply] {cold['cold']} skipped cold, {edited['skipped']} skipped on record, "
+        f"{len(moved)} written since and applied again",
+        flush=True,
+    )
 
 
 async def check_prune(cp: Machine, settings: dict[str, Any]) -> None:

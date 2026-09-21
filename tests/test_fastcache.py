@@ -27,7 +27,7 @@ from test_apply import FakeApi
 from ekn.apply import apply_and_prune
 from ekn.directapply import converge_direct
 from ekn.fastcache import FORMAT_VERSION, ApplyCache, Entry, cache_root, cluster_id, digest, open_cache
-from ekn.livestate import LiveObject
+from ekn.livestate import HASH_ANNOTATION, LiveObject, manifest_hash
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -547,3 +547,156 @@ class TestTheCredentialRuleOnEveryPath:
         decrypted = {key: value for key, value in self.ENCRYPTED.items() if key != "sops"}
 
         assert _uncacheable_objects([decrypted]) == set()
+
+
+#: What the render stamps, and what the cold route compares against.
+STAMPED = manifest_hash(manifest())
+
+
+def stamped(**data: Any) -> Manifest:
+    """A manifest as the render produces it: carrying its own hash."""
+    spec = manifest(**data)
+    metadata = spec["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["annotations"] = {HASH_ANNOTATION: manifest_hash(spec)}
+    return spec
+
+
+def on_cluster(
+    hash_value: str | None = STAMPED,
+    *,
+    environment: str = "prod",
+    managers: frozenset[str] = frozenset({"ekn"}),
+    version: str = LIVE,
+) -> Any:
+    """A sweep result for an object `ekn` applied and this machine has not."""
+    return {
+        KEY: LiveObject(
+            key=KEY,
+            manifest_hash=hash_value,
+            environment=environment,
+            managers=managers,
+            resource_version=version,
+        )
+    }
+
+
+class TestTheColdRoute:
+    """An object this machine has never applied, decided from the rendered
+    hash alone.
+
+    This is the half a local record cannot answer: a first run, a new
+    checkout, a cache whose format moved, or an object another machine or a
+    GitOps engine applied. Measured on nixlab2, it is the difference between
+    +922 MiB of apiserver memory and +3 MiB.
+    """
+
+    def test_a_matching_hash_is_skipped_with_no_record(self) -> None:
+        store = cache_for_test(assume_unchanged=True, live=on_cluster())
+
+        assert store.unchanged(stamped(), field_manager="ekn", key=KEY)
+        assert store.cold == 1
+
+    def test_a_changed_render_is_not_skipped(self) -> None:
+        """The negative control. The live hash is what the last applier wrote;
+        a render that produces different bytes produces a different hash."""
+        store = cache_for_test(assume_unchanged=True, live=on_cluster())
+
+        assert not store.unchanged(stamped(a="2"), field_manager="ekn", key=KEY)
+
+    def test_an_object_this_environment_never_stamped_is_not_skipped(self) -> None:
+        """`--prune` selects by `ekn.dev/environment`, so skipping an object
+        that carries somebody else's stamp -- or none -- leaves the next prune
+        deleting something present and correct."""
+        store = cache_for_test(assume_unchanged=True, live=on_cluster(environment=None))
+
+        assert not store.unchanged(stamped(), field_manager="ekn", key=KEY)
+
+    def test_a_foreign_manager_is_not_skipped(self) -> None:
+        """Both hashes are annotations, so a `kubectl edit` leaves them
+        matching. The manager it leaves behind is the only trace."""
+        store = cache_for_test(assume_unchanged=True, live=on_cluster(managers=frozenset({"ekn", "kubectl-edit"})))
+
+        assert not store.unchanged(stamped(), field_manager="ekn", key=KEY)
+
+    def test_an_expected_manager_does_not_block_a_skip(self) -> None:
+        """`kube-controller-manager` owns fields on most objects by design.
+        Counting it would make the mode quietly stop being fast."""
+        store = cache_for_test(
+            assume_unchanged=True,
+            live=on_cluster(managers=frozenset({"ekn", "kube-controller-manager"})),
+            engine_managers=frozenset({"kube-controller-manager"}),
+        )
+
+        assert store.unchanged(stamped(), field_manager="ekn", key=KEY)
+
+    def test_an_unstamped_render_is_not_skipped(self) -> None:
+        """A configuration rendered before the annotation existed, and every
+        SOPS or seeded object, which the render deliberately leaves bare."""
+        store = cache_for_test(assume_unchanged=True, live=on_cluster())
+
+        assert not store.unchanged(manifest(), field_manager="ekn", key=KEY)
+
+    def test_it_costs_no_build_when_it_cannot_apply(self) -> None:
+        """`may_skip` is what `--converge` asks before building an object, so
+        an unstamped object with no record must answer no here -- otherwise
+        every not-yet-served kind pays an uncached discovery per attempt."""
+        store = cache_for_test(assume_unchanged=True, live=on_cluster())
+
+        assert not store.may_skip(manifest(), field_manager="ekn")
+        assert store.may_skip(stamped(), field_manager="ekn")
+
+
+class TestASkipRecordsWhereItLooked:
+    """Without this the two mechanisms do not compose.
+
+    An object the cold route skips is never applied, so it would never get a
+    `resourceVersion`, so the recorded route would never engage for it -- and
+    a write under a manager the cold route allows would be invisible for ever
+    rather than until the next run.
+    """
+
+    def test_a_cold_skip_records_the_version_the_sweep_read(self) -> None:
+        store = cache_for_test(assume_unchanged=True, live=on_cluster())
+        store.unchanged(stamped(), field_manager="ekn", key=KEY)
+
+        assert store.entries["prod"]["default/ConfigMap/cm"] == Entry(
+            digest=digest(stamped(), field_manager="ekn"), resource_version=LIVE
+        )
+
+    def test_the_next_run_decides_on_the_record_instead(self) -> None:
+        """Which is what makes a same-manager write visible from then on: the
+        cold route would still say yes, and the recorded route is asked."""
+        store = cache_for_test(assume_unchanged=True, live=on_cluster())
+        store.unchanged(stamped(), field_manager="ekn", key=KEY)
+
+        later = ApplyCache(
+            path=store.path,
+            environment="prod",
+            entries=store.entries,
+            assume_unchanged=True,
+            live=on_cluster(version="2"),
+        )
+
+        assert not later.unchanged(stamped(), field_manager="ekn", key=KEY)
+        assert later.cold == 0
+
+    def test_a_record_is_never_rescued_by_the_annotation(self) -> None:
+        """The failure this whole gate exists to prevent. A write under our
+        own manager name leaves the rendered hash matching and no foreign
+        manager -- so the cold route would skip it, and must not be asked."""
+        store = cache_for_test(assume_unchanged=True, live=on_cluster(version="2"))
+        store.record(stamped(), field_manager="ekn", resource_version=LIVE)
+
+        assert not store.unchanged(stamped(), field_manager="ekn", key=KEY)
+
+    def test_a_skip_that_changes_nothing_does_not_rewrite_the_file(self, tmp_path: Path) -> None:
+        store = cache(tmp_path, assume_unchanged=True, live=on_cluster())
+        store.record(stamped(), field_manager="ekn", resource_version=LIVE)
+        store.save()
+        written = store.path.stat().st_mtime_ns
+
+        assert store.unchanged(stamped(), field_manager="ekn", key=KEY)
+        store.save()
+
+        assert store.path.stat().st_mtime_ns == written

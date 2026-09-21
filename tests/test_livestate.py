@@ -93,26 +93,26 @@ class TestTheHash:
 
 
 class TestSkipping:
-    """Three conditions, and the third is the one easily left out."""
+    """Three conditions, and the third is the one easily left out.
 
-    def test_it_never_skips_without_the_flag(self) -> None:
+    `assume_unchanged` is not among them: whether the operator asked is
+    `fastcache`'s question, and this one is only ever asked about an object
+    no record on this machine covers.
+    """
+
+    def test_a_matching_hash_is_skipped(self) -> None:
         spec = manifest(hash_value="sha256:x")
-        state = {("default", "ConfigMap", "a"): live(hash_value="sha256:x")}
 
-        assert not skippable(spec, state, environment=ENV, assume_unchanged=False, engine_managers=ENGINE)
-        assert skippable(spec, state, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
+        assert skippable(spec, live(hash_value="sha256:x"), environment=ENV, engine_managers=ENGINE)
 
     def test_a_changed_hash_is_never_skipped(self) -> None:
         """Negative control: the one thing fast mode must never get wrong."""
         spec = manifest(hash_value="sha256:new")
-        state = {("default", "ConfigMap", "a"): live(hash_value="sha256:old")}
 
-        assert not skippable(spec, state, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
+        assert not skippable(spec, live(hash_value="sha256:old"), environment=ENV, engine_managers=ENGINE)
 
     def test_an_object_the_cluster_does_not_have_is_never_skipped(self) -> None:
-        assert not skippable(
-            manifest(hash_value="sha256:x"), {}, environment=ENV, assume_unchanged=True, engine_managers=ENGINE
-        )
+        assert not skippable(manifest(hash_value="sha256:x"), None, environment=ENV, engine_managers=ENGINE)
 
     def test_an_unstamped_object_is_applied_once(self) -> None:
         """The condition that dissolves the fast-mode/prune conflict.
@@ -124,24 +124,23 @@ class TestSkipping:
         converge after skips it.
         """
         spec = manifest(hash_value="sha256:x")
-        unstamped = {("default", "ConfigMap", "a"): live(hash_value="sha256:x", environment=None)}
-        stamped = {("default", "ConfigMap", "a"): live(hash_value="sha256:x")}
 
-        assert not skippable(spec, unstamped, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
-        assert skippable(spec, stamped, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
+        assert not skippable(
+            spec, live(hash_value="sha256:x", environment=None), environment=ENV, engine_managers=ENGINE
+        )
+        assert skippable(spec, live(hash_value="sha256:x"), environment=ENV, engine_managers=ENGINE)
 
     def test_another_environments_stamp_does_not_count(self) -> None:
         spec = manifest(hash_value="sha256:x")
-        state = {("default", "ConfigMap", "a"): live(hash_value="sha256:x", environment="other")}
 
-        assert not skippable(spec, state, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
+        assert not skippable(
+            spec, live(hash_value="sha256:x", environment="other"), environment=ENV, engine_managers=ENGINE
+        )
 
     def test_a_render_with_no_hash_is_never_skipped(self) -> None:
-        """A configuration rendered before the annotation existed. Applying
-        it is the only correct answer."""
-        state = {("default", "ConfigMap", "a"): live(hash_value="sha256:x")}
-
-        assert not skippable(manifest(), state, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
+        """A configuration rendered before the annotation existed, and every
+        object the render deliberately leaves bare: SOPS-encrypted, seeded."""
+        assert not skippable(manifest(), live(hash_value="sha256:x"), environment=ENV, engine_managers=ENGINE)
 
     @pytest.mark.parametrize("manager", ["kubectl-edit", "kubectl-client-side-apply", "some-operator"])
     def test_a_foreign_manager_makes_it_unskippable(self, manager: str) -> None:
@@ -155,9 +154,9 @@ class TestSkipping:
         for.
         """
         spec = manifest(hash_value="sha256:x")
-        state = {("default", "ConfigMap", "a"): live(hash_value="sha256:x", managers=frozenset({"ekn", manager}))}
+        seen = live(hash_value="sha256:x", managers=frozenset({"ekn", manager}))
 
-        assert not skippable(spec, state, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
+        assert not skippable(spec, seen, environment=ENV, engine_managers=ENGINE)
 
     def test_the_engine_and_its_controllers_do_not_block_a_skip(self) -> None:
         """The other half, and the one that decides whether this is usable.
@@ -168,14 +167,12 @@ class TestSkipping:
         says is expected, and expected owners do not block.
         """
         spec = manifest(hash_value="sha256:x")
-        state = {
-            ("default", "ConfigMap", "a"): live(
-                hash_value="sha256:x",
-                managers=frozenset({"ekn", "kube-controller-manager", "argocd-controller"}),
-            )
-        }
+        seen = live(
+            hash_value="sha256:x",
+            managers=frozenset({"ekn", "kube-controller-manager", "argocd-controller"}),
+        )
 
-        assert skippable(spec, state, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
+        assert skippable(spec, seen, environment=ENV, engine_managers=ENGINE)
 
 
 class TestForeignOwners:

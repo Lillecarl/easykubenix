@@ -58,8 +58,9 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from kr8s.asyncio.objects import Namespace
 
+from . import livestate
 from .converge import object_key
-from .livestate import canonical_json
+from .livestate import canonical_json, desired_hash
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
@@ -144,9 +145,14 @@ class ApplyCache:
     apply. `None` means no sweep ran, and then **nothing is skippable** --
     this cache alone cannot tell a correct object from one somebody edited.
 
-    `skipped` and `recorded` are counted here because both apply paths funnel
-    through these two methods, and the run has to be able to say how much it
-    left alone.
+    `engine_managers` is who else is expected to own fields on these objects:
+    the GitOps engine, and the controllers that write to nearly everything. It
+    only ever loosens the cold route, and an empty set makes that route strict
+    rather than wrong -- see `livestate.skippable`.
+
+    `skipped`, `cold` and `recorded` are counted here because every apply path
+    funnels through these methods, and the run has to be able to say how much
+    it left alone and on which evidence.
     """
 
     path: Path
@@ -155,10 +161,15 @@ class ApplyCache:
     assume_unchanged: bool = False
     never_record: frozenset[tuple[str, str, str]] = frozenset()
     live: Mapping[tuple[str, str, str], LiveObject] | None = None
+    engine_managers: frozenset[str] = frozenset()
     swept_kinds: int = 0
     """How many kinds the sweep asked about: one LIST each, so this is what
     the sweep cost in requests."""
     skipped: int = 0
+    cold: int = 0
+    """Skips decided by the rendered hash rather than by a record of our own:
+    objects this machine had never applied. On a settled cluster this is zero,
+    and on a first run it is most of them."""
     recorded: int = 0
     _dirty: bool = False
 
@@ -176,42 +187,90 @@ class ApplyCache:
         """
         return any(entry.resource_version for entry in self._section().values())
 
-    def sent_before(self, spec: Manifest, *, field_manager: str) -> bool:
-        """True when this machine last sent exactly these bytes as this manager.
+    def may_skip(self, spec: Manifest, *, field_manager: str) -> bool:
+        """True when `unchanged` could possibly say yes. Never a reason to skip.
 
-        Half of `unchanged`, and never a reason to skip on its own. It is
-        public because it costs nothing, where the other half needs the object
-        built: a caller that would have to discover an unserved kind to build
-        one asks this first.
+        Local and free: it asks the file and the manifest, never the cluster.
+        A caller that has to build an object before it can ask the real
+        question asks this first, because building an unserved kind costs an
+        uncached discovery request -- and during a bootstrap that is most of
+        them, on every attempt.
         """
+        if not self.assume_unchanged:
+            return False
         identity = object_key(spec)
-        if not self.assume_unchanged or identity in self.never_record:
+        if identity in self.never_record:
             return False
         entry = self._section().get(_entry_key(identity))
-        return entry is not None and entry.digest == digest(spec, field_manager=field_manager)
+        if entry is None:
+            return desired_hash(spec) is not None
+        return entry.digest == digest(spec, field_manager=field_manager)
 
     def unchanged(self, spec: Manifest, *, field_manager: str, key: tuple[str, str, str]) -> bool:
         """True when this object may be left alone.
+
+        Two routes, and which one applies is decided by whether this machine
+        has a record of the object:
+
+        - **it does** -- the bytes must match what it sent, and the live
+          `resourceVersion` must be the one that apply returned. The rendered
+          hash is not consulted, and must not be: an edit under a manager we
+          allow leaves that hash matching, and the version is the only thing
+          that moved.
+        - **it does not** -- a first run, a new checkout, a cache whose format
+          moved. `livestate.skippable` answers from the sweep alone: the
+          rendered hash, this environment's label, and no foreign manager.
+          That is what makes a cold run cheap, and it is the only route that
+          can answer for an object another machine or a GitOps engine applied.
+
+        **A skip records where the object was**, from the sweep that just read
+        it. Without that an object the second route skips is never applied, so
+        it never gets a `resourceVersion`, so the first route never engages for
+        it -- and a write under an allowed manager would be invisible for ever
+        rather than until the next run. What is recorded is a version this run
+        observed, not a value assumed.
 
         *key* is the **built** object's `(namespace, kind, name)`, which is
         what the sweep saw. A manifest that names no namespace resolves to the
         API's default one, so a key taken from the manifest reads `none` where
         the cluster reads `default` -- and this would then skip nothing, for
         ever, while looking healthy.
-
-        False whenever the operator did not ask for the skip, so a caller can
-        hold one cache and let this decide.
         """
-        if not self.sent_before(spec, field_manager=field_manager):
+        if not self.may_skip(spec, field_manager=field_manager):
             return False
-        entry = self._section()[_entry_key(object_key(spec))]
-        if self.live is None or entry.resource_version is None:
+        if self.live is None:
             return False
         seen = self.live.get(key)
-        if seen is None or seen.resource_version != entry.resource_version:
+        entry = self._section().get(_entry_key(object_key(spec)))
+        if entry is not None:
+            if entry.resource_version is None or seen is None or seen.resource_version != entry.resource_version:
+                return False
+        elif not livestate.skippable(
+            spec,
+            seen,
+            environment=self.environment,
+            engine_managers=self.engine_managers,
+        ):
             return False
+        else:
+            self.cold += 1
         self.skipped += 1
+        self._remember(spec, field_manager=field_manager, resource_version=seen.resource_version if seen else None)
         return True
+
+    def _remember(self, spec: Manifest, *, field_manager: str, resource_version: str | None) -> None:
+        """Store an entry, and leave the file alone when it already says this.
+
+        A run that skipped everything rewrites nothing, which keeps the file's
+        mtime meaningful and saves the write on the common path.
+        """
+        entry = Entry(digest=digest(spec, field_manager=field_manager), resource_version=resource_version)
+        section = self._section()
+        identity = _entry_key(object_key(spec))
+        if section.get(identity) == entry:
+            return
+        section[identity] = entry
+        self._dirty = True
 
     def record(self, spec: Manifest, *, field_manager: str, resource_version: str | None) -> None:
         """Remember that this object was applied, exactly as it was sent.
@@ -347,13 +406,14 @@ async def cluster_id(api: Api) -> str | None:
         return None
 
 
-async def open_cache(
+async def open_cache(  # noqa: PLR0913 -- every argument is a different thing this cache must not get wrong
     api: Api,
     *,
     environment: str,
     cluster: str | None = None,
     assume_unchanged: bool = False,
     never_record: Collection[tuple[str, str, str]] = (),
+    engine_managers: Collection[str] = (),
 ) -> ApplyCache | None:
     """This cluster's cache, or None when the cluster cannot be identified.
 
@@ -384,6 +444,7 @@ async def open_cache(
         entries=_read(path),
         assume_unchanged=assume_unchanged,
         never_record=frozenset(never_record),
+        engine_managers=frozenset(engine_managers),
     )
 
 

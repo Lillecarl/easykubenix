@@ -1124,6 +1124,7 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
         cluster=cluster,
         assume_unchanged=assume_unchanged,
         never_record=_uncacheable(cfg),
+        engine_managers=_engine_managers(cfg),
     )
     try:
         await _apply_prepared(
@@ -1155,8 +1156,13 @@ def _report_cache(cache: fastcache.ApplyCache, *, assume_unchanged: bool) -> Non
     The sweep's own size goes here rather than in `livestate`, which logs it
     at DEBUG -- and `main` fixes the level at INFO, so nothing reads that.
     This line is where somebody looks for it anyway.
+
+    `cold` is how many of the skips were decided by the rendered hash rather
+    than by a record of this machine's own. It is most of them on a first run
+    and zero on a settled one, which is the difference between "the cache
+    worked" and "the cache was empty and the annotation carried it".
     """
-    swept = {"swept": len(cache.live), "kinds": cache.swept_kinds} if cache.live is not None else {}
+    swept = {"swept": len(cache.live), "kinds": cache.swept_kinds, "cold": cache.cold} if cache.live is not None else {}
     _log.info(
         "apply cache",
         skipped=cache.skipped,
@@ -1175,6 +1181,7 @@ async def _open_apply_cache(  # noqa: PLR0913 -- one cache, and each argument is
     cluster: str | None = None,
     assume_unchanged: bool = False,
     never_record: set[tuple[str, str, str]] | None = None,
+    engine_managers: set[str] | None = None,
 ) -> fastcache.ApplyCache | None:
     """The record of what this machine applied, and what the cluster holds now.
 
@@ -1188,6 +1195,7 @@ async def _open_apply_cache(  # noqa: PLR0913 -- one cache, and each argument is
         cluster=cluster,
         assume_unchanged=assume_unchanged,
         never_record=never_record or set(),
+        engine_managers=engine_managers or set(),
     )
     if cache is None or not assume_unchanged:
         return cache
@@ -1220,6 +1228,25 @@ def _kinds_of(prepared: list[tuple[ApplyGroup, seeds.SeedPlan]]) -> set[tuple[st
     return {
         (str(spec.get("kind")), str(spec.get("apiVersion", "v1"))) for _group, plan in prepared for spec in plan.objects
     }
+
+
+def _engine_managers(cfg: KubeApplyConfigResult) -> set[str]:
+    """Who else is expected to own fields on this configuration's objects.
+
+    Not a new option: `deployment.units.<name>.fieldManager` already names
+    "the controller that takes the objects over afterwards", which is exactly
+    the question, and a unit that names none inherits `deployment.fieldManager`.
+
+    The two constants are not optional. `kube-controller-manager` owns fields
+    on a Deployment and `kube-apiserver` on a CustomResourceDefinition, on
+    every real cluster and by design -- and CRDs are where a cold run's whole
+    cost lives, so leaving them out would make the one case this exists for
+    unskippable.
+
+    It only ever loosens `livestate.skippable`, which is why it can be derived
+    rather than declared: too narrow costs speed, never correctness.
+    """
+    return {*cfg.unit_field_managers.values(), "kube-controller-manager", "kube-apiserver"}
 
 
 def _uncacheable_objects(objects: Iterable[dict[str, Any]]) -> set[tuple[str, str, str]]:

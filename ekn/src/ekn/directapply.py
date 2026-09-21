@@ -108,17 +108,17 @@ def _skipper(  # noqa: PLR0913 -- one caller, and each argument is part of what 
     scan reports and what the sweep saw, and it costs a request only for a
     kind nothing has discovered yet.
 
-    **The two halves of the cache's question, with the build between them.**
-    The bytes are checked first because that costs nothing, and only then is
-    the object built to ask where it lives. Building first would put a
-    discovery request -- an *uncached* one, per attempt -- in front of every
-    object whose CustomResourceDefinition this same run has not applied yet,
-    which is the ordinary state of a bootstrap.
+    **The cheap half of the cache's question first, with the build between
+    them.** `may_skip` asks the file and the manifest and nothing else; only
+    an object that could be skipped is then built, to ask where it lives.
+    Building first would put a discovery request -- an *uncached* one, per
+    attempt -- in front of every object whose CustomResourceDefinition this
+    same run has not applied yet, which is the ordinary state of a bootstrap.
     """
 
     async def should_skip(spec: Manifest) -> bool:
         manager = field_manager_for(spec, default=field_manager, unit_managers=unit_managers)
-        if not cache.sent_before(spec, field_manager=manager):
+        if not cache.may_skip(spec, field_manager=manager):
             return False
         obj = await build_object(with_environment_label(spec, environment_label, environment), api)
         key = (obj.namespace or "none", obj.kind, obj.name)
