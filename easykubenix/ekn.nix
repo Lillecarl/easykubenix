@@ -168,6 +168,39 @@ in
       example = "acme-production";
     };
 
+    clusterUid = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.strMatching "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+      );
+      default = null;
+      description = ''
+        The cluster this configuration is allowed to reach: the `uid` of the
+        `kube-system` Namespace. `ekn kubeapply`, `ekn reclaim`,
+        `ekn clusterdiff` and `ekn secrets` refuse to act against any other.
+
+        **The ambient kubeconfig is not a neutral default.** It is usually a
+        valid, reachable, credentialed cluster that happens to be the wrong
+        one, and there is no error to notice: the apply succeeds until
+        something unrelated collides. This option is what removes the
+        default rather than guarding it.
+
+        Kubernetes has no cluster ID resource. `kube-system` is created once
+        at bootstrap and never re-created, its `uid` is server-generated and
+        never reused, and reading it needs no permission an apply does not
+        already have.
+
+        Left `null`, every one of those commands refuses and prints the line
+        to paste here. Passing `--i-dont-know-which-cluster-this-is` runs
+        anyway; it is deliberately hard to type and reads badly in a
+        reviewed file, which is the point.
+
+        **A rebuilt cluster is a different cluster.** It gets a new `uid` and
+        this value has to change with it. That is the correct answer, not an
+        inconvenience: nothing else would have told you.
+      '';
+      example = "3b2a1f0e-9d8c-4b7a-8e6f-5d4c3b2a1f0e";
+    };
+
     resourcePriority = lib.mkOption {
       type = lib.types.attrsOf lib.types.int;
       description = ''

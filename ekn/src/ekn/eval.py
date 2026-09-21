@@ -242,6 +242,11 @@ class KubeApplyConfigResult(BaseModel):
     #: `ekn.preApplyCommand`, already realised. `None` is the ordinary
     #: shape. See `cli._run_pre_apply`.
     pre_apply_command: str | None = Field(default=None, alias="preApplyCommand")
+    #: `ekn.clusterUid` -- the `kube-system` Namespace uid this configuration
+    #: is allowed to reach. `None` means the configuration declares none, or
+    #: predates the option; both are "unknown cluster", which every fenced
+    #: command refuses without a flag. See `clusterfence.require`.
+    cluster_uid: str | None = Field(default=None, alias="clusterUid")
 
     @property
     def objects(self) -> list[dict[str, Any]]:
@@ -1151,6 +1156,11 @@ async def evaluate_kubeapply_config(
         assert_cached = (
             await ekn_opts.attr("assertCached").to_python() if await ekn_opts.has_attr("assertCached") else []
         )
+        # An easykubenix older than the option reads as `None`, which is the
+        # same as declaring none: the fence refuses and names the flag. That
+        # is the right way round -- a version that cannot express the answer
+        # must not be read as "any cluster will do".
+        cluster_uid = await ekn_opts.attr("clusterUid").to_python() if await ekn_opts.has_attr("clusterUid") else None
         pre_apply_command = None
         if await ekn_opts.has_attr("preApplyCommand"):
             declared_command = ekn_opts.attr("preApplyCommand")
@@ -1175,6 +1185,7 @@ async def evaluate_kubeapply_config(
                 "assertCached": assert_cached,
                 "unitFieldManagers": unit_managers,
                 "preApplyCommand": pre_apply_command,
+                "clusterUid": cluster_uid,
             }
         )
 
