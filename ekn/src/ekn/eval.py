@@ -422,8 +422,8 @@ def python_profile() -> Generator[None]:
     use cProfile when the question is what runs too often. See
     `_cprofile_profile` and `_pyinstrument_profile`.
 
-    It wraps `asyncio.run(command.run())` in `cli.py`, so it covers whichever
-    command is running rather than evaluation alone.
+    It wraps `command.run()` inside `cli.py`'s `anyio.run`, so it covers
+    whichever command is running rather than evaluation alone.
 
     **It profiles this process only.** nanopynix runs the evaluator in its
     own worker, so the time this attributes to a `to_python` call is the

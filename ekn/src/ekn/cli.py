@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json
 import logging
@@ -2059,13 +2058,16 @@ def main() -> None:
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
         cache_logger_on_first_use=True,
     )
-    asyncio.run(_run_profiled(command))
+    # `backend="asyncio"`, named rather than left to the default: `kr8s` and
+    # `pygit2` both bring an asyncio-only dependency, so trio is not a choice
+    # this program has, and saying so here stops a default change moving it.
+    anyio.run(_run_profiled, command, backend="asyncio")
 
 
 async def _run_profiled(command: Command) -> None:
     """Run the command with the profiler started inside the event loop.
 
-    **Inside the coroutine, not around `asyncio.run`.** pyinstrument records
+    **Inside the coroutine, not around `anyio.run`.** pyinstrument records
     which async context it started in. Started outside, every coroutine is
     out-of-context and the whole wait lands in the loop's selector rather
     than in the frame that issued it. Measured over ten 0.2s sleeps:

@@ -1,7 +1,7 @@
 """Where the profiler starts decides whether it can attribute a wait.
 
 pyinstrument records the async context it started in. Started around
-`asyncio.run`, every coroutine is out of context and the whole wait lands in
+`anyio.run`, every coroutine is out of context and the whole wait lands in
 the event loop's selector -- which is the one thing a profile of `ekn
 kubeapply` must not do, since a deploy is almost entirely waiting.
 
@@ -13,10 +13,10 @@ nothing until this moved.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 
+import anyio
 import pytest
 
 pyinstrument = pytest.importorskip("pyinstrument")
@@ -26,7 +26,7 @@ COUNT = 6
 
 
 async def waits_here() -> None:
-    await asyncio.sleep(SLEEP)
+    await anyio.sleep(SLEEP)
 
 
 async def sequentially() -> None:
@@ -35,7 +35,9 @@ async def sequentially() -> None:
 
 
 async def fanned_out() -> None:
-    await asyncio.gather(*(waits_here() for _ in range(COUNT)))
+    async with anyio.create_task_group() as tg:
+        for _ in range(COUNT):
+            tg.start_soon(waits_here)
 
 
 def _frames(frame: dict[str, Any]):
@@ -127,7 +129,7 @@ def test_starting_inside_the_loop_attributes_the_wait(work) -> None:
             profiler.stop()
         return profiler
 
-    selector, awaiting = _split(asyncio.run(run()))
+    selector, awaiting = _split(anyio.run(run, backend="asyncio"))
 
     assert awaiting > 0, "the awaiting frame holds no time"
     # A share, not exact zero. The loop really does enter `select` between
@@ -146,7 +148,7 @@ def test_starting_outside_the_loop_loses_the_wait(work) -> None:
     """
     profiler = pyinstrument.Profiler(interval=0.001, async_mode="enabled")
     profiler.start()
-    asyncio.run(work())
+    anyio.run(work, backend="asyncio")
     profiler.stop()
 
     selector, awaiting = _split(profiler)
