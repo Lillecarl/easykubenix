@@ -20,6 +20,20 @@ server-side apply that changes nothing does not move it -- so `ekn` does not
 invalidate its own record every run. Measured on nixlab2 over three idle
 minutes: 0 of 1000 objects moved.
 
+**This sees drift. It does not promise to repair it.** A written object is
+sent again, and what the apply then does is ordinary server-side apply: a
+field another manager owns survives. Measured on nixlab2 -- two ConfigMaps
+annotated by `kubectl-annotate` and by a second writer calling itself `ekn`
+were both re-applied, and both annotations were still there afterwards. The
+drift goes away only where it lies in a field `ekn` declares.
+
+**What the steady state costs is the cluster's, not this gate's.** On
+nixlab2, 1250 objects: 1136 skipped, and 107 of the 114 that were not were
+External Secrets Operator writing status on its refresh interval. A cluster
+with no such controller skips nearly everything; one with a busy controller
+re-applies what that controller touches, which is the correct answer rather
+than a shortfall.
+
 **Keyed by the cluster's own identity, never by the kubeconfig context
 name.** `ekn validate` boots a fresh API server under a fixed context, so a
 name-keyed cache would call every object unchanged against an empty cluster
@@ -141,6 +155,9 @@ class ApplyCache:
     assume_unchanged: bool = False
     never_record: frozenset[tuple[str, str, str]] = frozenset()
     live: Mapping[tuple[str, str, str], LiveObject] | None = None
+    swept_kinds: int = 0
+    """How many kinds the sweep asked about: one LIST each, so this is what
+    the sweep cost in requests."""
     skipped: int = 0
     recorded: int = 0
     _dirty: bool = False

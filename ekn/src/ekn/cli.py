@@ -1140,18 +1140,31 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
     finally:
         if cache is not None:
             cache.save()
-            # `assume_unchanged` on the line, because without it `skipped=0`
-            # has two readings and the operator cannot tell them apart:
-            # everything changed, or the flag was never passed. Reported
-            # after a full apply of 1235 objects took an apiserver to 4 GB
-            # and the `skipped=0` in the log said nothing about why.
-            _log.info(
-                "apply cache",
-                skipped=cache.skipped,
-                recorded=cache.recorded,
-                assume_unchanged=assume_unchanged,
-                path=str(cache.path),
-            )
+            _report_cache(cache, assume_unchanged=assume_unchanged)
+
+
+def _report_cache(cache: fastcache.ApplyCache, *, assume_unchanged: bool) -> None:
+    """What the cache did, in one line, for both apply commands.
+
+    `assume_unchanged` is on it because without it `skipped=0` has two
+    readings and the operator cannot tell them apart: everything changed, or
+    the flag was never passed. Reported after a full apply of 1235 objects
+    took an apiserver to 4 GB and the `skipped=0` in the log said nothing
+    about why.
+
+    The sweep's own size goes here rather than in `livestate`, which logs it
+    at DEBUG -- and `main` fixes the level at INFO, so nothing reads that.
+    This line is where somebody looks for it anyway.
+    """
+    swept = {"swept": len(cache.live), "kinds": cache.swept_kinds} if cache.live is not None else {}
+    _log.info(
+        "apply cache",
+        skipped=cache.skipped,
+        recorded=cache.recorded,
+        assume_unchanged=assume_unchanged,
+        **swept,
+        path=str(cache.path),
+    )
 
 
 async def _open_apply_cache(  # noqa: PLR0913 -- one cache, and each argument is a different thing it must not get wrong
@@ -1178,6 +1191,7 @@ async def _open_apply_cache(  # noqa: PLR0913 -- one cache, and each argument is
     )
     if cache is None or not assume_unchanged:
         return cache
+    cache.swept_kinds = len(kinds)
     cache.live = await livestate.sweep(
         api,
         kinds,
@@ -2076,7 +2090,7 @@ class ApplyManifest(Command):
         finally:
             if cache is not None:
                 cache.save()
-                _log.info("apply cache", skipped=cache.skipped, recorded=cache.recorded, path=str(cache.path))
+                _report_cache(cache, assume_unchanged=self.assume_unchanged)
 
 
 _json_value_adapter: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
