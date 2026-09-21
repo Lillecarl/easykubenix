@@ -1,8 +1,10 @@
 """What the cluster already holds, and what follows from it.
 
-One LIST per kind, asking for object metadata only, answers three questions
+One LIST per kind, asking for object metadata only, answers four questions
 that a direct apply needs and that nothing else can answer cheaply:
 
+- has anybody written this object since `ekn` last applied it
+  (`resourceVersion`);
 - has this object's rendered manifest changed since it was last applied
   (`ekn.dev/manifest-hash`);
 - which field managers other than ours own parts of it (`managedFields`);
@@ -17,8 +19,8 @@ consumers reads. The same sweep asking for `PartialObjectMetadataList` is
 three need. Measured by solid-kubernetes on nixlab2; issue
 Lillecarl/easykubenix#28.
 
-This module holds the decisions made from that data. The sweep itself
-belongs to the caller, which owns the `Api`.
+`sweep` is that LIST, and the rest of this module is the decisions made from
+what it returns.
 """
 
 from __future__ import annotations
@@ -26,14 +28,22 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import kr8s
+import structlog
+
+from .apply import DEFAULT_ENVIRONMENT_LABEL, DEFAULT_UNIT_LABEL, KindNotServedError, build_object
 from .converge import object_key
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    from kr8s.asyncio import Api
+
     from .apply import Manifest
+
+_log = structlog.get_logger()
 
 HASH_ANNOTATION = "ekn.dev/manifest-hash"
 """Carries `sha256:<hex>` of the object as rendered.
@@ -58,6 +68,153 @@ class LiveObject:
     environment: str | None = None
     unit: str | None = None
     managers: frozenset[str] = field(default_factory=frozenset)
+    resource_version: str | None = None
+    """What the API server says this object is at now.
+
+    Opaque, and only ever compared for equality -- it is a string the server
+    may shape however it likes. It moves on every write by anybody, including
+    a writer using our own field-manager name, which `managers` cannot
+    distinguish. A server-side apply that changes nothing does **not** move
+    it, which is what lets `fastcache` compare it against the one its last
+    apply returned.
+    """
+
+
+ACCEPT_METADATA = "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1"
+"""Ask for `ObjectMeta` and nothing else.
+
+Measured by solid-kubernetes on nixlab2: the same sweep is 45.5 MB as whole
+objects and 2.56 MB as metadata, and 38.1 MB of the difference is the
+OpenAPI schemas of 188 CustomResourceDefinitions that no caller here reads.
+"""
+
+CACHED_LIST = {"resourceVersion": "0"}
+"""Serve this LIST from the API server's watch cache.
+
+`Cacher.List` answers a LIST with `resourceVersion=0` from
+`watchCache.WaitUntilFreshAndGet` -- in memory, no etcd round trip and no
+conversion. Without it each kind is a quorum read against etcd, and a sweep
+meant to make an apply cheaper starts costing what the apply costs.
+
+**The list may be slightly behind.** For the `fastcache` gate that is safe
+in one direction and self-healing in the other: an older `resourceVersion`
+differs from the recorded one, so the object is applied; and an object
+written in the last instant may still read as the recorded value, so it is
+skipped **once**. A skip records nothing, so the next run reads the moved
+value and applies. Do not "fix" this by dropping the parameter.
+
+No `limit` either, so there is one request per kind: the API server rejects
+a `continue` token sent together with a resource version, so a paged sweep
+would have to give this up.
+"""
+
+_UNSWEEPABLE = frozenset({403, 404, 405})
+"""Answers that mean "nothing of this kind is skippable", not "the run failed".
+
+403 is an apply whose RBAC covers writing a kind but not listing it. 404 and
+405 are the seven built-in kinds that are served and cannot be listed at all
+(`apply._NO_LIST_VERB`). A kind that answers any of these simply contributes
+no live objects, and every object of it is applied.
+
+A 403 costs three reauthentication attempts inside `kr8s.Api.call_api`
+before it is raised, so a denied kind is slow as well as empty.
+"""
+
+
+def _managers(metadata: Mapping[str, Any]) -> frozenset[str]:
+    entries = metadata.get("managedFields")
+    if not isinstance(entries, list):
+        return frozenset()
+    return frozenset(
+        entry["manager"] for entry in entries if isinstance(entry, dict) and isinstance(entry.get("manager"), str)
+    )
+
+
+def _live_object(kind: str, item: Mapping[str, Any]) -> LiveObject:
+    """One `PartialObjectMetadata` as this module's record of it.
+
+    **Keyed by the kind that was listed, never by the item's own.** Every
+    item of a `PartialObjectMetadataList` reports `kind:
+    PartialObjectMetadata`, which matches no manifest. The prune loop keys
+    its own scan the same way, for a different reason and with the same
+    consequence if it is got wrong.
+    """
+    metadata_value = item.get("metadata")
+    metadata: Mapping[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
+    annotations = metadata.get("annotations") or {}
+    labels = metadata.get("labels") or {}
+
+    def string(source: Any, key: str) -> str | None:
+        value = source.get(key) if isinstance(source, dict) else None
+        return value if isinstance(value, str) else None
+
+    return LiveObject(
+        key=(
+            string(metadata, "namespace") or "none",
+            kind,
+            string(metadata, "name") or "?",
+        ),
+        manifest_hash=string(annotations, HASH_ANNOTATION),
+        environment=string(labels, DEFAULT_ENVIRONMENT_LABEL),
+        unit=string(labels, DEFAULT_UNIT_LABEL),
+        managers=_managers(metadata),
+        resource_version=string(metadata, "resourceVersion"),
+    )
+
+
+async def sweep(
+    api: Api,
+    kinds: Iterable[tuple[str, str]],
+    *,
+    selector: str | None = None,
+) -> dict[tuple[str, str, str], LiveObject]:
+    """One metadata LIST per kind, as `(namespace, kind, name)` records.
+
+    *kinds* is `(kind, apiVersion)` -- the two fields that identify a resource
+    exactly, so this resolves each through `apply.discover` rather than through
+    a lookup by name. *selector* is a label selector narrowing the sweep,
+    normally `ekn.dev/environment=<env>`: an object that does not carry it is
+    not one `ekn` applied, and the callers of this only ask about objects
+    `ekn` applied.
+
+    A kind the cluster does not serve, or will not let this credential list,
+    is left out rather than raised. On a first apply some CustomResourceDefinitions
+    of this very run are not Established yet, and that is the ordinary state
+    rather than a failure. Every consumer answers "no record" the same way it
+    answers "not swept": by doing the work.
+    """
+    live: dict[tuple[str, str, str], LiveObject] = {}
+    params = dict(CACHED_LIST)
+    if selector:
+        params["labelSelector"] = selector
+    for kind, api_version in sorted(set(kinds)):
+        try:
+            cls = type(await build_object({"kind": kind, "apiVersion": api_version}, api))
+        except KindNotServedError:
+            _log.debug("not sweeping unserved kind", kind=kind, api_version=api_version)
+            continue
+        try:
+            async with api.call_api(
+                method="GET",
+                version=cls.version,
+                url=cls.endpoint,
+                params=params,
+                headers={"Accept": ACCEPT_METADATA},
+            ) as response:
+                payload: Any = response.json()
+        except kr8s.ServerError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status not in _UNSWEEPABLE:
+                raise
+            _log.debug("kind not swept", kind=kind, api_version=api_version, status=status)
+            continue
+        items = payload.get("items") if isinstance(payload, dict) else None
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict):
+                obj = _live_object(kind, item)
+                live[obj.key] = obj
+    _log.debug("swept", kinds=len(set(kinds)), objects=len(live), selector=selector)
+    return live
 
 
 def canonical_json(spec: Manifest) -> str:
@@ -229,6 +386,8 @@ def foreign_owners(
 
 
 __all__ = [
+    "ACCEPT_METADATA",
+    "CACHED_LIST",
     "HASH_ANNOTATION",
     "OUR_MANAGERS",
     "ForeignOwner",
@@ -239,4 +398,5 @@ __all__ = [
     "manifest_hash",
     "skippable",
     "strip_hash_annotation",
+    "sweep",
 ]

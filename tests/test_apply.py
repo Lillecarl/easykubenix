@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 from typing import Any, ClassVar
 
 import anyio
+import httpx
+import kr8s
 import pytest
 from kr8s.asyncio.objects import new_class
 
@@ -25,6 +27,14 @@ class _FakeResponse:
 
     def json(self) -> dict[str, Any]:
         return self._data
+
+
+def _selected(metadata: dict[str, Any], selector: str | None) -> bool:
+    """One `key=value` clause, which is all the sweep sends."""
+    if not selector:
+        return True
+    key, _, value = selector.partition("=")
+    return (metadata.get("labels") or {}).get(key) == value
 
 
 class FakeApi:
@@ -57,8 +67,13 @@ class FakeApi:
         listed: list[tuple[str, str, str]] | None = None,
         resources: list[dict[str, Any]] | None = None,
         extra_metadata: dict[str, dict[str, Any]] | None = None,
+        deny: dict[str, int] | None = None,
     ) -> None:
         self.namespaced = namespaced
+        # Kinds whose LIST answers an error rather than a list, by status:
+        # 403 for RBAC that covers writing a kind but not listing it, 405 for
+        # the built-in kinds that have no list verb at all.
+        self._deny = deny or {}
         # Merged into a listed object's `metadata`, keyed by its name. What
         # the prune guards read -- `ownerReferences` and the unit label --
         # lives there and nowhere else.
@@ -87,6 +102,18 @@ class FakeApi:
         self.deleted: list[tuple[str, str, str]] = []
         self.patched: list[tuple[str, str, str]] = []
         self.managers: dict[str, str] = {}
+        self.swept: list[str] = []
+        # Every object "on the cluster", keyed as the prune scan keys them and
+        # holding the metadata a sweep would return. An apply adds one; the
+        # `listed` objects were there before this run.
+        self.live: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for ns, kind, name in self._listed:
+            self.live[(ns or "none", kind, name)] = {
+                "name": name,
+                "namespace": ns,
+                "resourceVersion": "1",
+                "managedFields": [{"manager": "ekn"}],
+            } | self._extra_metadata.get(name, {})
 
     @asynccontextmanager
     async def call_api(
@@ -100,15 +127,76 @@ class FakeApi:
         headers: dict[str, str] | None = None,
         params: dict[str, str] | None = None,
     ):
+        if method == "GET":
+            yield _FakeResponse(self._metadata_list(version, url, params or {}, headers or {}))
+            return
         assert method == "PATCH"
         import json as _json
 
         body = _json.loads(content or "{}")
-        self.patched.append((namespace or "none", body["kind"], body["metadata"]["name"]))
+        key = (namespace or "none", body["kind"], body["metadata"]["name"])
+        self.patched.append(key)
         # Which manager each object was applied as. SSA sends it as a query
         # parameter, so this is the only place a test can see it.
         self.managers[body["metadata"]["name"]] = (params or {}).get("fieldManager", "")
-        yield _FakeResponse(body)
+        # A real server answers an apply with the stored object, and only
+        # *moves* the resourceVersion when the apply changed something. The
+        # `--assume-unchanged` gate is exactly that behaviour, so a fake that
+        # bumped on every apply would make the gate untestable.
+        stored = self.live.setdefault(
+            key,
+            {
+                "name": key[2],
+                "namespace": body["metadata"].get("namespace"),
+                "resourceVersion": str(len(self.live) + 1),
+            },
+        )
+        stored["labels"] = body["metadata"].get("labels", {})
+        stored["managedFields"] = [{"manager": self.managers[body["metadata"]["name"]] or "ekn"}]
+        yield _FakeResponse(body | {"metadata": body["metadata"] | {"resourceVersion": stored["resourceVersion"]}})
+
+    def write(self, key: tuple[str, str, str]) -> None:
+        """Somebody other than this apply wrote the object: a `kubectl edit`.
+
+        Only the resourceVersion moves, which is the whole of what the gate
+        reads and the whole of what such an edit is guaranteed to leave.
+        """
+        self.live[key]["resourceVersion"] = f"{self.live[key]['resourceVersion']}0"
+
+    def _metadata_list(
+        self,
+        version: str | None,
+        url: str | None,
+        params: dict[str, str],
+        headers: dict[str, str],
+    ) -> dict[str, Any]:
+        """What `livestate.sweep` asks for: one kind's `ObjectMeta`, no more.
+
+        The two assertions are the measurement the sweep exists for -- whole
+        objects are 18 times the bytes, and a LIST without
+        `resourceVersion=0` is a quorum read against etcd per kind.
+        """
+        from ekn.livestate import ACCEPT_METADATA
+
+        assert headers.get("Accept") == ACCEPT_METADATA
+        assert params.get("resourceVersion") == "0"
+        kind = next(
+            (r["kind"] for r in self._resources if r["name"] == url and r["version"] == version),
+            None,
+        )
+        self.swept.append(str(kind))
+        if kind in self._deny:
+            raise kr8s.ServerError(
+                f"cannot list {kind}",
+                response=httpx.Response(self._deny[str(kind)], request=httpx.Request("GET", str(url))),
+            )
+        selector = params.get("labelSelector")
+        items = [
+            {"kind": "PartialObjectMetadata", "metadata": metadata}
+            for (_ns, listed_kind, _name), metadata in self.live.items()
+            if listed_kind == kind and _selected(metadata, selector)
+        ]
+        return {"kind": "PartialObjectMetadataList", "items": items}
 
     async def async_api_resources(self) -> list[dict[str, Any]]:
         return self._resources

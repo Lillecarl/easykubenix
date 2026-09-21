@@ -1,14 +1,18 @@
-"""The read phase's decisions: what to skip, and who else owns it.
+"""The read phase: the sweep, and the decisions made from what it returned.
 
-The sweep itself belongs to the caller, so everything here is a pure
-function over what the sweep returned. Issue Lillecarl/easykubenix#28.
+Issue Lillecarl/easykubenix#28.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import kr8s
 import pytest
+
+# The same API server double the apply suite uses, so one description of a
+# cluster serves the sweep, the apply and the prune.
+from test_apply import FakeApi
 
 from ekn.livestate import (
     HASH_ANNOTATION,
@@ -20,6 +24,7 @@ from ekn.livestate import (
     manifest_hash,
     skippable,
     strip_hash_annotation,
+    sweep,
 )
 
 if TYPE_CHECKING:
@@ -207,3 +212,117 @@ class TestForeignOwners:
         obj = LiveObject(key=("a", "B", "c"), managers=frozenset({"zeta", "alpha"}))
 
         assert foreign_owners([obj], engine_managers=())[0].managers == ("alpha", "zeta")
+
+
+#: One kind the API server serves, described as discovery describes it.
+VPA: dict[str, Any] = {
+    "version": "autoscaling.k8s.io/v1",
+    "kind": "VerticalPodAutoscaler",
+    "name": "verticalpodautoscalers",
+    "singularName": "verticalpodautoscaler",
+    "namespaced": True,
+}
+#: A second one, so a test can show that one bad kind does not take the rest
+#: of the sweep with it.
+CRD: dict[str, Any] = {
+    "version": "apiextensions.k8s.io/v1",
+    "kind": "CustomResourceDefinition",
+    "name": "customresourcedefinitions",
+    "singularName": "customresourcedefinition",
+    "namespaced": False,
+}
+
+KINDS = [("VerticalPodAutoscaler", "autoscaling.k8s.io/v1")]
+
+
+class TestTheSweep:
+    """One metadata LIST per kind. The request's shape is asserted by the API
+    server double itself -- metadata-only and `resourceVersion=0` are the two
+    measurements this sweep exists for, so a change to either fails there."""
+
+    async def test_it_reads_what_the_three_consumers_need(self) -> None:
+        api = FakeApi(resources=[VPA], listed=[("default", "VerticalPodAutoscaler", "vpa")])
+        api.live[("default", "VerticalPodAutoscaler", "vpa")] |= {
+            "annotations": {HASH_ANNOTATION: "sha256:abc"},
+            "labels": {"ekn.dev/environment": ENV, "ekn.dev/deployment-unit": "core"},
+            "managedFields": [{"manager": "ekn"}, {"manager": "kubectl-edit"}],
+        }
+
+        state = await sweep(api, KINDS)
+
+        assert state == {
+            ("default", "VerticalPodAutoscaler", "vpa"): LiveObject(
+                key=("default", "VerticalPodAutoscaler", "vpa"),
+                manifest_hash="sha256:abc",
+                environment=ENV,
+                unit="core",
+                managers=frozenset({"ekn", "kubectl-edit"}),
+                resource_version="1",
+            )
+        }
+
+    async def test_the_key_carries_the_kind_that_was_listed(self) -> None:
+        """Every item of a `PartialObjectMetadataList` reports `kind:
+        PartialObjectMetadata`. Keyed by that, the sweep matches no manifest
+        and the gate skips nothing, for ever, while looking healthy."""
+        api = FakeApi(resources=[VPA], listed=[("default", "VerticalPodAutoscaler", "vpa")])
+
+        state = await sweep(api, KINDS)
+
+        assert [key[1] for key in state] == ["VerticalPodAutoscaler"]
+
+    async def test_a_kind_the_cluster_does_not_serve_is_left_out(self) -> None:
+        """On a first apply the CustomResourceDefinition that establishes a
+        kind is in this same run, so the kind is not served yet. That is the
+        ordinary state and not a failure."""
+        api = FakeApi(resources=[VPA], listed=[("default", "VerticalPodAutoscaler", "vpa")])
+
+        state = await sweep(api, [*KINDS, ("NeverServed", "livestate.test/v1")])
+
+        assert list(state) == [("default", "VerticalPodAutoscaler", "vpa")]
+
+    @pytest.mark.parametrize("status", [403, 404, 405])
+    async def test_a_kind_that_cannot_be_listed_is_left_out(self, status: int) -> None:
+        """403 is RBAC that covers writing a kind but not listing it; 404 and
+        405 are the built-in kinds with no list verb. None of them is a reason
+        to fail a run, and every object of such a kind is simply applied."""
+        api = FakeApi(
+            resources=[VPA, CRD],
+            listed=[("default", "VerticalPodAutoscaler", "vpa")],
+            deny={"CustomResourceDefinition": status},
+        )
+
+        state = await sweep(api, [*KINDS, ("CustomResourceDefinition", "apiextensions.k8s.io/v1")])
+
+        assert list(state) == [("default", "VerticalPodAutoscaler", "vpa")]
+        assert "CustomResourceDefinition" in api.swept
+
+    async def test_another_status_is_not_swallowed(self) -> None:
+        """A sweep that answered "nothing is skippable" to a broken API server
+        would be indistinguishable from one that answered it correctly."""
+        api = FakeApi(resources=[VPA], deny={"VerticalPodAutoscaler": 500})
+
+        with pytest.raises(kr8s.ServerError):
+            await sweep(api, KINDS)
+
+    async def test_the_selector_narrows_it(self) -> None:
+        """`ekn.dev/environment=<env>`: an object without it is not one `ekn`
+        applied, and one cluster holds several environments."""
+        api = FakeApi(
+            resources=[VPA],
+            listed=[("default", "VerticalPodAutoscaler", "mine"), ("default", "VerticalPodAutoscaler", "theirs")],
+        )
+        api.live[("default", "VerticalPodAutoscaler", "mine")]["labels"] = {"ekn.dev/environment": ENV}
+
+        state = await sweep(api, KINDS, selector=f"ekn.dev/environment={ENV}")
+
+        assert list(state) == [("default", "VerticalPodAutoscaler", "mine")]
+
+    async def test_one_request_per_kind(self) -> None:
+        """Whatever the kind appears as in the argument. A sweep is paid for
+        once per kind, not once per object."""
+        api = FakeApi(resources=[VPA], listed=[("default", "VerticalPodAutoscaler", f"vpa{n}") for n in range(5)])
+
+        await sweep(api, [*KINDS, *KINDS])
+
+        assert api.swept == ["VerticalPodAutoscaler"]
