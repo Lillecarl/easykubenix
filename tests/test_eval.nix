@@ -1143,4 +1143,57 @@ in
         )
       ];
     }).config.kubernetes.generated;
+  # Every shape the two hash producers could disagree on, in one render.
+  # `tests/test_eval.py` hashes each object again in Python and compares.
+  #
+  # The values are chosen for the canonicalisation rather than for realism:
+  # non-ASCII (UTF-8 rather than escapes), an integer, a bool coerced to a
+  # string by `coerceLabelsAndAnnotations`, a nested list, and keys that are
+  # not in source order. A seeded object and a SOPS-encrypted one are here to
+  # be *absent* from the stamped set.
+  manifestHashShapes =
+    let
+      rendered =
+        (import ../. {
+          inherit pkgs;
+          modules = [
+            (
+              { ekn, ... }:
+              {
+                ekn.environment = "easykubenix";
+                deployment.units.apps.path = "clusters/home/apps";
+                kubernetes.objects.default.ConfigMap.shapes = {
+                  ekn.deploymentUnit = "apps";
+                  metadata.labels.replicas = 3;
+                  metadata.labels.enabled = true;
+                  metadata.annotations."ekn.example/note" = "ünïcøde ✓ 🎯";
+                  data = {
+                    zeta = "last by name, first in source";
+                    alpha = "first by name, last in source";
+                    nested = builtins.toJSON [
+                      1
+                      2.5
+                      "x"
+                    ];
+                  };
+                };
+                kubernetes.objects.default.Secret.seeded = ekn.envSeeded {
+                  stringData.password = ekn.envSeed "MANIFEST_HASH_FIXTURE";
+                };
+                kubernetes.objects.default.Secret.encrypted = {
+                  sops.mac = "ENC[AES256_GCM,data:x,type:str]";
+                  stringData.password = "ENC[AES256_GCM,data:y,type:str]";
+                };
+              }
+            )
+          ];
+        }).config.kubernetes;
+    in
+    {
+      inherit (rendered) generated;
+      # The same objects reached through the unit, which is a second output
+      # built from a second `removeAttrs` -- so a stamp applied in only one of
+      # them shows up here as two hashes for one object.
+      unit = rendered.deploymentUnits.apps.objects;
+    };
 }

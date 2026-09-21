@@ -1391,3 +1391,52 @@ class TestModuleSystemShape:
         # `pynix search` reads the binary index from `${pkgs.path}/programs.sqlite`,
         # so `path` is not incidental here.
         assert result["pkgsIsPackageSet"]
+
+
+class TestTheManifestHashHasTwoProducers:
+    """The render stamps `ekn.dev/manifest-hash` in Nix; `ekn` reads it in
+    Python. The two canonicalisations are written twice, in two languages, and
+    a difference of one separator makes every object look changed on every
+    run, for ever -- with no error, just a fast mode that is not fast.
+
+    The sets they hash are disjoint today (`kubernetes.rawFiles` are the only
+    objects Python hashes, and Nix never parses those), so this gate is what
+    makes the agreement established rather than assumed. It stops being
+    merely that on the day anything recomputes what the other wrote.
+    """
+
+    async def test_nix_and_python_agree_on_every_rendered_object(self) -> None:
+        from ekn.livestate import desired_hash, manifest_hash
+
+        rendered = cast("dict[str, Any]", await evaluate_file(NIX_TEST_FILE, "manifestHashShapes"))
+        stamped = [obj for obj in rendered["generated"] if desired_hash(obj) is not None]
+
+        assert stamped, "the fixture rendered nothing carrying a hash"
+        for obj in stamped:
+            assert desired_hash(obj) == manifest_hash(obj), (
+                f"{obj['kind']}/{obj['metadata']['name']}: the render stamped "
+                f"{desired_hash(obj)} and Python computes {manifest_hash(obj)}"
+            )
+
+    async def test_a_credential_is_never_stamped(self) -> None:
+        """A digest published in the manifest is a brute-force oracle for the
+        one field a SOPS or seeded object keeps out of git."""
+        from ekn.livestate import desired_hash
+
+        rendered = cast("dict[str, Any]", await evaluate_file(NIX_TEST_FILE, "manifestHashShapes"))
+        unstamped = {obj["metadata"]["name"] for obj in rendered["generated"] if desired_hash(obj) is None}
+
+        assert unstamped == {"encrypted", "seeded"}
+
+    async def test_both_outputs_carry_the_same_hash(self) -> None:
+        """`kubernetes.generated` and `kubernetes.deploymentUnits` are two
+        outputs built from the same objects. Both applies write as the same
+        field manager, so an object stamped in only one of them has its
+        annotation rewritten by whichever apply ran last."""
+        from ekn.livestate import desired_hash
+
+        rendered = cast("dict[str, Any]", await evaluate_file(NIX_TEST_FILE, "manifestHashShapes"))
+        by_name = {obj["metadata"]["name"]: desired_hash(obj) for obj in rendered["generated"]}
+
+        for obj in rendered["unit"]:
+            assert desired_hash(obj) == by_name[obj["metadata"]["name"]]
