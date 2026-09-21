@@ -127,20 +127,24 @@ def desired_hash(spec: Manifest) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def skippable(
+def skippable(  # noqa: PLR0913 -- four conditions and two manager sets; the docstring is the argument list
     spec: Manifest,
     live: Mapping[tuple[str, str, str], LiveObject],
     *,
     environment: str,
     assume_unchanged: bool,
+    engine_managers: Iterable[str],
+    ours: Iterable[str] = OUR_MANAGERS,
 ) -> bool:
     """True when this object may be left alone.
 
-    Three conditions, and the third is the one that is easy to leave out:
+    Four conditions, and the last two are the ones that are easy to leave
+    out:
 
     1. the operator asked for it;
     2. the live hash equals the rendered one;
-    3. **the live object already carries `ekn.dev/environment=<env>`.**
+    3. **the live object already carries `ekn.dev/environment=<env>`;**
+    4. **no manager outside *ours* and *engine_managers* owns part of it.**
 
     Without the third, a fast run skips objects a GitOps engine applied and
     `ekn` never stamped -- and a later `--prune` selects by exactly that
@@ -151,6 +155,23 @@ def skippable(
     This is why fast mode and `--prune` are not in conflict. An earlier
     reading of this design had them mutually exclusive; the label condition
     is exact where that was merely conservative.
+
+    **Without the fourth, content drift is invisible.** Both hashes are
+    annotations: the rendered one from the render, the live one from what
+    `ekn` wrote when it last applied. Neither is recomputed from live
+    content, so a `kubectl edit` that changes a Deployment's image leaves
+    the annotation alone, the hashes match, and the object is skipped for
+    ever. What that edit does leave is a field manager -- `kubectl-edit`,
+    or `kubectl-client-side-apply` for an apply -- and the same sweep that
+    reads the hash reads those. Reported by the operator this mode exists
+    for.
+
+    *engine_managers* has no default on purpose. It decides how strict
+    this is, and getting it wrong is not symmetric: too narrow makes
+    nearly everything unskippable, because `kube-controller-manager` owns
+    fields on most objects by design, and the mode quietly stops being
+    fast. See `foreign_owners`, which answers the same question for
+    reporting.
     """
     if not assume_unchanged:
         return False
@@ -160,7 +181,9 @@ def skippable(
     seen = live.get(object_key(spec))
     if seen is None or seen.manifest_hash != wanted:
         return False
-    return seen.environment == environment
+    if seen.environment != environment:
+        return False
+    return not (seen.managers - frozenset(ours) - frozenset(engine_managers))
 
 
 @dataclass(frozen=True)

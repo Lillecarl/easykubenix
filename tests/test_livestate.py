@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import pytest
+
 from ekn.livestate import (
     HASH_ANNOTATION,
     ForeignOwner,
@@ -36,12 +38,23 @@ def manifest(name: str = "a", hash_value: str | None = None, **annotations: str)
     return {"apiVersion": "v1", "kind": "ConfigMap", "metadata": metadata}
 
 
-def live(name: str = "a", hash_value: str | None = None, environment: str | None = ENV) -> LiveObject:
+def live(
+    name: str = "a",
+    hash_value: str | None = None,
+    environment: str | None = ENV,
+    managers: frozenset[str] = frozenset({"ekn"}),
+) -> LiveObject:
     return LiveObject(
         key=("default", "ConfigMap", name),
         manifest_hash=hash_value,
         environment=environment,
+        managers=managers,
     )
+
+
+#: What `skippable` is told the delivery engine's managers are. Every call
+#: has to say, because the argument has no default -- see its docstring.
+ENGINE: frozenset[str] = frozenset({"argocd-controller", "kube-controller-manager"})
 
 
 class TestTheHash:
@@ -81,18 +94,20 @@ class TestSkipping:
         spec = manifest(hash_value="sha256:x")
         state = {("default", "ConfigMap", "a"): live(hash_value="sha256:x")}
 
-        assert not skippable(spec, state, environment=ENV, assume_unchanged=False)
-        assert skippable(spec, state, environment=ENV, assume_unchanged=True)
+        assert not skippable(spec, state, environment=ENV, assume_unchanged=False, engine_managers=ENGINE)
+        assert skippable(spec, state, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
 
     def test_a_changed_hash_is_never_skipped(self) -> None:
         """Negative control: the one thing fast mode must never get wrong."""
         spec = manifest(hash_value="sha256:new")
         state = {("default", "ConfigMap", "a"): live(hash_value="sha256:old")}
 
-        assert not skippable(spec, state, environment=ENV, assume_unchanged=True)
+        assert not skippable(spec, state, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
 
     def test_an_object_the_cluster_does_not_have_is_never_skipped(self) -> None:
-        assert not skippable(manifest(hash_value="sha256:x"), {}, environment=ENV, assume_unchanged=True)
+        assert not skippable(
+            manifest(hash_value="sha256:x"), {}, environment=ENV, assume_unchanged=True, engine_managers=ENGINE
+        )
 
     def test_an_unstamped_object_is_applied_once(self) -> None:
         """The condition that dissolves the fast-mode/prune conflict.
@@ -107,21 +122,55 @@ class TestSkipping:
         unstamped = {("default", "ConfigMap", "a"): live(hash_value="sha256:x", environment=None)}
         stamped = {("default", "ConfigMap", "a"): live(hash_value="sha256:x")}
 
-        assert not skippable(spec, unstamped, environment=ENV, assume_unchanged=True)
-        assert skippable(spec, stamped, environment=ENV, assume_unchanged=True)
+        assert not skippable(spec, unstamped, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
+        assert skippable(spec, stamped, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
 
     def test_another_environments_stamp_does_not_count(self) -> None:
         spec = manifest(hash_value="sha256:x")
         state = {("default", "ConfigMap", "a"): live(hash_value="sha256:x", environment="other")}
 
-        assert not skippable(spec, state, environment=ENV, assume_unchanged=True)
+        assert not skippable(spec, state, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
 
     def test_a_render_with_no_hash_is_never_skipped(self) -> None:
         """A configuration rendered before the annotation existed. Applying
         it is the only correct answer."""
         state = {("default", "ConfigMap", "a"): live(hash_value="sha256:x")}
 
-        assert not skippable(manifest(), state, environment=ENV, assume_unchanged=True)
+        assert not skippable(manifest(), state, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
+
+    @pytest.mark.parametrize("manager", ["kubectl-edit", "kubectl-client-side-apply", "some-operator"])
+    def test_a_foreign_manager_makes_it_unskippable(self, manager: str) -> None:
+        """The condition that makes content drift visible at all.
+
+        Both hashes are annotations, and neither is recomputed from live
+        content, so a `kubectl edit` that changes an image leaves them
+        equal. The manager it leaves behind is the only trace, and this is
+        what reads it. Without this the object is skipped for ever and the
+        edit is never repaired -- reported by the operator this mode is
+        for.
+        """
+        spec = manifest(hash_value="sha256:x")
+        state = {("default", "ConfigMap", "a"): live(hash_value="sha256:x", managers=frozenset({"ekn", manager}))}
+
+        assert not skippable(spec, state, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
+
+    def test_the_engine_and_its_controllers_do_not_block_a_skip(self) -> None:
+        """The other half, and the one that decides whether this is usable.
+
+        `kube-controller-manager` owns fields on most objects by design. If
+        it counted, nearly nothing would be skippable and fast mode would
+        quietly stop being fast -- so `engine_managers` is what the caller
+        says is expected, and expected owners do not block.
+        """
+        spec = manifest(hash_value="sha256:x")
+        state = {
+            ("default", "ConfigMap", "a"): live(
+                hash_value="sha256:x",
+                managers=frozenset({"ekn", "kube-controller-manager", "argocd-controller"}),
+            )
+        }
+
+        assert skippable(spec, state, environment=ENV, assume_unchanged=True, engine_managers=ENGINE)
 
 
 class TestForeignOwners:
