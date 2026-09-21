@@ -637,9 +637,14 @@ class TestWaitEstablished:
         assert crd.calls == 1
 
     async def test_a_crd_that_never_establishes_fails_with_its_name(self) -> None:
-        """`asyncio.timeout` raises a bare `TimeoutError`, so
+        """`anyio.fail_after` raises a bare `TimeoutError`, so
         `_wait_established` replaces it with one that names the CRD and the
         deadline.
+
+        It also states what a cancel scope needs and a `timeout=` argument
+        does not: that `kr8s.wait` passes a cancellation on rather than
+        swallowing it. A callee that swallows one makes `fail_after` expire
+        silently, and this test would hang instead.
         """
         crd = FakeCrd(ever_establishes=False)
 

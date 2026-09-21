@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
+import anyio
 import kr8s
 import structlog
 from kr8s.asyncio.objects import APIObject, get_class, new_class
@@ -313,10 +313,15 @@ def with_environment_label(spec: Manifest, label: str, value: str) -> Manifest:
 async def _wait_established(crd: APIObject, seconds: float) -> None:
     """Wait for one CRD to report Established, and name it if it never does.
 
-    **`asyncio.timeout`, and not a `timeout=` argument.** The context
+    **`anyio.fail_after`, and not a `timeout=` argument.** The context
     manager keeps a float away from `kr8s`' `wait`, which annotates its own
     `timeout` as `int | None` although the `async_wait` under it takes
     `int | float | None`.
+
+    A cancel scope expires only when the cancellation it delivered comes back
+    out of the scope, where `asyncio.timeout` keys on the deadline alone. So
+    this is right exactly while `kr8s.wait` passes a cancellation on, which is
+    what the test for a CRD that never establishes states.
 
     *seconds*, and not *timeout*: the value is the argument of the context
     manager below, not a deadline this function passes on to something else.
@@ -329,7 +334,7 @@ async def _wait_established(crd: APIObject, seconds: float) -> None:
     `kr8s`, so an empty status now reads as a condition not met.
     """
     try:
-        async with asyncio.timeout(seconds):
+        with anyio.fail_after(seconds):
             await crd.wait("condition=Established")
     except TimeoutError as exc:
         msg = f"CRD {crd.name} did not become Established within {seconds}s"
