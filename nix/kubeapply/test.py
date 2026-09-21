@@ -13,6 +13,8 @@ missing the controllers:
                    shape `ekn.apply.discover` exists for
     workload       the Deployment reaches Ready, so a kubelet answered
     idempotent     a second apply of the same generation changes nothing
+    fast mode      --assume-unchanged skips what nothing has written, and
+                   sends again exactly what somebody did write
     prune          the next generation deletes exactly what it dropped,
                    and nothing in another environment
     prune scope    a whole-instance prune leaves a deployment unit's objects
@@ -25,7 +27,10 @@ their store paths in `settings`, which is what makes the derivation build
 them.
 """
 
-from uml_runner import MachineError, run_test
+import re
+from typing import Any
+
+from uml_runner import Machine, MachineError, Machines, run_test
 from uml_runner.cluster import bring_up, get_json, kubectl, wait_for_pods
 
 # An apply is seconds of work against an idle API server.  This is not that
@@ -42,7 +47,7 @@ UNIT_LABEL = "ekn.dev/deployment-unit"
 RESOURCES = ("namespaces", "configmaps", "crds", "deployments", "widget-parts")
 
 
-def selector(environment, unit=None, hand_applied=()):
+def selector(environment: str, unit: str | None = None, hand_applied: tuple[str, ...] = ()) -> str:
     """The label selector one apply owns.  Mirrors `apply.prune_selector`.
 
     Written out again here rather than imported, deliberately.  A test that
@@ -61,7 +66,7 @@ def selector(environment, unit=None, hand_applied=()):
     return f"{ENV_LABEL}={environment},{UNIT_LABEL} notin ({','.join(sorted(hand_applied))})"
 
 
-def hand_applied_units(settings, unit):
+def hand_applied_units(settings: dict[str, Any], unit: str | None) -> tuple[str, ...]:
     """The units a prune of this scope must not touch.
 
     Derived in one place rather than at each call, because a site that forgot
@@ -74,7 +79,14 @@ def hand_applied_units(settings, unit):
     return () if unit is not None else (settings["unit"],)
 
 
-async def apply(cp, settings, generation, environment, unit=None):
+async def apply(  # noqa: PLR0913 -- one call site per check, and each argument is a flag the command takes
+    cp: Machine,
+    settings: dict[str, Any],
+    generation: str,
+    environment: str,
+    unit: str | None = None,
+    assume_unchanged: bool = False,
+) -> str:
     """Run one `ekn _applyManifest` in the guest, and return its output.
 
     The output is printed whether the apply passes or fails.  `ekn` logs a
@@ -90,6 +102,8 @@ async def apply(cp, settings, generation, environment, unit=None):
         f" --environment {environment}"
         f" --resource-priority-file {settings['resourcePriority']}"
     )
+    if assume_unchanged:
+        command += " --assume-unchanged"
     if unit is not None:
         command += f" --unit {unit}"
     for excluded in hand_applied:
@@ -101,7 +115,9 @@ async def apply(cp, settings, generation, environment, unit=None):
     return out
 
 
-async def inventory(cp, settings, environment, unit=None):
+async def inventory(
+    cp: Machine, settings: dict[str, Any], environment: str, unit: str | None = None
+) -> dict[tuple[str, str, str], str]:
     """Everything on the cluster inside one prune scope.
 
     Maps ``(kind, namespace, name)`` to the object's resourceVersion, over
@@ -122,16 +138,16 @@ async def inventory(cp, settings, environment, unit=None):
     return found
 
 
-def keys(inventoried):
+def keys(inventoried: dict[tuple[str, str, str], str] | set[tuple[str, str, str]]) -> list[str]:
     return sorted(f"{kind}/{namespace}/{name}" for kind, namespace, name in inventoried)
 
 
-def expect(what, got, want):
+def expect(what: str, got: object, want: object) -> None:
     if got != want:
         raise MachineError(f"{what}\n  wanted: {want}\n  got:    {got}")
 
 
-async def check_first_apply(cp, settings):
+async def check_first_apply(cp: Machine, settings: dict[str, Any]) -> None:
     """The whole generation lands, and the custom resource comes back.
 
     Reading the CR back is the point.  An apply that exits 0 says the API
@@ -167,13 +183,13 @@ async def check_first_apply(cp, settings):
     )
 
 
-async def check_workload(cp, settings):
+async def check_workload(cp: Machine, settings: dict[str, Any]) -> None:
     """The Deployment's Pod runs, so a kubelet acted on the apply."""
     await wait_for_pods(cp, "--selector app=probe", namespace=settings["namespace"])
     print("[kubeapply] the workload is Ready", flush=True)
 
 
-async def check_other_environment(cp, settings):
+async def check_other_environment(cp: Machine, settings: dict[str, Any]) -> None:
     """A second easykubenix instance, in a namespace of its own.
 
     It shares the custom kind with the generations above, and every prune
@@ -193,7 +209,7 @@ async def check_other_environment(cp, settings):
     )
 
 
-async def check_unit_apply(cp, settings):
+async def check_unit_apply(cp: Machine, settings: dict[str, Any]) -> None:
     """A deployment unit of the *same* environment, in the same namespace.
 
     The unit label is rendered into the manifest, so `ekn` never writes it --
@@ -222,7 +238,7 @@ async def check_unit_apply(cp, settings):
             raise MachineError(f"{name} answers the whole-instance selector, which excludes unit objects")
 
 
-async def check_unit_prune(cp, settings):
+async def check_unit_prune(cp: Machine, settings: dict[str, Any]) -> None:
     """A unit's own prune deletes inside its scope and nowhere else.
 
     `unitReduced` drops `bootstrap-extra`, so this proves the unit scope is
@@ -254,7 +270,7 @@ async def check_unit_prune(cp, settings):
     )
 
 
-async def check_idempotent(cp, settings):
+async def check_idempotent(cp: Machine, settings: dict[str, Any]) -> None:
     """The same generation applied twice changes nothing.
 
     Compared by resourceVersion, which the API server bumps on any write --
@@ -271,7 +287,7 @@ async def check_idempotent(cp, settings):
     """
     inert = {"ConfigMap", "WidgetPart"}
 
-    def only_inert(inventoried):
+    def only_inert(inventoried: dict[tuple[str, str, str], str]) -> dict[tuple[str, str, str], str]:
         return {key: value for key, value in inventoried.items() if key[0] in inert}
 
     before = only_inert(await inventory(cp, settings, settings["environment"]))
@@ -282,7 +298,80 @@ async def check_idempotent(cp, settings):
     print(f"[kubeapply] {len(before)} objects unchanged by a second apply", flush=True)
 
 
-async def check_prune(cp, settings):
+def cache_report(output: str) -> dict[str, int]:
+    """The `apply cache skipped=N recorded=M` line, as a dict of ints.
+
+    Read from the log rather than from a file, because the file is the thing
+    under test: a run that wrote the cache and skipped nothing, and a run that
+    skipped everything, leave the same file.
+
+    The escapes go first.  structlog's ConsoleRenderer colours every key and
+    every value whether or not a terminal is attached, so a colour reset sits
+    between the key and its `=`: the event name still matches, and no
+    `field=value` does.
+    """
+    for line in re.sub(r"\x1b\[[0-9;]*m", "", output).splitlines():
+        if "apply cache" not in line:
+            continue
+        found = {}
+        for field in ("skipped", "recorded"):
+            marker = f"{field}="
+            if marker in line:
+                found[field] = int(line.split(marker, 1)[1].split()[0].strip("'\""))
+        if found:
+            return found
+    raise MachineError(f"no 'apply cache' line in:\n{output}")
+
+
+async def check_assume_unchanged(cp: Machine, settings: dict[str, Any]) -> None:
+    """`--assume-unchanged` against a real API server: the sweep, and the gate.
+
+    Nothing else here can answer this.  The unit tests describe the gate
+    against a double this repository wrote, and the two things it depends on
+    are the API server's own behaviour: that a
+    `PartialObjectMetadataList` LIST at `resourceVersion=0` answers with
+    every object's metadata, and that a server-side apply which changes
+    nothing does not move a `resourceVersion`.  If either is untrue, the
+    first run below skips nothing and the second re-applies everything.
+
+    Three runs, and the third is the one that matters.  A gate that only
+    proved the skip would pass just as well on a cache that skips
+    unconditionally -- which is the failure this whole design exists to
+    avoid.
+    """
+    environment = settings["environment"]
+    namespace = settings["namespace"]
+
+    primed = cache_report(await apply(cp, settings, "gen1", environment, assume_unchanged=True))
+    expect("the first --assume-unchanged run skipped something", primed["skipped"], 0)
+
+    skipping = cache_report(await apply(cp, settings, "gen1", environment, assume_unchanged=True))
+    if skipping["skipped"] == 0:
+        raise MachineError(
+            f"the second --assume-unchanged run skipped nothing, of the {primed['recorded']} objects the "
+            "first recorded. Either the sweep read no metadata, or a no-op apply moved a resourceVersion."
+        )
+    settled = await inventory(cp, settings, environment)
+
+    # Somebody else writes one object.  Only its resourceVersion moves -- the
+    # bytes `ekn` sent are still what this machine recorded, and an annotation
+    # nobody declares survives a server-side apply -- so that version is the
+    # only thing left that can tell the next run to send it.
+    await kubectl(cp, f"annotate configmap settings --namespace {namespace} kubeapply.test/edited=yes")
+    moved = {key for key, version in (await inventory(cp, settings, environment)).items() if settled[key] != version}
+
+    edited = cache_report(await apply(cp, settings, "gen1", environment, assume_unchanged=True))
+
+    # Measured against what actually moved, not against a count of one: the
+    # Deployment's own controller writes its status, and a run that skipped
+    # one object fewer because of that would otherwise read as this working.
+    expect("what the edit moved", ("ConfigMap", namespace, "settings") in moved, True)
+    expect("objects sent again", skipping["skipped"] - edited["skipped"], len(moved))
+    expect("objects recorded again", edited["recorded"], len(moved))
+    print(f"[kubeapply] {edited['skipped']} skipped, {len(moved)} written since and applied again", flush=True)
+
+
+async def check_prune(cp: Machine, settings: dict[str, Any]) -> None:
     """gen2 drops one ConfigMap and one WidgetPart, and only those go.
 
     The WidgetPart is the half worth having.  Pruning lists a kind back
@@ -335,7 +424,7 @@ async def check_prune(cp, settings):
     )
 
 
-async def check_prune_gap(cp, settings):
+async def check_prune_gap(cp: Machine, settings: dict[str, Any]) -> None:
     """The documented limitation, as it behaves rather than as it should.
 
     `apply_and_prune` scans only the kinds the current apply touches, so a
@@ -370,7 +459,7 @@ async def check_prune_gap(cp, settings):
     print("[kubeapply] the prune gap still behaves as documented", flush=True)
 
 
-async def test(vms):
+async def test(vms: Machines) -> None:
     settings = vms.settings
     print(
         f"[kubeapply] kubernetes {settings['kubernetesVersion']}, environment {settings['environment']}",
@@ -384,6 +473,7 @@ async def test(vms):
     await check_other_environment(cp, settings)
     await check_unit_apply(cp, settings)
     await check_idempotent(cp, settings)
+    await check_assume_unchanged(cp, settings)
     await check_prune(cp, settings)
     await check_unit_prune(cp, settings)
     await check_prune_gap(cp, settings)
