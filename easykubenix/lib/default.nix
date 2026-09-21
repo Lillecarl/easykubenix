@@ -29,6 +29,16 @@ self: lib: rec {
     seededVariables
     ;
 
+  # The `ekn.dev/manifest-hash` annotation the render stamps on every object,
+  # and the canonicalisation behind it. `ekn` reads it to decide that an
+  # object on the cluster is the one this configuration renders, without
+  # sending it. See manifestHash.nix.
+  inherit (import ./manifestHash.nix { inherit lib isSeededObject; })
+    manifestHash
+    manifestHashAnnotation
+    stampManifestHash
+    ;
+
   # The three markers use `_type`. This is the tag that the module system uses
   # for its own directives. `mkIf`, `mkMerge` and `mkOverride` all use it.
   # Nixpkgs ignores a `_type` value that it does not know. Such a value goes

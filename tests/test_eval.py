@@ -16,10 +16,23 @@ from ekn.eval import (
     evaluate_kubeapply_config,
     realise_attr,
 )
+from ekn.livestate import strip_hash_annotation
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 NIX_TEST_FILE = PROJECT_ROOT / "tests/test_eval.nix"
 TEMPLATES_NIX_TEST_FILE = PROJECT_ROOT / "tests/test_templates.nix"
+
+
+def without_hash(obj: Any) -> Any:
+    """One rendered object without its `ekn.dev/manifest-hash`.
+
+    Every object the render produces carries one, so an assertion about an
+    object's exact shape is an assertion about this. `strip_hash_annotation`
+    is the render's own inverse, including dropping an `annotations` that held
+    nothing else -- which is what lets a test still say "this object carries
+    no annotations".
+    """
+    return strip_hash_annotation(obj)
 
 
 @pytest.fixture(scope="module")
@@ -89,7 +102,7 @@ class TestRealiseAttr:
 class TestEknModule:
     async def test_adios_template_creates_a_resource(self) -> None:
         result = await evaluate_file(TEMPLATES_NIX_TEST_FILE, "templates")
-        assert result == {
+        assert without_hash(result) == {
             "apiVersion": "bitnami.com/v1alpha1",
             "kind": "SealedSecret",
             "metadata": {"name": "database", "namespace": "default"},
@@ -181,7 +194,7 @@ class TestEknModule:
     async def test_labels_annotations_are_coerced_by_default(self) -> None:
         result = await evaluate_file(NIX_TEST_FILE, "labelsAnnotationsCoercion")
         assert isinstance(result, list)
-        metadata = result[0]["metadata"]
+        metadata = without_hash(result[0])["metadata"]
         assert metadata["labels"] == {"enabled": "true", "replicas": "3"}
         assert metadata["annotations"] == {"disabled": "false"}
 
@@ -673,22 +686,22 @@ class TestGitOpsTargetMetadata:
         assert "argocd.argoproj.io/tracking-id" not in crd["metadata"].get("annotations", {})
         # Declining one value must not suppress the others, and must not
         # leave an empty `annotations: {}` behind either.
-        assert "annotations" not in crd["metadata"]
+        assert "annotations" not in without_hash(crd)["metadata"]
         assert crd["metadata"]["labels"]["ekn.dev/kind"] == "CustomResourceDefinition"
 
     async def test_a_target_declaring_no_metadata_stamps_only_the_unit_label(self) -> None:
         result = await evaluate_file(NIX_TEST_FILE, "deploymentUnitMetadata")
         assert isinstance(result, dict)
-        unstamped = self._by_name(result["apps"])["unstamped"]
 
         # The control for everything above: being in a target is not what
         # stamps an object, declaring the metadata is. The one exception is
         # the unit label, which every unit declares by default.
-        assert sorted(unstamped["metadata"]) == ["labels", "name", "namespace"]
-        assert unstamped["metadata"]["labels"] == {"ekn.dev/deployment-unit": "apps"}
+        bare = without_hash(self._by_name(result["apps"])["unstamped"])
+        assert sorted(bare["metadata"]) == ["labels", "name", "namespace"]
+        assert bare["metadata"]["labels"] == {"ekn.dev/deployment-unit": "apps"}
         # No empty `annotations: {}` either, which would show up as a spurious
         # field in every committed manifest.
-        assert "annotations" not in unstamped["metadata"]
+        assert "annotations" not in bare["metadata"]
 
     async def test_every_unit_records_its_name_on_its_objects(self) -> None:
         """The mark has to be in the rendered manifest, not stamped at apply time.

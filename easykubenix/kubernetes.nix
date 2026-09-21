@@ -281,6 +281,20 @@ let
 
   allGenerated = map stampRouted (generatedWithEkn ++ checkedCrds);
 
+  # The last thing the render does to an object, and the reason it is one
+  # function rather than two lines repeated.
+  #
+  # `ekn` belongs to the EKN compiler, not to the Kubernetes manifest: left in
+  # place it lands as a literal top-level field in every object `ekn commit`
+  # writes to the GitOps tree, permanently OutOfSync because nothing produces
+  # it on the live-cluster side.
+  #
+  # The hash is then of the object exactly as it is applied. **Every output
+  # carrying the same object has to run this**, or `kubernetes.generated` and
+  # `kubernetes.deploymentUnits` disagree about an object's hash and whichever
+  # applied last decides what the cluster carries. See lib/manifestHash.nix.
+  finalise = object: lib.stampManifestHash (removeAttrs object [ "ekn" ]);
+
   # `assertions`/`warnings` (assertions.nix) are collected from every module,
   # but a plain `lib.evalModules` has nothing playing the part NixOS'
   # top-level.nix plays -- so unless something forces them they are gathered
@@ -1193,12 +1207,7 @@ in
       in
       lib.listToAttrs (map objectToAttr data.resources);
 
-    generated = checked (
-      lib.pipe allGenerated [
-        # `ekn` belongs to the EKN compiler, not to the Kubernetes manifest.
-        (map (object: removeAttrs object [ "ekn" ]))
-      ]
-    );
+    generated = checked (lib.pipe allGenerated [ (map finalise) ]);
 
     generatedExportable = lib.filter (object: !(lib.isSeededObject object)) config.kubernetes.generated;
 
@@ -1222,16 +1231,7 @@ in
         objectsByTarget = lib.pipe allGenerated [
           (lib.filter (object: (object.ekn.deploymentUnit or null) != null))
           (lib.groupBy (object: object.ekn.deploymentUnit))
-          (lib.mapAttrs (
-            _name: objects:
-            # `ekn` belongs to the EKN compiler, not to the Kubernetes
-            # manifest -- same strip as `kubernetes.generated` above. Left
-            # in place here, it would land as a literal top-level field in
-            # every object `ekn commit` writes to the GitOps tree,
-            # permanently OutOfSync since nothing ever produces it on the
-            # live-cluster side.
-            map (object: removeAttrs object [ "ekn" ]) objects
-          ))
+          (lib.mapAttrs (_name: objects: map finalise objects))
         ];
         rawFilesByTarget = lib.pipe config.kubernetes.rawFiles [
           (lib.filter (f: f.deploymentUnit != null))
@@ -1306,9 +1306,20 @@ in
                 # `objectsByTarget` comes from `allGenerated`, where
                 # `stampRouted` already stamped every routed object -- see
                 # its comment for why that has to happen there.
+                # The nested instance stamped its own objects, and the
+                # parent's labels change them -- so the hash is recomputed
+                # here, after the label lands. `stampManifestHash` strips the
+                # annotation before hashing, so this is the hash of the object
+                # as this unit applies it rather than of what the nested
+                # instance rendered.
                 objects =
                   (objectsByTarget.${name} or [ ])
-                  ++ (if submodule == null then [ ] else map (stampTargetMetadata declared) submodule.generated);
+                  ++ (
+                    if submodule == null then
+                      [ ]
+                    else
+                      map (object: lib.stampManifestHash (stampTargetMetadata declared object)) submodule.generated
+                  );
                 # Paths only, deliberately not read/parsed here -- reading them
                 # would mean round-tripping their content through Nix's
                 # attrset representation, exactly what rawFiles exists to
