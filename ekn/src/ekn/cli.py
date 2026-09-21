@@ -22,7 +22,7 @@ from nanopynix.models import JsonValue
 from nanopynix.primops import from_go_like_yaml_stream, from_yaml11_stream, from_yaml_stream, to_yaml
 from pydantic import TypeAdapter, ValidationError
 
-from ekn import enginepause, fastcache, seeds, storecheck
+from ekn import clusterfence, enginepause, fastcache, seeds, storecheck
 from ekn._cli import Command, build_parser, complete, dispatch, opt, pos
 from ekn.apply import DEFAULT_DELIVERY_MANAGERS, DEFAULT_FIELD_MANAGER, apply_and_prune, prune_generation
 from ekn.clusterdiff import cluster_diff
@@ -189,6 +189,35 @@ class AttrCommand(NixCommand):
     """
 
     attr: str | None = opt(None, short="A", help="Dot-separated attribute path within the evaluation result.")
+
+
+class FencedCommand(AttrCommand):
+    """An `AttrCommand` that reaches a real cluster, and checks which one.
+
+    Declared here rather than on `AttrCommand` because most subclasses of
+    that never open an API at all -- `eval`, `render`, `diff`, `commit`,
+    `rollback` -- and an option they cannot act on is an option somebody
+    will try.
+
+    `_fence` goes immediately after the `kr8s.asyncio.api(...)` that a
+    subclass builds, and above the first thing that writes. In `kubeapply`
+    that means above `ensure_age_identities`, which creates a Namespace and a
+    Secret, and above `_hold_the_engine`, which scales workloads down: both
+    run before any manifest is applied.
+    """
+
+    i_dont_know_which_cluster_this_is: bool = opt(
+        False,
+        help="Run although ekn.clusterUid is unset. It does not override a mismatch: a configuration "
+        "that names a different cluster is a disagreement, not a missing answer.",
+    )
+
+    async def _fence(self, api: kr8s.asyncio.Api, cfg: KubeApplyConfigResult) -> str | None:
+        return await clusterfence.require(
+            api,
+            cfg.cluster_uid,
+            override=self.i_dont_know_which_cluster_this_is,
+        )
 
 
 class Eval(AttrCommand):
@@ -1024,6 +1053,7 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
     api: kr8s.asyncio.Api,
     target: str | None,
     prune: bool,
+    cluster: str | None = None,
     converge: _ConvergeOptions | None = None,
     held_by_engine_pause: set[tuple[str, str, str]] | None = None,
     assume_unchanged: bool = False,
@@ -1081,6 +1111,9 @@ async def _apply_groups(  # noqa: PLR0913 -- each argument is one decision `ekn 
     cache = await fastcache.open_cache(
         api,
         environment=cfg.environment,
+        # The fence already read it. `None` here is a caller that has none --
+        # no fenced command -- and `open_cache` reads it itself.
+        cluster=cluster,
         assume_unchanged=assume_unchanged,
         never_record=_uncacheable(cfg),
     )
@@ -1192,7 +1225,11 @@ async def _apply_prepared(  # noqa: PLR0913 -- the state `_apply_groups` built, 
         )
 
 
-class KubeApply(CachePushCommand):
+# Both bases, because this command is both things and each says a different
+# one: it pushes `ekn.cacheTo` before it acts, and it reaches a real cluster.
+# `Command.__init_subclass__` walks `__mro__`, so options from both are
+# collected; both derive from `AttrCommand`, so the linearisation is ordinary.
+class KubeApply(CachePushCommand, FencedCommand):
     """Apply Kubernetes objects directly against the current kubeconfig
     context: server-side apply in barrier order, with optional pruning.
 
@@ -1361,6 +1398,11 @@ class KubeApply(CachePushCommand):
         async with contextlib.AsyncExitStack() as stack:
             kubeconfig = await self._kubeconfig(stack, uri, customer)
             api = await kr8s.asyncio.api(kubeconfig=kubeconfig)
+            # Above `ensure_age_identities`, which creates a Namespace and a
+            # Secret, and above `_hold_the_engine`, which scales workloads
+            # down. Both write before a single manifest is applied, so a
+            # fence below them is a fence after the damage.
+            cluster = await self._fence(api, cfg)
             if cfg.sops_age_identities:
                 await ensure_age_identities(cfg.sops_age_identities, api=api)
             held = await _hold_the_engine(cfg, api=api, stack=stack) if self.pause_engine else set()
@@ -1370,6 +1412,7 @@ class KubeApply(CachePushCommand):
                     api=api,
                     target=self.target,
                     prune=self.prune,
+                    cluster=cluster,
                     held_by_engine_pause=held,
                     converge=_ConvergeOptions(
                         enabled=self.converge,
@@ -1602,7 +1645,7 @@ class Tofu(AttrCommand):
         self.print_help()
 
 
-class Secrets(AttrCommand):
+class Secrets(FencedCommand):
     """List the bootstrap credentials this configuration expects.
 
     Read-only, and answers the question before a cluster exists: which
@@ -1644,6 +1687,11 @@ class Secrets(AttrCommand):
             # before a cluster exists.
             _log.info("no cluster reachable; reporting what is expected only")
             _log.debug("cluster unreachable", exc_info=True)
+        else:
+            # Only when one was reached. This command answers before a cluster
+            # exists, which is the shape above; a cluster that *is* reachable
+            # and is the wrong one gives a wrong checklist, so that refuses.
+            await self._fence(api, cfg)
 
         # A table, not one structured log line per seed. The columns are
         # wide -- a variable name and a namespace/kind/name -- so at five or
@@ -1652,7 +1700,7 @@ class Secrets(AttrCommand):
         print(seeds.table(await seeds.inspect(rows, api=api)))
 
 
-class ClusterDiff(AttrCommand):
+class ClusterDiff(FencedCommand):
     """Diff Kubernetes objects against the live cluster.
 
     Unlike `ekn diff` (which compares against the previous GitOps commit),
@@ -1680,6 +1728,7 @@ class ClusterDiff(AttrCommand):
             _report_validation_error("kubeapply config", exc)
         objects = [await maybe_decrypt(obj) for obj in cfg.objects]
         api = await kr8s.asyncio.api()
+        await self._fence(api, cfg)
         try:
             diff_output = await cluster_diff(objects, api=api)
         except kr8s.ServerError as exc:
@@ -1690,7 +1739,7 @@ class ClusterDiff(AttrCommand):
             _log.info("no differences")
 
 
-class Reclaim(AttrCommand):
+class Reclaim(FencedCommand):
     """Move server-side-apply ownership onto this instance's field manager.
 
     **A one-time repair, for objects that crossed a field-manager change.**
@@ -1746,6 +1795,7 @@ class Reclaim(AttrCommand):
         if new in set(old):
             raise SystemExit(f"refusing to reclaim {new!r} onto itself; --field-manager-from names the *old* manager")
         api = await kr8s.asyncio.api()
+        await self._fence(api, cfg)
         try:
             changed = await reclaim(cfg.objects, api, old=old, new=new, dry_run=self.dry_run)
         except kr8s.ServerError as exc:

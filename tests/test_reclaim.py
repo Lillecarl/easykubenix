@@ -135,6 +135,12 @@ class TestTheMerge:
         assert entries[0]["manager"] == "ekn"
 
 
+#: The cluster these tests pretend to be talking to. `ekn reclaim` refuses a
+#: cluster the configuration does not name, so the config and the stand-in
+#: read have to agree.
+_CLUSTER_UID = "3b2a1f0e-9d8c-4b7a-8e6f-5d4c3b2a1f0e"
+
+
 class TestTheCommand:
     """`ekn reclaim`'s own two decisions: which manager to take ownership
     from, and when to refuse.
@@ -155,6 +161,10 @@ class TestTheCommand:
                 "sops_age_identities": [],
                 "handAppliedUnits": [],
                 "declaredUnits": [],
+                # `ekn reclaim` is fenced like `kubeapply`: it rewrites field
+                # ownership on every object, so the wrong cluster matters as
+                # much there. `_patch` answers with the same uid.
+                "clusterUid": _CLUSTER_UID,
             }
         )
 
@@ -184,9 +194,13 @@ class TestTheCommand:
         async def _api() -> Any:
             return object()
 
+        async def _cluster_id(*_args: Any, **_kwargs: Any) -> str:
+            return _CLUSTER_UID
+
         monkeypatch.setattr(cli_module, "evaluate_kubeapply_config", _evaluate)
         monkeypatch.setattr(cli_module, "reclaim", _reclaim)
         monkeypatch.setattr(cli_module.kr8s.asyncio, "api", _api)
+        monkeypatch.setattr(cli_module.clusterfence, "read_cluster_id", _cluster_id)
 
     async def test_the_default_source_is_ekn(self, monkeypatch: Any) -> None:
         """What a whole-instance apply wrote before `deployment.fieldManager`
