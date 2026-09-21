@@ -78,7 +78,7 @@ consumer repository whose shell takes `easykubenix.passthru.ekn` gets the
 instead for a shell that can profile.
 
 **Start it inside the event loop.** pyinstrument records the async context it
-started in, so a profiler started around `asyncio.run` charges the whole wait
+started in, so a profiler started around `anyio.run` charges the whole wait
 to the loop's selector and nothing to the frame that awaited — measured 72%
 of a real `clusterdiff` in one `selectors.py:select`. `main` wraps
 `command.run()` for that reason; `tests/test_profile.py` holds both arms.
@@ -146,10 +146,22 @@ what to inspect next, then query `/tmp/pytest.log` for the full failure context.
 - Do not use `assert` statements outside `tests/`. For runtime validation, use
   explicit `if ...: raise ...`. To satisfy type checkers, prefer local variable
   aliasing or explicit `if value is None: raise ...` checks.
-- Do not use `asyncio.get_event_loop()`. Use `asyncio.get_running_loop()` inside
-  async code. For timestamps, use `time.monotonic()`.
-- Keep a strong reference to background tasks created with
-  `asyncio.create_task()`, for example in an instance `set` or `list`.
+- Concurrency goes through `anyio`, not `asyncio`: `anyio.run_process` and
+  `anyio.open_process`, `anyio.sleep`, `anyio.Lock`, `anyio.Event`,
+  `anyio.fail_after`/`move_on_after`, `anyio.to_thread.run_sync(...,
+  abandon_on_cancel=True)`, `anyio.get_cancelled_exc_class()`. `ruff-anyio.toml`
+  bans each replaced name and says what to use. `kr8s.asyncio` is a module path
+  and not one of them.
+- Background work belongs to a task group. There is no detached task to keep a
+  reference to, and a group cancels every sibling when a child raises — so
+  per-request work that may fail needs a wrapper that keeps `Exception` inside.
+- For a duration, use `time.monotonic()`. For a value a cancel scope is measured
+  against, use `anyio.current_time()`, which is the event loop's own clock.
+- Ending a process you hold across method calls needs
+  `with anyio.CancelScope(shield=True):` around the whole teardown, bounded by
+  `move_on_after`. A cancel scope re-delivers cancellation at every checkpoint,
+  so an unshielded `await process.wait()` in a `finally` never finishes and the
+  child survives. See `ekn.validation.terminate_process`.
 - Do not hide unexpected failures with `except Exception: pass`. Log unexpected
   exceptions. Use `contextlib.suppress(...)` only for expected ignored
   exceptions, with a comment explaining why they are safe to ignore.
