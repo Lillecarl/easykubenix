@@ -1513,10 +1513,19 @@ async def push_closure_to_store(  # noqa: PLR0913 -- tracked complexity/arg-coun
         ):
             await _refuse_unrealised(source, paths)
             count, nar_bytes = await _closure_size(source, paths)
+            # **`closure_` on both, because neither is the size of the
+            # transfer.** They measure what has to be *present* on the
+            # destination, and on a converged cluster almost all of it
+            # already is. `paths=3495 mib=7928.1` read as "moving 7.9 GiB"
+            # and cost a debugging session a day: three pushes of this
+            # closure all logged that figure while pynixd's volume grew from
+            # 9.5G to 9.6G in total. What actually moves needs the
+            # destination's answer, which is easykubenix issue #26 -- see
+            # `_closure_size`. Until then the names carry the caveat.
             _log.info(
-                "copying closure",
-                paths=count,
-                mib=round(nar_bytes / _MIB, 1),
+                "ensuring closure",
+                closure_paths=count,
+                closure_mib=round(nar_bytes / _MIB, 1),
                 to=to,
             )
             started = time.monotonic()
@@ -1527,9 +1536,9 @@ async def push_closure_to_store(  # noqa: PLR0913 -- tracked complexity/arg-coun
                 check_sigs=check_sigs,
             )
             _log.info(
-                "copied closure",
-                paths=count,
-                mib=round(nar_bytes / _MIB, 1),
+                "closure present",
+                closure_paths=count,
+                closure_mib=round(nar_bytes / _MIB, 1),
                 seconds=round(time.monotonic() - started, 1),
                 to=to,
             )
