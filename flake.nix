@@ -69,7 +69,7 @@
       packages = forEachSystem (system: {
         inherit (each.${system}.passthru)
           nanopynix
-          nanopynix-bindings
+          huggorm-bindings
           nanopynix-helpers
           easykubenix-docs
           # This repository's own build of the CLI, from `ekn/`. See

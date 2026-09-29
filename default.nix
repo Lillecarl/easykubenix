@@ -430,7 +430,7 @@ in
     # top-level attribute, so the passthru entry would throw when forced.
     inherit (nanopynix)
       nanopynix
-      nanopynix-bindings
+      huggorm-bindings
       nanopynix-helpers
       ;
     inherit
