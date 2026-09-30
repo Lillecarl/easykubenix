@@ -30,8 +30,8 @@ them.
 import re
 from typing import Any
 
-from uml_runner import Machine, MachineError, Machines, run_test
-from uml_runner.cluster import bring_up, get_json, kubectl, wait_for_pods
+from vivarium_runner import Machine, MachineError, Machines
+from vivarium_runner.cluster import bring_up, get_json, kubectl, wait_for_pods
 
 # An apply is seconds of work against an idle API server.  This is not that
 # bound: the first one waits for a CRD to become Established and for a
@@ -500,6 +500,3 @@ async def test(vms: Machines) -> None:
         "[kubeapply] " + await kubectl(cp, "get all --all-namespaces"),
         flush=True,
     )
-
-
-run_test(test)

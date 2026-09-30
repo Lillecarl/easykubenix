@@ -13,9 +13,9 @@
 # under User-Mode Linux, so the guest is an ordinary process: no KVM, no root
 # and no tap device, and the whole test is a derivation that passes or fails.
 #
-# `ekn` runs *inside* the guest. The guest sees the host's /nix/store over
-# hostfs, so the program and the manifests are already there -- nothing is
-# copied in, and nothing is fetched. `settings` carries their store paths,
+# `ekn` runs *inside* the guest. The guest's store view holds its closure
+# and everything in `settings`, so the program and the manifests are
+# already there -- nothing is copied in, and nothing is fetched. `settings` carries their store paths,
 # which is what makes the derivation depend on them.
 #
 # Deliberately outside `checks.all`. A control plane under UML is minutes of
@@ -28,11 +28,11 @@
 let
   # `+ "/lib.nix"` and not string interpolation. Interpolating the source
   # would copy the whole checkout -- `.jj` included -- into the store.
-  uml = import (sources.user-mode-nixos + "/lib.nix") { inherit pkgs; };
+  vivarium = import (sources.vivarium + "/lib.nix") { inherit pkgs; };
 
   # For `workloadImage`, which is the tag modules/k8s.nix imports into
   # containerd at boot. A pod may only use it with `imagePullPolicy: Never`.
-  images = pkgs.callPackage (sources.user-mode-nixos + "/modules/k8s-images.nix") { };
+  images = pkgs.callPackage (sources.vivarium + "/modules/k8s-images.nix") { };
 
   manifests = import ./manifests.nix { inherit (images) workloadImage; };
 
@@ -72,12 +72,12 @@ let
   # More memory than the three-node test's control plane: this one also runs
   # the workload, and `ekn` itself.
   node = {
-    imports = [ (sources.user-mode-nixos + "/modules/k8s.nix") ];
-    services.uml-k8s = {
+    imports = [ (sources.vivarium + "/modules/k8s.nix") ];
+    services.vivarium-k8s = {
       enable = true;
       role = "control-plane";
     };
-    boot.uml = {
+    vivarium = {
       memory = "3072M";
       diskSize = 2048;
       lan = {
@@ -87,9 +87,12 @@ let
     };
   };
 in
-uml.mkTest {
+vivarium.mkTest {
   name = "kubeapply";
-  script = ./test.py;
+  phases.test = {
+    script = ./test.py;
+    after = [ "boot" ];
+  };
   nodes.cp = node;
   settings = {
     ekn = lib.getExe' evals.gen1.passthru.ekn "ekn";
