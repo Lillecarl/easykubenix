@@ -13,12 +13,15 @@ around the fence are replaced, and what is asserted is the order of calls.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from ekn import cli
 from ekn.eval import KubeApplyConfigResult
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 LIVE = "3b2a1f0e-9d8c-4b7a-8e6f-5d4c3b2a1f0e"
 OTHER = "00000000-1111-2222-3333-444444444444"
@@ -42,12 +45,21 @@ def _config(cluster_uid: str | None) -> KubeApplyConfigResult:
     )
 
 
+def _schema_check(calls: list[str], *, fail: bool) -> Callable[..., Awaitable[None]]:
+    async def schema_check(*_args: Any, **_kwargs: Any) -> None:
+        calls.append("schema_check")
+        if fail:
+            raise SystemExit(1)
+
+    return schema_check
+
+
 @pytest.fixture
 def wired(monkeypatch: pytest.MonkeyPatch):
     """Replace everything around the fence, and record what gets called."""
     calls: list[str] = []
 
-    def use(cluster_uid: str | None, *, live: str = LIVE) -> list[str]:
+    def use(cluster_uid: str | None, *, live: str = LIVE, schemas_fail: bool = False) -> list[str]:
         async def evaluate(*_args: Any, **_kwargs: Any) -> KubeApplyConfigResult:
             return _config(cluster_uid)
 
@@ -77,6 +89,7 @@ def wired(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(cli, "_hold_the_engine", hold)
         monkeypatch.setattr(cli, "_apply_groups", apply_groups)
         monkeypatch.setattr(cli, "_run_pre_apply", nothing)
+        monkeypatch.setattr(cli, "_check_schemas_live", _schema_check(calls, fail=schemas_fail))
         monkeypatch.setattr(cli.clusterfence, "read_cluster_id", read_cluster_id)
         monkeypatch.setattr(cli.KubeApply, "push_cache", nothing)
         return calls
@@ -125,6 +138,21 @@ class TestTheFenceComesFirst:
 
         await _command().run()
 
+        assert calls == ["fence", "schema_check", "ensure_age_identities", "apply_groups"]
+
+    async def test_a_schema_violation_stops_before_anything_is_created(self, wired) -> None:
+        calls = wired(LIVE, schemas_fail=True)
+
+        with pytest.raises(SystemExit):
+            await _command().run()
+
+        assert calls == ["fence", "schema_check"]
+
+    async def test_skip_schema_check_skips_it(self, wired) -> None:
+        calls = wired(LIVE, schemas_fail=True)
+
+        await _command(skip_schema_check=True).run()
+
         assert calls == ["fence", "ensure_age_identities", "apply_groups"]
 
     async def test_the_flag_gets_past_an_undeclared_cluster(self, wired) -> None:
@@ -132,7 +160,7 @@ class TestTheFenceComesFirst:
 
         await _command(i_dont_know_which_cluster_this_is=True).run()
 
-        assert calls == ["fence", "ensure_age_identities", "apply_groups"]
+        assert calls == ["fence", "schema_check", "ensure_age_identities", "apply_groups"]
 
     async def test_the_flag_does_not_get_past_a_mismatch(self, wired) -> None:
         """The same rule `test_clusterfence` states, asserted through the

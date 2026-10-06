@@ -761,6 +761,15 @@ def _report_schemas(report: Report, catalog: Catalog) -> None:
     _log.info("schema check passed", checked=checked, unchecked=len(report.unknown))
 
 
+async def _check_schemas_live(api: kr8s.asyncio.Api, cluster: str, objects: list[dict[str, Any]]) -> None:
+    """Check *objects* against the cluster's own OpenAPI v3 and the rendered CRDs."""
+    catalog = Catalog()
+    add_rendered_crds(catalog, objects)
+    files = await load_server(catalog, api, cluster)
+    _log.info("read the cluster's OpenAPI v3", group_versions=files, cluster=cluster)
+    _report_schemas(check(objects, catalog), catalog)
+
+
 class SchemaCheck(FencedCommand):
     """Check every rendered object against its JSON schema, with no API server.
 
@@ -805,10 +814,7 @@ class SchemaCheck(FencedCommand):
             uid = await clusterfence.require(
                 api, declared, environment=environment, override=self.i_dont_know_which_cluster_this_is
             )
-            cluster = uid or declared
-            if cluster is None:
-                _log.error("cannot name the cache for a cluster with no uid")
-                raise SystemExit(1)
+            cluster = uid or declared or "unidentified"
             files = await load_server(catalog, api, cluster)
             _log.info("read the cluster's OpenAPI v3", group_versions=files, cluster=cluster)
         except (httpx.TransportError, OSError, ValueError) as exc:
@@ -1510,6 +1516,11 @@ class KubeApply(CachePushCommand, FencedCommand):
         "operator's local name for one. Still accepted so that a caller passing it gets that "
         "sentence rather than 'unrecognized arguments'.",
     )
+    skip_schema_check: bool = opt(
+        False,
+        help="Apply without first checking every object against the cluster's OpenAPI schemas and the "
+        "rendered CRDs. See ekn schema-check.",
+    )
     kubeconfig_from_tofu: str | None = opt(
         None,
         help="Take the kubeconfig from a tf unit's OpenTofu output, as UNIT:OUTPUT. "
@@ -1623,6 +1634,9 @@ class KubeApply(CachePushCommand, FencedCommand):
             # down. Both write before a single manifest is applied, so a
             # fence below them is a fence after the damage.
             cluster = await self._fence(api, cfg)
+            # Below the fence, which picks the cache, and above the first write.
+            if not self.skip_schema_check:
+                await _check_schemas_live(api, cluster or "unidentified", cfg.objects)
             if cfg.sops_age_identities:
                 await ensure_age_identities(cfg.sops_age_identities, api=api)
             held = await _hold_the_engine(cfg, api=api, stack=stack) if self.pause_engine else set()
