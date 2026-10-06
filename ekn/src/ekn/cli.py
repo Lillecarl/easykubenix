@@ -6,9 +6,10 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path as _Path
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, TextIO, cast
 
 import anyio
 import anyio.to_thread
@@ -91,7 +92,7 @@ from ekn.tofu import (
 from ekn.validation import EphemeralControlPlane, exec_capture, load_manifest_objects, prepare_validation_objects
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 
     from ekn.eval import TofuUnit
 
@@ -744,30 +745,59 @@ class Validate(AttrCommand):
             _log.info("Your manifests are as valid as they can be against Kubernetes %s", c.kubernetes.package.version)
 
 
-def _report_schemas(report: Report, catalog: Catalog) -> None:
-    """Print *report*, then exit 1 if it holds a violation."""
+def _report_schemas(
+    report: Report, catalog: Catalog, *, seconds: dict[str, float], stream: TextIO = sys.stdout
+) -> None:
+    """Print *report*, violations to *stream*, then exit 1 if it holds one."""
     for gvk, origin in sorted(catalog.overridden.items()):
         _log.debug("a rendered CRD replaces the schema", kind=str(gvk), replaced=origin.value)
     if catalog.overridden:
         _log.info("rendered CRDs replace other sources' schemas", kinds=len(catalog.overridden))
     for ref in sorted(set(report.unknown)):
         _log.warning("no schema for this kind; not checked", object=str(ref))
-    for violation in report.violations:
-        sys.stdout.write(f"{violation}\n")
+    stream.writelines(f"{violation}\n" for violation in report.violations)
     checked = {origin.value: count for origin, count in report.checked.items()}
     if not report.ok:
-        _log.error("schema check failed", violations=len(report.violations), checked=checked)
+        _log.error("schema check failed", violations=len(report.violations), checked=checked, seconds=seconds)
         raise SystemExit(1)
-    _log.info("schema check passed", checked=checked, unchecked=len(report.unknown))
+    _log.info("schema check passed", checked=checked, unchecked=len(report.unknown), seconds=seconds)
+
+
+async def _check_schemas(
+    objects: list[dict[str, Any]],
+    load: Callable[[Catalog], Awaitable[None]],
+    *,
+    stream: TextIO = sys.stdout,
+) -> None:
+    """Check *objects* against the rendered CRDs plus what *load* adds, and report.
+
+    Timed always, not behind EKN_TIMING: it runs before every apply, so its
+    cost is a number an operator should see. `load` is reading and converting
+    schemas; `check` includes compiling each kind's validator on first use.
+    """
+    started = time.monotonic()
+    catalog = Catalog()
+    add_rendered_crds(catalog, objects)
+    await load(catalog)
+    loaded = time.monotonic()
+    report = check(objects, catalog)
+    seconds = {"load": round(loaded - started, 3), "check": round(time.monotonic() - loaded, 3)}
+    _report_schemas(report, catalog, seconds=seconds, stream=stream)
+
+
+async def _load_spec(catalog: Catalog, spec_dir: str) -> None:
+    files = await load_spec_dir(catalog, spec_dir)
+    _log.info("read the pinned OpenAPI spec", group_versions=files)
 
 
 async def _check_schemas_live(api: kr8s.asyncio.Api, cluster: str, objects: list[dict[str, Any]]) -> None:
     """Check *objects* against the cluster's own OpenAPI v3 and the rendered CRDs."""
-    catalog = Catalog()
-    add_rendered_crds(catalog, objects)
-    files = await load_server(catalog, api, cluster)
-    _log.info("read the cluster's OpenAPI v3", group_versions=files, cluster=cluster)
-    _report_schemas(check(objects, catalog), catalog)
+
+    async def load(catalog: Catalog) -> None:
+        files = await load_server(catalog, api, cluster)
+        _log.info("read the cluster's OpenAPI v3", group_versions=files, cluster=cluster)
+
+    await _check_schemas(objects, load)
 
 
 class SchemaCheck(FencedCommand):
@@ -792,14 +822,14 @@ class SchemaCheck(FencedCommand):
         except NixError as exc:
             _report_nix_error(exc)
         objects = await load_manifest_objects(cfg.manifest_json_file)
-        catalog = Catalog()
-        add_rendered_crds(catalog, objects)
-        if self.offline:
-            files = await load_spec_dir(catalog, cfg.openapi_spec)
-            _log.info("read the pinned OpenAPI spec", group_versions=files, kubernetes=cfg.kubernetes_version)
-        elif cfg.environment is not None:
-            await self._load_live(catalog, objects, cfg.cluster_uid, cfg.environment, cfg.kubernetes_version)
-        _report_schemas(check(objects, catalog), catalog)
+
+        async def load(catalog: Catalog) -> None:
+            if self.offline:
+                await _load_spec(catalog, cfg.openapi_spec)
+            elif cfg.environment is not None:
+                await self._load_live(catalog, objects, cfg.cluster_uid, cfg.environment, cfg.kubernetes_version)
+
+        await _check_schemas(objects, load)
 
     async def _load_live(
         self,
@@ -844,10 +874,8 @@ class SchemaCheckManifest(Command):
 
     async def run(self) -> None:
         objects = await load_manifest_objects(str(self.manifest_file))
-        catalog = Catalog()
-        add_rendered_crds(catalog, objects)
-        await load_spec_dir(catalog, str(self.spec_dir))
-        _report_schemas(check(objects, catalog), catalog)
+        spec_dir = str(self.spec_dir)
+        await _check_schemas(objects, lambda catalog: _load_spec(catalog, spec_dir))
 
 
 class Deploy(CachePushCommand, Commit):
