@@ -69,6 +69,7 @@ let
 in
 {
   inherit (ekn) manifestJSON manifestYAMLFile validationScript;
+  inherit (ekn.config.validation) schemaCheck;
   check = import ../verify.nix {
     inherit pkgs lib;
     name = "validation-crds";

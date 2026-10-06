@@ -262,6 +262,11 @@ let
         touch "$out"
       '';
 
+  # Every object of the validation example against its JSON schema: built-in
+  # kinds from the pinned Kubernetes source tree, the chart's custom
+  # resources from its own CRDs. No API server, so it costs seconds.
+  schema-check = examples.examples.validation.schemaCheck;
+
   # Every `.nix` file in the repository, and nothing else. The filter names
   # what to *drop* rather than what to keep, so a directory added later is
   # covered without anyone remembering to list it -- a formatting gate that
@@ -315,6 +320,7 @@ in
     tofu-registry
     validation-e2e
     bootstrap-validation-e2e
+    schema-check
     ;
   inherit (examples) packages;
 
@@ -333,6 +339,7 @@ in
       tofu-registry
       validation-e2e
       bootstrap-validation-e2e
+      schema-check
       ;
     # `all` is what CI builds, so a gate that is not in it is a gate that does
     # not run. ../docs/examples/default.nix builds its own `all` over the
@@ -347,6 +354,7 @@ in
         tofu-render
         validation-e2e
         bootstrap-validation-e2e
+        schema-check
       ];
     } "printf '%s\\n' $checks > $out";
   };
