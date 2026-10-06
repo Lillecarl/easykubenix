@@ -3,30 +3,36 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING
 
-import nanopynix
-from nanopynix._core._nix_core import parse_nix_path
-from nanopynix._core._objects import CoreRuntime
-
-if TYPE_CHECKING:
-    from nanopynix._core._objects import CoreEvalState, CoreValue
+from huggorm import EvalState, Store, Value, enable_experimental_feature, load_config
 
 NIX_BENCHMARK = Path(__file__).with_name("benchmark_templates.nix")
 
 
-def measure(function: CoreValue, state: CoreEvalState, count: int, warmup: int) -> float:
+def invoke(function: Value, state: EvalState, index: int) -> None:
+    state.force(function(state.make_int(index)))
+
+
+def measure(function: Value, state: EvalState, count: int, warmup: int) -> float:
     for index in range(warmup):
-        function.call(state.value_from_python(index)).force()
+        invoke(function, state, index)
 
     started = perf_counter()
     for index in range(count):
-        function.call(state.value_from_python(index)).force()
+        invoke(function, state, index)
     return perf_counter() - started
 
 
+def select(state: EvalState, value: Value, *names: str) -> Value:
+    for name in names:
+        state.force(value)
+        value = value.get(name)
+    state.force(value)
+    return value
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark typed Nix templates through nanopynix's core objects.")
+    parser = argparse.ArgumentParser(description="Benchmark typed Nix templates through huggorm's sync API.")
     parser.add_argument("--count", type=int, default=10_000)
     parser.add_argument("--warmup", type=int, default=100)
     args = parser.parse_args()
@@ -36,18 +42,16 @@ def main() -> None:
     if args.warmup < 0:
         raise ValueError("--warmup cannot be negative")
 
-    nanopynix.init_libstore(load_config=False)
-    nanopynix.enable_experimental_feature("flakes")
-    nanopynix.enable_experimental_feature("nix-command")
-    nanopynix.init_libexpr()
-    runtime = CoreRuntime()
-    state = runtime.open_eval_state(runtime.open_store("auto"), parse_nix_path())
+    load_config()
+    enable_experimental_feature("flakes")
+    enable_experimental_feature("nix-command")
+    state = EvalState(Store("auto"))
 
     for name in ("evalModules", "adiosCalls", "adiosBuilds"):
         preload_started = perf_counter()
-        function = state.eval_file(str(NIX_BENCHMARK)).attr_get("l2").attr_get(name)
+        function = select(state, state.eval_file(str(NIX_BENCHMARK)), "l2", name)
         for index in range(args.warmup):
-            function.call(state.value_from_python(index)).force()
+            invoke(function, state, index)
         preload_seconds = perf_counter() - preload_started
 
         seconds = measure(function, state, args.count, warmup=0)

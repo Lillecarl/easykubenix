@@ -101,8 +101,7 @@ let
   };
 
   # The environment the test suite and the dev shell run in: one venv holding
-  # `ekn`'s whole dependency closure plus `nanopynix`'s `test` extra, which is
-  # what supplies pytest and anyio.
+  # `ekn`'s whole dependency closure and its own `test` extra.
   #
   # This used to be nanopynix' exported `pynixDevEnv`, which worked only for
   # as long as nanopynix declared `ekn` itself -- that is where `kr8s` came
@@ -117,9 +116,10 @@ let
     # `profile` brings pyinstrument, for `EKN_PROFILE=pyinstrument`. Here and
     # not in the release `ekn`: a profiler belongs in the environment someone
     # measures from, not in the closure a cluster fetches.
-    ekn = [ "profile" ];
-    nanopynix = [ "test" ];
-    nanopynix-helpers = [ ];
+    ekn = [
+      "profile"
+      "test"
+    ];
     pytest-agent = [ ];
   };
 

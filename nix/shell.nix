@@ -10,9 +10,9 @@
   sops,
   age,
   # This repository's own venv -- see `eknDevEnv` in ../default.nix. One
-  # environment holding `ekn`'s whole dependency closure (kr8s, argcomplete,
-  # pygit2, pydantic, structlog, rich, pyyaml, anyio) together with
-  # `nanopynix` and its `test` extra, which is what brings pytest.
+  # environment holding `ekn`'s whole dependency closure (huggorm, kr8s,
+  # argcomplete, pygit2, pydantic, structlog, rich, pyyaml, anyio) together
+  # with its own `test` extra, which is what brings pytest.
   #
   # `ekn`'s *source* lives in ../ekn, and pytest reads it from there via
   # `pythonpath` in ../pytest.ini rather than from this venv. What the venv
@@ -35,7 +35,7 @@ in
 mkShell {
   # The order of this list decides the order of PATH. `eknDevEnv` must come
   # first. Both environments give a `python3`, and pytest must run in the one
-  # that holds `ekn` and `nanopynix`. `docsEnv` still gives `sphinx-build`,
+  # that holds `ekn` and huggorm. `docsEnv` still gives `sphinx-build`,
   # because `eknDevEnv` does not have it.
   packages = [
     eknDevEnv
