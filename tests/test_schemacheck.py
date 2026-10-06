@@ -222,6 +222,25 @@ def test_a_required_field_with_a_default_may_be_absent(catalog: Catalog) -> None
     assert "name" in report.violations[0].message
 
 
+def test_a_custom_resource_metadata_is_object_meta(catalog: Catalog) -> None:
+    add_rendered_crds(catalog, [_crd({"size": {"type": "integer"}})])
+    obj = _widget({"size": 1})
+    obj["metadata"]["labels"] = {"a": "b"}
+    assert check([obj], catalog).ok
+    obj["metadata"]["labls"] = {"a": "b"}
+    obj["metadata"]["name"] = 7
+    report = check([obj], catalog)
+    assert sorted(v.path for v in report.violations) == ["/metadata", "/metadata/name"]
+
+
+def test_metadata_needs_an_openapi_document() -> None:
+    catalog = Catalog()
+    add_rendered_crds(catalog, [_crd({"size": {"type": "integer"}})])
+    obj = _widget({"size": 1})
+    obj["metadata"]["labls"] = {}
+    assert check([obj], catalog).ok
+
+
 def test_an_re2_pattern(catalog: Catalog) -> None:
     add_rendered_crds(catalog, [_crd({"value": {"type": "string", "pattern": r"^\PC*$"}})])
     assert check([_widget({"value": "plain text"})], catalog).ok

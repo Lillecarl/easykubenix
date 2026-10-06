@@ -44,6 +44,7 @@ _DROPPED = frozenset({"description"})
 _RE2 = jsonschema_rs.RegexOptions()
 
 PRESERVE_UNKNOWN = "x-kubernetes-preserve-unknown-fields"
+OBJECT_META = "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
 INT_OR_STRING = "x-kubernetes-int-or-string"
 
 
@@ -247,6 +248,9 @@ class _Entry:
     origin: Origin
     document: _Document
     definition: str
+    #: The schema types `metadata` as a bare object, as a CRD's root does.
+    #: The API server still decodes it as ObjectMeta, so `check` does too.
+    bare_metadata: bool = False
 
 
 def _crd_versions(crd: Mapping[str, Any]) -> Iterator[tuple[GroupVersionKind, dict[str, Any]]]:
@@ -287,6 +291,8 @@ class Catalog:
     _entries: dict[GroupVersionKind, _Entry] = field(default_factory=dict)
     #: Kinds a rendered CRD took over from another source.
     overridden: dict[GroupVersionKind, Origin] = field(default_factory=dict)
+    #: The first OpenAPI document that defines ObjectMeta.
+    _object_meta: _Document | None = None
 
     def _put(self, gvk: GroupVersionKind, entry: _Entry) -> None:
         held = self._entries.get(gvk)
@@ -315,6 +321,8 @@ class Catalog:
         components = cast("Mapping[str, Any]", document.get("components") or {})
         schemas = cast("dict[str, Any]", components.get("schemas") or {})
         compiled = _Document({"definitions": to_json_schema({"definitions": schemas})["definitions"]})
+        if self._object_meta is None and OBJECT_META in schemas:
+            self._object_meta = compiled
         for name, schema in schemas.items():
             for gvk in cast(
                 "list[Mapping[str, Any]]",
@@ -327,7 +335,8 @@ class Catalog:
 
     def add_crd(self, crd: Mapping[str, Any], origin: Origin = Origin.RENDERED_CRD) -> None:
         for gvk, schema in _crd_versions(crd):
-            self.add_schema(gvk, to_json_schema(_with_object_fields(schema)), origin)
+            document = _Document({"definitions": {"root": to_json_schema(_with_object_fields(schema))}})
+            self._put(gvk, _Entry(origin, document, "root", bare_metadata=True))
 
     def add_schema(self, gvk: GroupVersionKind, schema: dict[str, Any], origin: Origin) -> None:
         """A self-contained JSON schema for one kind, used as it stands."""
@@ -338,6 +347,15 @@ class Catalog:
         if entry is None:
             return None
         return entry.origin, entry.document.validator(entry.definition)
+
+    def metadata_validator(self, gvk: GroupVersionKind) -> jsonschema_rs.Validator | None:
+        """ObjectMeta's validator, for a kind whose own schema leaves `metadata`
+        open. None when the kind's schema covers it, or no OpenAPI document
+        has been read."""
+        entry = self._entries.get(gvk)
+        if entry is None or not entry.bare_metadata or self._object_meta is None:
+            return None
+        return self._object_meta.validator(OBJECT_META)
 
 
 def strip_for_check(obj: Mapping[str, Any]) -> dict[str, Any]:
@@ -363,6 +381,13 @@ def check(objects: Iterable[Mapping[str, Any]], catalog: Catalog) -> Report:
             Violation(ref, "".join(f"/{part}" for part in error.instance_path), error.message)
             for error in validator.iter_errors(strip_for_check(obj))
         )
+        metadata = obj.get("metadata")
+        meta_validator = catalog.metadata_validator(ref.gvk)
+        if meta_validator is not None and isinstance(metadata, dict):
+            report.violations.extend(
+                Violation(ref, "/metadata" + "".join(f"/{part}" for part in error.instance_path), error.message)
+                for error in meta_validator.iter_errors(metadata)
+            )
     return report
 
 
