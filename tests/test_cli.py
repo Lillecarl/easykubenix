@@ -178,7 +178,7 @@ class _FakeStdout:
 class TestYamlJsonConversion:
     """`ekn _yamlToJson`/`ekn _jsonToYAML` -- the hidden CLI subcommands
     importyaml.nix's derivation fallback shells out to instead of `yq`, so
-    that path shares nanopynix's YAML-parsing code (and its yaml11/yaml12
+    that path shares `ekn.nixyaml`'s YAML-parsing code (and its yaml11/yaml12
     scalar-resolution differences) instead of yq's."""
 
     async def test_yaml_to_json_defaults_to_yaml12_decimal(self, monkeypatch: pytest.MonkeyPatch) -> None:

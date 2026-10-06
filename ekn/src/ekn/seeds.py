@@ -32,8 +32,8 @@ from ekn.apply import build_object
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
+    from huggorm.jsonprimop import JsonValue
     from kr8s.asyncio import Api
-    from nanopynix.models import JsonValue
 
     from ekn.apply import Manifest
 

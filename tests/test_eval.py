@@ -4,12 +4,11 @@ from pathlib import Path
 from typing import Any, cast
 
 import anyio
-import nanopynix
 import pytest
-from nanopynix.rpc import Session
-from nanopynix_helpers.eval_target import EvaluationTargetError
+from huggorm.errors import NixError
 
 from ekn.apply import DEFAULT_BARRIER_PRIORITY, DEFAULT_FIELD_MANAGER
+from ekn.attrpath import EvaluationTargetError
 from ekn.eval import (
     evaluate_file,
     evaluate_gitops_manifests,
@@ -17,6 +16,7 @@ from ekn.eval import (
     realise_attr,
 )
 from ekn.livestate import strip_hash_annotation
+from ekn.nix import evaluator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 NIX_TEST_FILE = PROJECT_ROOT / "tests/test_eval.nix"
@@ -47,22 +47,14 @@ def ekn_root() -> str:
 
 class TestSimpleEval:
     async def test_eval_literal(self) -> None:
-        async with (
-            Session(experimental_features=["flakes", "nix-command"]) as session,
-            session.store() as store,
-            session.eval(store) as eval_,
-        ):
-            root = await eval_.string('{ x = 1; y = { z = "hello"; }; }')
+        async with evaluator() as eval_:
+            root = await eval_.expr('{ x = 1; y = { z = "hello"; }; }')
             result = await root.to_python()
         assert result == {"x": 1, "y": {"z": "hello"}}
 
     async def test_eval_list(self) -> None:
-        async with (
-            Session(experimental_features=["flakes", "nix-command"]) as session,
-            session.store() as store,
-            session.eval(store) as eval_,
-        ):
-            root = await eval_.string("[ 1 2 3 ]")
+        async with evaluator() as eval_:
+            root = await eval_.expr("[ 1 2 3 ]")
             result = await root.to_python()
         assert result == [1, 2, 3]
 
@@ -113,7 +105,7 @@ class TestEknModule:
         }
 
     async def test_adios_template_checks_arguments(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="encryptedData"):
+        with pytest.raises(NixError, match="encryptedData"):
             await evaluate_file(TEMPLATES_NIX_TEST_FILE, "invalidTemplateArguments")
 
     async def test_assert_cached_follows_cache_to(self) -> None:
@@ -207,7 +199,7 @@ class TestEknModule:
         # Top-level metadata.labels/annotations are the typed labelValueType
         # option -- with coercion disabled, that's plain types.str, so the
         # module system itself rejects the bool.
-        with pytest.raises(nanopynix.NixError, match="is not of type"):
+        with pytest.raises(NixError, match="is not of type"):
             await evaluate_file(NIX_TEST_FILE, "labelsAnnotationsCoercionDisabledThrows")
 
     async def test_init_containers_preserve_order(self) -> None:
@@ -349,14 +341,14 @@ class TestEknModule:
         # Loud rather than silent: a GitOps target is an explicit per-object
         # opt-in, so a seeded object there is an author mistake. ArgoCD would
         # apply `$ekn:env:...` over the real credential.
-        with pytest.raises(nanopynix.NixError, match=r"routed to a\s+GitOps target"):
+        with pytest.raises(NixError, match=r"routed to a\s+GitOps target"):
             await evaluate_file(NIX_TEST_FILE, "seededGitOpsThrows")
 
     async def test_marking_an_object_with_no_reference_is_rejected(self) -> None:
         # `envSeeded` is what makes a seeded object findable without walking
         # it, so wrapping an object that needs nothing is a mistake rather
         # than a harmless no-op.
-        with pytest.raises(nanopynix.NixError, match=r"holds no ekn\.envSeed reference"):
+        with pytest.raises(NixError, match=r"holds no ekn\.envSeed reference"):
             await evaluate_file(NIX_TEST_FILE, "envSeededWithoutReferenceThrows")
 
     async def test_the_seed_annotations_name_each_variable(self) -> None:
@@ -382,19 +374,19 @@ class TestEknModule:
         # each sees objects under its own label that its own apply did not
         # produce. Nothing inside one project can detect that, so the name
         # has to be a decision, and this is where it gets asked for.
-        with pytest.raises(nanopynix.NixError, match=r"ekn\.environment"):
+        with pytest.raises(NixError, match=r"ekn\.environment"):
             await evaluate_file(NIX_TEST_FILE, "noEnvironmentDeployThrows")
 
     async def test_marker_in_crds_is_rejected(self) -> None:
         # kubernetes.crds goes around the type for speed, so nothing there
         # resolves a marker. Fail instead of writing `_type` into a manifest.
-        with pytest.raises(nanopynix.NixError, match=r"kubernetes\.crds"):
+        with pytest.raises(NixError, match=r"kubernetes\.crds"):
             await evaluate_file(NIX_TEST_FILE, "crdMarkerThrows")
 
     async def test_if_exists_marker_in_crds_is_rejected(self) -> None:
         # `mkIfExists` leaks the same way. `conditionalAttrsOf` resolves it,
         # and a CRD goes around that type too.
-        with pytest.raises(nanopynix.NixError, match=r"kubernetes\.crds"):
+        with pytest.raises(NixError, match=r"kubernetes\.crds"):
             await evaluate_file(NIX_TEST_FILE, "crdIfExistsMarkerThrows")
 
     async def test_generated_by_path(self, ekn_root: str) -> None:
@@ -408,12 +400,8 @@ class TestEknModule:
         in
         easy.config.kubernetes.generatedByPath
         """
-        async with (
-            Session(experimental_features=["flakes", "nix-command"]) as session,
-            session.store() as store,
-            session.eval(store) as eval_,
-        ):
-            root = await eval_.string(nix)
+        async with evaluator() as eval_:
+            root = await eval_.expr(nix)
             result = await root.to_python()
         assert isinstance(result, dict)
         assert "default" in result
@@ -431,12 +419,8 @@ class TestEknModule:
         in
         easy.config.internal.manifestYAMLList
         """
-        async with (
-            Session(experimental_features=["flakes", "nix-command"]) as session,
-            session.store() as store,
-            session.eval(store) as eval_,
-        ):
-            root = await eval_.string(nix)
+        async with evaluator() as eval_:
+            root = await eval_.expr(nix)
             result = await root.to_python()
         assert isinstance(result, str)
         assert "ConfigMap" in result
@@ -745,7 +729,7 @@ class TestGitOpsTargetMetadata:
         them as anyone's. A unit that declines the label hands them to that
         prune, because `notin` matches an unlabelled object.
         """
-        with pytest.raises(nanopynix.NixError, match=r"ekn\.dev/deployment-unit"):
+        with pytest.raises(NixError, match=r"ekn\.dev/deployment-unit"):
             await evaluate_file(NIX_TEST_FILE, "declinedUnitLabelThrows")
 
     async def test_generated_carries_the_unit_label_too(self) -> None:
@@ -815,18 +799,18 @@ class TestGitOpsTargetMetadata:
     async def test_a_dependency_cycle_is_rejected(self) -> None:
         # The chain, not just the name. "a depends on itself" is true of
         # every unit in a cycle and tells nobody which edge to remove.
-        with pytest.raises(nanopynix.NixError, match=r"a -> b -> a"):
+        with pytest.raises(NixError, match=r"a -> b -> a"):
             await evaluate_file(NIX_TEST_FILE, "unitDependencyCycleThrows")
 
     async def test_a_dependency_on_an_undeclared_unit_is_rejected(self) -> None:
-        with pytest.raises(nanopynix.NixError, match=r'unknown unit "nope"'):
+        with pytest.raises(NixError, match=r'unknown unit "nope"'):
             await evaluate_file(NIX_TEST_FILE, "unknownUnitDependencyThrows")
 
     async def test_a_unit_name_that_cannot_be_a_label_value_is_rejected(self) -> None:
         # A leading underscore is legal in a label value's middle and not at
         # its ends. Caught here, it names the unit; caught at the API server,
         # it names the label, once per object.
-        with pytest.raises(nanopynix.NixError, match=r"ekn\.dev/deployment-unit"):
+        with pytest.raises(NixError, match=r"ekn\.dev/deployment-unit"):
             await evaluate_file(NIX_TEST_FILE, "badUnitNameThrows")
 
 
@@ -1213,7 +1197,7 @@ class TestAssertionsAndWarnings:
             'assertions = [{ assertion = false; message = "deliberate probe failure"; }];',
         )
 
-        with pytest.raises(nanopynix.NixError, match="deliberate probe failure"):
+        with pytest.raises(NixError, match="deliberate probe failure"):
             await evaluate_file(probe, attr)
 
     async def test_a_nested_instances_assertions_still_fire(self, tmp_path: Path) -> None:
@@ -1235,31 +1219,29 @@ class TestAssertionsAndWarnings:
             }}).config
         """)
 
-        with pytest.raises(nanopynix.NixError, match="deliberate nested failure"):
+        with pytest.raises(NixError, match="deliberate nested failure"):
             await evaluate_file(probe, "kubernetes.deploymentUnits")
 
     async def test_a_service_asking_for_an_undeclared_family_is_rejected(self) -> None:
         # The API server admits a Service's families against the families its
         # service CIDR carries and nothing else; the eval-time refusal names
         # the Service instead of leaving the denial to admission.
-        with pytest.raises(nanopynix.NixError, match=r"default/Service/v6 declares spec\.ipFamilies \[ IPv6 \]"):
+        with pytest.raises(NixError, match=r"default/Service/v6 declares spec\.ipFamilies \[ IPv6 \]"):
             await evaluate_file(NIX_TEST_FILE, "iPv6ServiceOnIPv4ClusterThrows")
 
     async def test_require_dual_stack_on_a_single_stack_cluster_is_rejected(self) -> None:
-        with pytest.raises(
-            nanopynix.NixError, match=r"default/Service/dual declares spec\.ipFamilyPolicy RequireDualStack"
-        ):
+        with pytest.raises(NixError, match=r"default/Service/dual declares spec\.ipFamilyPolicy RequireDualStack"):
             await evaluate_file(NIX_TEST_FILE, "dualStackServiceOnSingleStackThrows")
 
     async def test_a_duplicate_ip_family_is_rejected(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="lists a family twice"):
+        with pytest.raises(NixError, match="lists a family twice"):
             await evaluate_file(NIX_TEST_FILE, "duplicateIPFamilyThrows")
 
     async def test_a_pinned_cluster_ip_outside_the_cidr_is_rejected(self) -> None:
         # The admission denial this pre-flights is "provided IP is not in the
         # valid range"; 10.97.x is podSubnet's near-miss for serviceCidr's
         # 10.96.0.0/16.
-        with pytest.raises(nanopynix.NixError, match=r"default/Service/dns pins spec clusterIP 10\.97\.0\.10"):
+        with pytest.raises(NixError, match=r"default/Service/dns pins spec clusterIP 10\.97\.0\.10"):
             await evaluate_file(NIX_TEST_FILE, "pinnedIPv4OutsideCidrThrows")
 
     async def test_a_pinned_cluster_ip_inside_the_cidr_renders(self) -> None:
@@ -1269,7 +1251,7 @@ class TestAssertionsAndWarnings:
         assert len(await evaluate_file(NIX_TEST_FILE, "headlessServiceRenders")) > 0
 
     async def test_a_family_without_its_cidr_is_rejected(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="describe different stacks"):
+        with pytest.raises(NixError, match="describe different stacks"):
             await evaluate_file(NIX_TEST_FILE, "dualFamiliesWithoutIPv6CidrThrows")
 
 
@@ -1351,12 +1333,8 @@ class TestModuleSystemShape:
           passthru = builtins.attrNames easy.passthru;
         }}
         """
-        async with (
-            Session(experimental_features=["flakes", "nix-command"]) as session,
-            session.store() as store,
-            session.eval(store) as eval_,
-        ):
-            names = cast("dict[str, Any]", await (await eval_.string(nix)).to_python())
+        async with evaluator() as eval_:
+            names = cast("dict[str, Any]", await (await eval_.expr(nix)).to_python())
 
         for name in ("config", "options", "pkgs", "lib"):
             assert name in names["top"], f"pynix search resolves {name!r} against the target"
@@ -1378,12 +1356,8 @@ class TestModuleSystemShape:
           pkgsIsPackageSet = easy.pkgs ? stdenv && easy.pkgs ? path;
         }}
         """
-        async with (
-            Session(experimental_features=["flakes", "nix-command"]) as session,
-            session.store() as store,
-            session.eval(store) as eval_,
-        ):
-            result = cast("dict[str, Any]", await (await eval_.string(nix)).to_python())
+        async with evaluator() as eval_:
+            result = cast("dict[str, Any]", await (await eval_.expr(nix)).to_python())
 
         assert result["value"] == "world"
         assert result["declared"], "the options tree carries its descriptions"

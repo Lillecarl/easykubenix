@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import nanopynix
 import pytest
+from huggorm.errors import NixError
 
 from ekn.eval import evaluate_file
 
@@ -46,7 +46,7 @@ class TestKubeValueType:
         assert result == {"spec": {"replicas": 3}}
 
     async def test_null_and_a_value_cannot_both_define_one_field(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="is neither a value of type"):
+        with pytest.raises(NixError, match="is neither a value of type"):
             await evaluate_file(NIX_TEST_FILE, "mixedNullAndValueThrows")
 
     async def test_named_list_override_via_mk_named_list(self) -> None:
@@ -91,7 +91,7 @@ class TestKubeValueType:
         # branch accepts every definition". Before v2 it fell through to the
         # module system's own "defined multiple times". Same rejection, and
         # the newer message names both candidate types.
-        with pytest.raises(nanopynix.NixError, match="is neither a value of type"):
+        with pytest.raises(NixError, match="is neither a value of type"):
             await evaluate_file(NIX_TEST_FILE, "unmarkedAttrsRejectedAgainstListThrows")
 
     async def test_plain_list_passes_through_untouched(self) -> None:
@@ -219,25 +219,25 @@ class TestKubeValueType:
     async def test_mixed_named_and_numbered_markers_rejected(self) -> None:
         # Previously the named branch won in silence and left the other
         # marker's literal `true` behind as a list element.
-        with pytest.raises(nanopynix.NixError, match="mkNamedList, mkNumberedList"):
+        with pytest.raises(NixError, match="mkNamedList, mkNumberedList"):
             await evaluate_file(NIX_TEST_FILE, "mixedNamedAndNumberedThrows")
 
     async def test_mk_order_on_named_entry_rejected(self) -> None:
         # A named list takes its order from the keys, so mkBefore on an entry
         # cannot work. Refuse it rather than discard it silently.
-        with pytest.raises(nanopynix.NixError, match="mkBefore/mkAfter/mkOrder"):
+        with pytest.raises(NixError, match="mkBefore/mkAfter/mkOrder"):
             await evaluate_file(NIX_TEST_FILE, "mkOrderOnNamedEntryThrows")
 
     async def test_mk_named_list_rejects_non_attrs_input(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="Input must be an attribute set"):
+        with pytest.raises(NixError, match="Input must be an attribute set"):
             await evaluate_file(NIX_TEST_FILE, "mkNamedListRejectsNonAttrsInput")
 
     async def test_mk_named_list_rejects_non_attrs_values(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="must themselves be attribute sets"):
+        with pytest.raises(NixError, match="must themselves be attribute sets"):
             await evaluate_file(NIX_TEST_FILE, "mkNamedListRejectsNonAttrsValues")
 
     async def test_mk_numbered_list_rejects_non_int_keys(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="must be integer strings"):
+        with pytest.raises(NixError, match="must be integer strings"):
             await evaluate_file(NIX_TEST_FILE, "mkNumberedListRejectsNonIntKeys")
 
 
@@ -316,7 +316,7 @@ class TestUntypedValues:
         """The difference from `types.anything`, which measures identically
         and deep-merges the second definition silently -- invisible until the
         day somebody sets the value twice. The message names the option."""
-        with pytest.raises(nanopynix.NixError, match="is untyped and has 2 definitions"):
+        with pytest.raises(NixError, match="is untyped and has 2 definitions"):
             await evaluate_file(NIX_TEST_FILE, "untypedTwiceThrows")
 
 
@@ -368,13 +368,13 @@ class TestBranchSelection:
         # No branch accepts both, so `oneOf` rejects the pair. A Kubernetes
         # field has one fixed type, the same argument that rejects an unmarked
         # attribute set against a list.
-        with pytest.raises(nanopynix.NixError, match=r"value\.replicas"):
+        with pytest.raises(NixError, match=r"value\.replicas"):
             await evaluate_file(NIX_TEST_FILE, "intAndStringThrows")
 
     async def test_a_function_matches_no_branch(self) -> None:
         # Without a rejection here it would reach `builtins.toJSON` and fail
         # there instead, naming neither the option nor the module that wrote it.
-        with pytest.raises(nanopynix.NixError, match=r"value\.callback"):
+        with pytest.raises(NixError, match=r"value\.callback"):
             await evaluate_file(NIX_TEST_FILE, "aFunctionThrows")
 
 
@@ -563,23 +563,23 @@ class TestPrioritiesInsideAnEntry:
         # on an entry does nothing, and both branches now say so. This used to
         # be discharged in silence: `orderedEntryKeys` inspected only
         # `isNamedList` definitions.
-        with pytest.raises(nanopynix.NixError, match="mkBefore/mkAfter/mkOrder"):
+        with pytest.raises(NixError, match="mkBefore/mkAfter/mkOrder"):
             await evaluate_file(NIX_TEST_FILE, "mkOrderOnNumberedEntryThrows")
 
     async def test_the_numbered_order_error_names_the_index_keys(self) -> None:
-        with pytest.raises(nanopynix.NixError, match=r"mkNumberedList entries: 0"):
+        with pytest.raises(NixError, match=r"mkNumberedList entries: 0"):
             await evaluate_file(NIX_TEST_FILE, "mkOrderOnNumberedEntryThrows")
 
     async def test_two_definitions_of_one_field_inside_an_entry_conflict(self) -> None:
         # This is why every other test here writes `mkForce`: without one, a
         # patch of a field the plain list already sets is a conflict rather
         # than an override. The error names the entry by key.
-        with pytest.raises(nanopynix.NixError, match=r"value\.containers\.app\.image"):
+        with pytest.raises(NixError, match=r"value\.containers\.app\.image"):
             await evaluate_file(NIX_TEST_FILE, "namedEntryConflictThrows")
 
     async def test_two_definitions_of_one_numbered_field_conflict(self) -> None:
         # `showOption` quotes an index, since `0` is not an identifier.
-        with pytest.raises(nanopynix.NixError, match=r'value\.initContainers\."0"\.image'):
+        with pytest.raises(NixError, match=r'value\.initContainers\."0"\.image'):
             await evaluate_file(NIX_TEST_FILE, "numberedEntryConflictThrows")
 
     async def test_replace_patches_a_scalar_list_by_content(self) -> None:
@@ -618,62 +618,62 @@ class TestPrioritiesInsideAnEntry:
     async def test_a_replace_key_that_matches_nothing_is_an_error(self) -> None:
         # The whole point of the marker. `mkNumberedList` cannot do this: an
         # index always matches something, just not the element you meant.
-        with pytest.raises(nanopynix.NixError, match=r"keys that match\n *no element"):
+        with pytest.raises(NixError, match=r"keys that match\n *no element"):
             await evaluate_file(NIX_TEST_FILE, "replaceKeyMatchesNothingThrows")
 
     async def test_the_no_match_error_shows_the_list(self) -> None:
-        with pytest.raises(nanopynix.NixError, match=r'The list holds:\n *"--a"'):
+        with pytest.raises(NixError, match=r'The list holds:\n *"--a"'):
             await evaluate_file(NIX_TEST_FILE, "replaceKeyMatchesNothingThrows")
 
     async def test_a_replace_key_that_matches_twice_is_an_error(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="more than one element"):
+        with pytest.raises(NixError, match="more than one element"):
             await evaluate_file(NIX_TEST_FILE, "replaceKeyMatchesTwoThrows")
 
     async def test_two_replace_keys_on_one_element_is_an_error(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="match the same element"):
+        with pytest.raises(NixError, match="match the same element"):
             await evaluate_file(NIX_TEST_FILE, "replaceTwoKeysOnOneElementThrows")
 
     async def test_a_replace_marker_alone_has_nothing_to_replace(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="no list to replace in"):
+        with pytest.raises(NixError, match="no list to replace in"):
             await evaluate_file(NIX_TEST_FILE, "replaceWithNoListThrows")
 
     async def test_mk_force_drops_the_list_the_marker_needs(self) -> None:
         # `mkForce` removes the plain definitions before the type sees them,
         # so it turns the marker into the case above. The error says so,
         # because `mkForce` is the habit this marker replaces.
-        with pytest.raises(nanopynix.NixError, match="needs no mkForce"):
+        with pytest.raises(NixError, match="needs no mkForce"):
             await evaluate_file(NIX_TEST_FILE, "replaceUnderMkForceThrows")
 
     async def test_replace_refuses_a_list_of_objects(self) -> None:
         # Matching by content reads a string. Point at `mkNamedList` instead
         # of reporting that the key matched nothing.
-        with pytest.raises(nanopynix.NixError, match="not a string"):
+        with pytest.raises(NixError, match="not a string"):
             await evaluate_file(NIX_TEST_FILE, "replaceOnAListOfObjectsThrows")
 
     async def test_mixed_numbered_and_replace_markers_rejected(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="mkNumberedList, mkReplaceList"):
+        with pytest.raises(NixError, match="mkNumberedList, mkReplaceList"):
             await evaluate_file(NIX_TEST_FILE, "mixedNumberedAndReplaceThrows")
 
     async def test_an_order_property_on_a_replace_entry_is_rejected(self) -> None:
         # A replacement takes the position of the element it replaces, so an
         # order property on it does nothing.
-        with pytest.raises(nanopynix.NixError, match=r"mkReplaceList entries: --a"):
+        with pytest.raises(NixError, match=r"mkReplaceList entries: --a"):
             await evaluate_file(NIX_TEST_FILE, "mkOrderOnReplaceEntryThrows")
 
     async def test_two_replacements_of_one_element_conflict(self) -> None:
         # The entries merge as an attribute set, so the module system reports
         # the conflict itself and names the key.
-        with pytest.raises(nanopynix.NixError, match=r'value\.args\."--a="'):
+        with pytest.raises(NixError, match=r'value\.args\."--a="'):
             await evaluate_file(NIX_TEST_FILE, "replaceConflictingValuesThrows")
 
     async def test_mk_replace_list_rejects_non_attrs_input(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="Input must be an attribute set"):
+        with pytest.raises(NixError, match="Input must be an attribute set"):
             await evaluate_file(NIX_TEST_FILE, "mkReplaceListRejectsNonAttrsInput")
 
     async def test_mk_replace_list_rejects_the_empty_key(self) -> None:
         # An empty key is a prefix of every element, so it can never resolve
         # to one. Refuse it where it is written, not at the merge.
-        with pytest.raises(nanopynix.NixError, match="empty key matches every element"):
+        with pytest.raises(NixError, match="empty key matches every element"):
             await evaluate_file(NIX_TEST_FILE, "mkReplaceListRejectsTheEmptyKey")
 
     async def test_replace_metadata_is_one_entry_per_element(self) -> None:
@@ -703,14 +703,14 @@ class TestPrioritiesInsideAnEntry:
     async def test_mk_merge_does_not_allow_one_element_twice(self) -> None:
         # Composing with `mkMerge` is not a way around the conflict: the
         # entries still merge as an attribute set, keyed by the match.
-        with pytest.raises(nanopynix.NixError, match=r'value\.args\."--a="'):
+        with pytest.raises(NixError, match=r'value\.args\."--a="'):
             await evaluate_file(NIX_TEST_FILE, "replaceMkMergeSameKeyThrows")
 
     async def test_the_no_match_error_names_the_closest_element(self) -> None:
         # The list can be twenty flags long. Naming the nearest one turns a
         # scan of the list into a read of one line.
         with pytest.raises(
-            nanopynix.NixError,
+            NixError,
             match=r'the closest element is "--metrics-addr=0\.0\.0\.0:8443"',
         ):
             await evaluate_file(NIX_TEST_FILE, "replaceNoMatchNamesTheClosestElement")
@@ -718,7 +718,7 @@ class TestPrioritiesInsideAnEntry:
     async def test_no_suggestion_when_nothing_resembles_the_key(self) -> None:
         # Every long option starts with `--`, so a suggestion built on that
         # alone names a neighbour at random. Say nothing instead.
-        with pytest.raises(nanopynix.NixError, match="nothing in the list resembles it"):
+        with pytest.raises(NixError, match="nothing in the list resembles it"):
             await evaluate_file(NIX_TEST_FILE, "replaceNoMatchWithNothingSimilar")
 
 
@@ -769,42 +769,42 @@ class TestReplaceWhere:
         assert result == {"args": ["--alpha=3", "--beta=2"]}
 
     async def test_two_predicates_for_one_label_throw(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="more than once"):
+        with pytest.raises(NixError, match="more than once"):
             await evaluate_file(NIX_TEST_FILE, "replaceWhereTwicePredicatedThrows")
 
     async def test_a_label_cannot_be_both_predicated_and_plainly_keyed(self) -> None:
         # A plain key means "match by the start of this name". Taking the
         # predicate instead would change what that definition asked for.
-        with pytest.raises(nanopynix.NixError, match="plain mkReplaceList key"):
+        with pytest.raises(NixError, match="plain mkReplaceList key"):
             await evaluate_file(NIX_TEST_FILE, "replaceWhereMixedWithAPlainKeyThrows")
 
     async def test_a_value_only_entry_needs_something_to_override(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="no definition gives a `where'"):
+        with pytest.raises(NixError, match="no definition gives a `where'"):
             await evaluate_file(NIX_TEST_FILE, "replaceWhereValueOnlyAloneThrows")
 
     async def test_the_object_list_error_names_mk_replace_where(self) -> None:
         # The non-string guard now fires only when a label matches by its own
         # name, and it offers the predicate as the first exit.
-        with pytest.raises(nanopynix.NixError, match="Use mkReplaceWhere"):
+        with pytest.raises(NixError, match="Use mkReplaceWhere"):
             await evaluate_file(NIX_TEST_FILE, "replaceListOnObjectsNamesMkReplaceWhere")
 
     async def test_a_predicate_that_matches_nothing_says_so(self) -> None:
         # No closest element for a predicate: there is no prefix to compare.
-        with pytest.raises(nanopynix.NixError, match="no element satisfies its `where'"):
+        with pytest.raises(NixError, match="no element satisfies its `where'"):
             await evaluate_file(NIX_TEST_FILE, "replaceWhereMatchesNothingThrows")
 
     async def test_mk_replace_where_rejects_non_attrs_input(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="Input must be an attribute set"):
+        with pytest.raises(NixError, match="Input must be an attribute set"):
             await evaluate_file(NIX_TEST_FILE, "mkReplaceWhereRejectsNonAttrsInput")
 
     async def test_mk_replace_where_rejects_a_non_function_where(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="each entry must be"):
+        with pytest.raises(NixError, match="each entry must be"):
             await evaluate_file(NIX_TEST_FILE, "mkReplaceWhereRejectsANonFunctionWhere")
 
     async def test_mk_replace_where_rejects_a_property_on_the_pair(self) -> None:
         # `mkIf` on the pair replaces it with a marker carrying no `value`,
         # so the entry stops being a replacement at all.
-        with pytest.raises(nanopynix.NixError, match="each entry must be"):
+        with pytest.raises(NixError, match="each entry must be"):
             await evaluate_file(NIX_TEST_FILE, "mkReplaceWhereRejectsAPropertyOnThePair")
 
     async def test_two_agreeing_replacements_merge_quietly(self) -> None:

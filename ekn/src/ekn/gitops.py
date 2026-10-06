@@ -13,7 +13,7 @@ from ekn import seeds
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from nanopynix.models import JsonValue
+    from huggorm.jsonprimop import JsonValue
 
     # Type-only for a reason that outlives the annotation: ekn.eval imports
     # `load_raw_manifest` from this module at the top level, so a real import

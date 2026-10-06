@@ -18,7 +18,7 @@ from ekn.sops import maybe_decrypt
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from nanopynix.models import JsonValue
+    from huggorm.jsonprimop import JsonValue
 
     from ekn.apply import Manifest
 

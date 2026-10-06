@@ -7,14 +7,18 @@ import tarfile
 import threading
 from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
-from nanopynix.rpc import Session
-from nanopynix_helpers.build import build_with_fod_update
+from huggorm.errors import NixError
 
-if TYPE_CHECKING:
-    from nanopynix.rpc.client import ValueProxy
+from ekn import nix
+from ekn.fod import (
+    derivation_name_from_path,
+    extract_fod_hash_mismatch,
+    extract_unique_fod_hash_mismatch,
+    find_fod_hash_literal,
+    replace_fod_hash,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -52,7 +56,7 @@ def helm_chart_url(tmp_path: Path) -> Iterator[str]:
 
 
 async def test_helm_fod_hash_mismatch_is_discovered_and_inserted(tmp_path: Path, helm_chart_url: str) -> None:
-    """fetchHelm is declared with a wrong hash; build_with_fod_update must patch in the real one."""
+    """fetchHelm is declared with a wrong hash; the mismatch must name the real one, and the patched source must build."""
     nix_file = tmp_path / "helm-fod.nix"
     nix_file.write_text(f"""
     let
@@ -67,26 +71,24 @@ async def test_helm_fod_hash_mismatch_is_discovered_and_inserted(tmp_path: Path,
     }}
     """)
 
-    async with (
-        Session(experimental_features=["flakes", "nix-command"]) as nix,
-        nix.store("auto") as store,
-        nix.eval(store) as session,
-    ):
-
-        async def evaluate() -> ValueProxy:
-            return await session.file(str(nix_file))
-
-        outputs, updates = await build_with_fod_update(
-            evaluate,
-            nix=nix,
-            eval_session=session,
-            evaluation_store=store,
-            update_fod=True,
-            source_file=nix_file,
+    async with nix.evaluator() as evaluator:
+        async with evaluator.capture() as logs:
+            with pytest.raises(NixError) as caught:
+                await (await evaluator.file(str(nix_file))).realise_string()
+        mismatch = extract_fod_hash_mismatch(str(caught.value)) or extract_unique_fod_hash_mismatch(
+            nix.captured_messages(logs)
         )
+        assert mismatch is not None, str(caught.value)
+        assert mismatch.specified == _WRONG_SHA256
 
-    assert updates == 1
-    out_path = Path(outputs["out"])
+        source = nix_file.read_text()
+        literal = find_fod_hash_literal(
+            source, mismatch.specified, derivation_name=derivation_name_from_path(mismatch.drv_path)
+        )
+        nix_file.write_text(replace_fod_hash(source, literal, mismatch.got))
+        await evaluator.forget_files()
+        out_path = Path(await (await evaluator.file(str(nix_file))).realise_string())
+
     assert str(out_path).startswith("/nix/store/")
     assert (out_path / "Chart.yaml").read_text() == _CHART_YAML.decode()
 

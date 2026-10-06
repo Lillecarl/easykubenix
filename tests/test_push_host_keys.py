@@ -7,7 +7,7 @@ prompt, so the operator answered it by hand with
 makes, and `ekn.cacheAcceptNewHostKeys` turns off. easykubenix issue #18.
 
 Nix reads `NIX_SSHOPTS` and hands it to OpenSSH, so these test the value
-`ekn` puts there. The push itself belongs to nanopynix.
+`ekn` puts there. The push itself belongs to huggorm.
 """
 
 from __future__ import annotations
@@ -234,7 +234,7 @@ class TestTheHintReachesTheReport:
         monkeypatch.setattr("ekn.cli.ssh_failure_hint", hint)
 
     async def test_a_failed_push_prints_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from nanopynix import NixError
+        from huggorm.errors import NixError
 
         from ekn.cli import _push_one_cache
 
@@ -269,7 +269,7 @@ class TestTheHintReachesTheReport:
         assert any("THE HOST KEY HINT" in str(entry.get("event", "")) for entry in logs)
 
     async def test_allow_failure_keeps_it_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from nanopynix import NixError
+        from huggorm.errors import NixError
 
         from ekn.cli import _push_one_cache
 

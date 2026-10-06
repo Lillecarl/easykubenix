@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING
 import anyio
 import kr8s
 import structlog
+from huggorm.jsonprimop import JsonValue
 from kr8s.asyncio.objects import APIObject, get_class, new_class
-from nanopynix.models import JsonValue
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping

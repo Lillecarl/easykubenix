@@ -17,9 +17,8 @@ import pygit2
 import rich.traceback
 import structlog
 from anyio import Path
-from nanopynix import NixError
-from nanopynix.models import JsonValue
-from nanopynix.primops import from_go_like_yaml_stream, from_yaml11_stream, from_yaml_stream, to_yaml
+from huggorm.errors import NixError
+from huggorm.jsonprimop import JsonValue
 from pydantic import TypeAdapter, ValidationError
 
 from ekn import clusterfence, enginepause, fastcache, livestate, seeds, storecheck
@@ -73,6 +72,7 @@ from ekn.gitops import (
     file_groups as gitops_file_groups,
     flatten_manifests,
 )
+from ekn.nixyaml import from_go_like_yaml_stream, from_yaml11_stream, from_yaml_stream, to_yaml
 from ekn.reclaim import reclaim
 from ekn.sops import ensure_age_identities, maybe_decrypt
 from ekn.tofu import (
@@ -93,17 +93,15 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger()
 
-#: What `ekn deploy --verbosity` accepts. nanopynix' own `LogLevelInput` is
-#: `str | int | LogLevel`, which says nothing to a parser; these are the eight
-#: names Nix knows, so argparse rejects anything else and the shell offers them
-#: on Tab.
+#: What `ekn deploy --verbosity` accepts: the eight names Nix knows, so
+#: argparse rejects anything else and the shell offers them on Tab.
 type LogLevel = Literal["error", "warn", "notice", "info", "talkative", "chatty", "debug", "vomit"]
 
 
 def _report_nix_error(exc: NixError) -> NoReturn:
     """Log a Nix eval/build failure and exit(1) -- shared by every Command
     that evaluates Nix and can't do anything useful once it fails."""
-    _log.error(exc.msg_without_ansi)
+    _log.error(str(exc))
     raise SystemExit(1) from exc
 
 
@@ -653,7 +651,7 @@ async def _push_one_cache(
         # Before the report, not after: `_report_nix_error` exits, and Nix's
         # own `failed to start SSH connection to '<host>'` is the message
         # this exists to explain. Issue #18.
-        detail = _with_ssh_hint(exc.msg_without_ansi, await ssh_failure_hint(cache_to))
+        detail = _with_ssh_hint(str(exc), await ssh_failure_hint(cache_to))
         if allow_failure:
             _log.warning(f"cache push to {cache_to} failed, continuing anyway (--cache-allow-failure)\n{detail}")
             return
@@ -769,14 +767,14 @@ class Deploy(CachePushCommand, Commit):
     verbosity: LogLevel = opt(
         "error",
         short="v",
-        help="Nix log verbosity for every eval/build nanopynix does during this deploy "
+        help="Nix log verbosity for every eval/build during this deploy "
         "(error, warn, notice, info, talkative, chatty, debug, vomit). `nix run "
         "--print-build-logs` only covers building the ekn CLI package itself, not what "
         "it does at runtime -- this is the runtime equivalent.",
     )
     print_build_logs: bool = opt(
         False,
-        help="Stream build/eval log lines from nanopynix's worker to stderr as they "
+        help="Stream build/eval log lines from the evaluator to stderr as they "
         "happen, for visibility into what's taking long during Validate/cache-push/Commit.",
     )
 
@@ -2134,10 +2132,9 @@ class YamlToJson(Command):
     """Parse a YAML document stream on stdin and dump it as a JSON array on stdout.
 
     Internal: the IFD-derivation fallback importyaml.nix shells out to when
-    nanopynix's fromYAML11Stream/fromYAMLStream primops aren't registered
-    (plain `nix build`/`nix eval`, no ekn worker attached). Reuses the exact
-    same nanopynix.primops YAML-parsing code the in-process primop path
-    uses, so both paths agree on YAML 1.1 vs 1.2 scalar semantics (e.g. a
+    the fromYAML11Stream/fromYAMLStream primops aren't registered (plain
+    `nix build`/`nix eval`, not under ekn). Reuses the exact same
+    `ekn.nixyaml` YAML-parsing code the in-process primop path uses, so both paths agree on YAML 1.1 vs 1.2 scalar semantics (e.g. a
     volume's `defaultMode: 0644` as octal) -- unlike the `yq`-based approach
     this replaced. Not intended for interactive use.
     """
@@ -2162,7 +2159,7 @@ class YamlToJson(Command):
 class JsonToYaml(Command):
     """Parse a JSON value on stdin and dump it as YAML on stdout.
 
-    Internal: the reverse of `_yamlToJson`, reusing nanopynix's `to_yaml`
+    Internal: the reverse of `_yamlToJson`, reusing `ekn.nixyaml.to_yaml`
     (root lists render as a `---`-separated document stream) so a
     derivation-fallback path stays byte-for-byte consistent with the
     in-process `toYAML` primop. Not intended for interactive use.

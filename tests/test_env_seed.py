@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import nanopynix
 import pytest
+from huggorm.errors import NixError
 
 from ekn.eval import evaluate_file
 
@@ -79,7 +79,7 @@ class TestEnvSeed:
         assert await evaluate_file(NIX_TEST_FILE, "collectsVariablesInOrder") == expected
 
     async def test_marking_an_object_with_no_reference_is_rejected(self) -> None:
-        with pytest.raises(nanopynix.NixError, match=r"holds no ekn\.envSeed reference"):
+        with pytest.raises(NixError, match=r"holds no ekn\.envSeed reference"):
             await evaluate_file(NIX_TEST_FILE, "markingWithoutAReferenceThrows")
 
     @pytest.mark.parametrize(
@@ -90,13 +90,13 @@ class TestEnvSeed:
         # A name no shell can export is a reference nothing can ever
         # resolve. Fail at evaluation rather than let a literal sentinel
         # reach a cluster.
-        with pytest.raises(nanopynix.NixError, match="not a usable environment variable"):
+        with pytest.raises(NixError, match="not a usable environment variable"):
             await evaluate_file(NIX_TEST_FILE, attribute)
 
     async def test_a_non_string_variable_name_is_rejected(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="must be a string"):
+        with pytest.raises(NixError, match="must be a string"):
             await evaluate_file(NIX_TEST_FILE, "nonStringThrows")
 
     async def test_reading_the_variable_of_a_non_reference_is_rejected(self) -> None:
-        with pytest.raises(nanopynix.NixError, match=r"not an ekn\.envSeed reference"):
+        with pytest.raises(NixError, match=r"not an ekn\.envSeed reference"):
             await evaluate_file(NIX_TEST_FILE, "variableOfNonSeedThrows")

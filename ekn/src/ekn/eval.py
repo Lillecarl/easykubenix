@@ -15,49 +15,42 @@ from urllib.parse import SplitResult, urlsplit
 import anyio
 import structlog
 from anyio import Path
-from nanopynix import NixError, NixEvalSettings, NixSettings
-from nanopynix.primops import yaml_primops
-from nanopynix.rpc import Session
-from nanopynix_helpers.eval_target import select_attr
-from nanopynix_helpers.fod import (
+from huggorm.errors import NixError
+from pydantic import BaseModel, Field, StringConstraints
+
+from ekn import nix
+from ekn.apply import DEFAULT_FIELD_MANAGER, DEFAULT_UNIT_LABEL
+from ekn.fod import (
     derivation_name_from_path,
     extract_fod_hash_mismatch,
     extract_unique_fod_hash_mismatch,
     find_fod_hash_literal,
     replace_fod_hash,
 )
-from pydantic import BaseModel, Field, StringConstraints
-
-from ekn.apply import DEFAULT_FIELD_MANAGER, DEFAULT_UNIT_LABEL
 from ekn.gitops import load_raw_manifest
 from ekn.storecheck import STORE_DIR, store_paths_in_text
 
-# `JsonValue` and `LogEvent` are type-only despite the pydantic models below:
-# both are used in plain function signatures, never in a model field, so
-# nothing resolves them at runtime. `runtime-evaluated-base-classes` in
-# ruff-strict.toml is what keeps that distinction enforced if a field ever
-# does use one.
+# `JsonValue` is type-only despite the pydantic models below: it is used in
+# plain function signatures, never in a model field, so nothing resolves it
+# at runtime. `runtime-evaluated-base-classes` in ruff-strict.toml is what
+# keeps that distinction enforced if a field ever does use it.
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Generator
 
-    from nanopynix import AsyncEvalSession, AsyncValue
-    from nanopynix.models import JsonValue, LogEvent
-    from nanopynix.verbosity import LogLevelInput
+    from huggorm import AsyncStore
+    from huggorm.jsonprimop import JsonValue
 
-_SESSION_SETTINGS = NixSettings()
-
-# Every `_session()` call anywhere below reads these -- letting `ekn deploy`
+# Every `_evaluator()` call anywhere below reads these -- letting `ekn deploy`
 # turn on verbosity/print-build-logs for its whole Validate -> cache-push ->
-# Commit chain (each step opens its own Session) without threading extra
+# Commit chain (each step opens its own evaluator) without threading extra
 # parameters through every `evaluate_*` helper's signature.
-# "warn", not "error". The worker filters by level before anything reaches the
-# session bus, so at "error" a `builtins.warn` -- and with it every
-# `config.warnings` entry and every `mkRenamedOptionModule` deprecation notice
-# -- was discarded inside Nix and could not be recovered on this side at any
-# price. `_print_evaluation_warning` is what prints them once they arrive.
-# Everything above warn is still suppressed, so this adds no progress chatter.
+# "warn", not "error", and `ekn.nix` never goes below warn either: at "error" a
+# `builtins.warn` -- and with it every `config.warnings` entry and every
+# `mkRenamedOptionModule` deprecation notice -- is discarded inside Nix.
+# `nix.print_warning` prints them. Everything above warn is still suppressed,
+# so this adds no progress chatter.
 _log = structlog.get_logger()
-_VERBOSITY: ContextVar[LogLevelInput] = ContextVar("_verbosity", default="warn")
+_VERBOSITY: ContextVar[str] = ContextVar("_verbosity", default="warn")
 _PRINT_BUILD_LOGS: ContextVar[bool] = ContextVar("_print_build_logs", default=False)
 
 
@@ -313,61 +306,9 @@ class FlakeEknResult(BaseModel):
     config: _FlakeEknConfig
 
 
-def _print_log_event(event: LogEvent | None) -> None:
-    # `None` is the teardown marker. nanopynix's bus delivers the model on
-    # both engines, so this no longer converts from the wire type.
-    if event is None:
-        return
-    if event.result_type is not None and "BUILD_LOG" in event.result_type.name:
-        line = event.args[-1] if event.args else None
-        if isinstance(line, str):
-            sys.stderr.write(line if line.endswith("\n") else line + "\n")
-        return
-    message = event.message_without_ansi
-    if message:
-        sys.stderr.write(message + "\n")
-
-
-# Nix's own log levels: 0 is an error, 1 a warning, and everything above is
-# progress chatter. `builtins.warn` -- and so `lib.warn`, `lib.showWarnings`
-# and every `config.warnings` entry -- arrives here as an `error` action at
-# level 1.
-_NIX_LOG_LEVEL_WARN = 1
-
-
-def _print_evaluation_warning(event: LogEvent | None) -> None:
-    """Forward Nix's evaluation warnings to stderr.
-
-    Without this they are dropped outright: an evaluation warning reaches
-    the client only as a log event on the session bus, and nothing was
-    subscribed to that bus unless `--print-build-logs` was passed. So a
-    config whose modules raise `warnings` -- an option deprecated by
-    `mkRenamedOptionModule`, say -- deployed silently under `ekn` while
-    `nix build` on the very same config printed the warning. Assertions were
-    never affected, since a `throw` propagates as an evaluation error.
-
-    Deliberately not gated on verbosity. A warning is not progress
-    reporting; it is the module system telling the user their config needs
-    attention, and needing a flag to see it defeats the point.
-    """
-    if event is None or event.action != "error":
-        return
-    info = event.error_info
-    if info is None or info.get("level") != _NIX_LOG_LEVEL_WARN:
-        return
-    message = event.message_without_ansi
-    if not message:
-        return
-    # Match `nix`'s own two prefixes so output lines up with what the same
-    # config prints under `nix build`: warnings raised by an expression say
-    # "evaluation warning", warnings from Nix itself just "warning".
-    prefix = "evaluation warning" if info.get("is_from_expr") else "warning"
-    sys.stderr.write(f"{prefix}: {message}\n")
-
-
 @contextmanager
-def verbose_session(verbosity: LogLevelInput, *, print_build_logs: bool) -> Generator[None]:
-    """Turn up nanopynix's own logging for every `_session()` opened inside
+def verbose_session(verbosity: str, *, print_build_logs: bool) -> Generator[None]:
+    """Turn up Nix's own logging for every `_evaluator()` opened inside
     this block -- real Nix build/eval progress that `nix run
     --print-build-logs` can't see (that flag only covers building the `ekn`
     CLI package itself, not what it does at runtime)."""
@@ -380,7 +321,7 @@ def verbose_session(verbosity: LogLevelInput, *, print_build_logs: bool) -> Gene
         _PRINT_BUILD_LOGS.reset(print_token)
 
 
-def _profiler_eval_settings() -> NixEvalSettings | None:
+def _profiler_eval_settings() -> dict[str, str] | None:
     """Build eval-profiler settings from EKN_EVAL_PROFILER* env vars, if set.
 
     Unset by default so normal runs are unaffected. Set EKN_EVAL_PROFILER=
@@ -391,11 +332,11 @@ def _profiler_eval_settings() -> NixEvalSettings | None:
     profiler = os.environ.get("EKN_EVAL_PROFILER")
     if not profiler:
         return None
-    return NixEvalSettings(
-        eval_profiler=profiler,
-        eval_profile_file=os.environ.get("EKN_EVAL_PROFILE_FILE", "nix.profile"),
-        eval_profiler_frequency=int(os.environ.get("EKN_EVAL_PROFILER_FREQUENCY", "0")),
-    )
+    return {
+        "eval-profiler": profiler,
+        "eval-profile-file": os.environ.get("EKN_EVAL_PROFILE_FILE", "nix.profile"),
+        "eval-profiler-frequency": str(int(os.environ.get("EKN_EVAL_PROFILER_FREQUENCY", "0"))),
+    }
 
 
 PROFILE_TOP_N = 30
@@ -430,13 +371,13 @@ def python_profile() -> Generator[None]:
     It wraps `command.run()` inside `cli.py`'s `anyio.run`, so it covers
     whichever command is running rather than evaluation alone.
 
-    **It profiles this process only.** nanopynix runs the evaluator in its
-    own worker, so the time this attributes to a `to_python` call is the
-    marshalling and the waiting, not the evaluation inside it.
+    **It profiles the event loop's thread only.** huggorm runs the evaluator
+    on a thread of its own, so the time this attributes to a `to_python` call
+    is the wait for that thread, not the evaluation on it.
     `EKN_EVAL_PROFILER` covers the other side.
 
     **The two do not add up to the wall clock, and a third gap sits between
-    them.** The eval profiler samples at call boundaries, so every nanopynix
+    them.** The eval profiler samples at call boundaries, so every Python
     primop is invisible to it -- YAML parsing included. Measured on one
     nixlab2 render that is about 2.8s, between a 4.8s evaluator and a 7.6s
     stage. Neither profiler attributes it.
@@ -507,9 +448,9 @@ def _pyinstrument_profile() -> Generator[None]:
     stage that only shows up below a millisecond is not the one costing the
     run.
 
-    **It profiles this process only, exactly like the other backend.** The
-    evaluator runs in a nanopynix worker, so time inside a `to_python` call
-    is the marshalling and the waiting rather than the evaluation. Neither
+    **It profiles the event loop's thread, exactly like the other backend.**
+    The evaluator runs on a huggorm thread, so time inside a `to_python` call
+    is the wait rather than the evaluation. Neither
     backend closes that gap; see the note on `python_profile`.
 
     Imported here rather than at module scope so the dependency is optional
@@ -542,33 +483,22 @@ def _pyinstrument_profile() -> Generator[None]:
 
 
 @asynccontextmanager
-async def _session() -> AsyncGenerator[Session]:
-    async with Session(
-        settings=_SESSION_SETTINGS,
+async def _evaluator() -> AsyncGenerator[nix.Evaluator]:
+    async with nix.evaluator(
         verbosity=_VERBOSITY.get(),
-        # yaml_primops() (fromYAML/fromYAML11/*Stream/toYAML) are bundled
-        # with nanopynix but opt-in, not auto-registered by Session -- needed
-        # so Nix-side chart-rendering code (renderChart.nix) can parse
-        # `helm template`'s IFD-built output in-process via fromYAML11Stream.
-        primops=yaml_primops(),
-    ) as session:
-        # One subscription either way: `_print_log_event` already prints every
-        # event including the warnings, so subscribing both would print each
-        # warning twice.
-        sub = session.subscribe(_print_log_event if _PRINT_BUILD_LOGS.get() else _print_evaluation_warning)
-        try:
-            yield session
-        finally:
-            sub.unsubscribe()
+        print_build_logs=_PRINT_BUILD_LOGS.get(),
+        settings=_profiler_eval_settings(),
+    ) as eval_:
+        yield eval_
 
 
 async def _resolve_proxy(
-    eval_: AsyncEvalSession,
+    eval_: nix.Evaluator,
     file: str | PathLike[str] | None,
     flake_uri: str | None,
     customer: str | None,
     attr_path: str | None,
-) -> AsyncValue:
+) -> nix.Value:
     """Resolve --file/--flake[+--customer] into a proxy, then narrow by
     attr_path if given -- the branching prelude duplicated verbatim across
     evaluate_with_fod_update/evaluate_flake_ekn/evaluate_generated_manifests/
@@ -580,34 +510,30 @@ async def _resolve_proxy(
     `.config`.
     """
     if flake_uri is not None:
-        outputs = await eval_.eval_flake(flake_uri)
+        outputs = await eval_.flake(flake_uri)
         if customer:
-            system = await (await eval_.string("builtins.currentSystem")).to_python()
+            system = await (await eval_.expr("builtins.currentSystem")).to_python()
             proxy = outputs.attr("eknConfig").attr(str(system)).attr(customer)
         else:
             proxy = outputs
     elif file is not None:
-        proxy = await (await eval_.file(str(file))).auto_call()
+        proxy = await eval_.file(str(file))
     else:
         raise ValueError("specify --file or --flake")
 
     if attr_path:
-        proxy = await select_attr(proxy, attr_path)
+        proxy = await proxy.select(attr_path)
 
     return proxy
 
 
 async def evaluate_file(file: str | PathLike[str], attr_path: str | None) -> object:
-    async with (
-        _session() as session,
-        session.store() as store,
-        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
-    ):
-        root = await (await eval_.file(str(file))).auto_call()
+    async with _evaluator() as eval_:
+        root = await eval_.file(str(file))
 
         proxy = root
         if attr_path:
-            proxy = await select_attr(proxy, attr_path)
+            proxy = await proxy.select(attr_path)
 
         return await proxy.to_python()
 
@@ -617,16 +543,12 @@ async def evaluate_file_multi(
     *attr_paths: str | None,
 ) -> list[object]:
     results: list[object] = []
-    async with (
-        _session() as session,
-        session.store() as store,
-        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
-    ):
-        root = await (await eval_.file(str(file))).auto_call()
+    async with _evaluator() as eval_:
+        root = await eval_.file(str(file))
         for attr_path in attr_paths:
             proxy = root
             if attr_path:
-                proxy = await select_attr(proxy, attr_path)
+                proxy = await proxy.select(attr_path)
             results.append(await proxy.to_python())
     return results
 
@@ -658,13 +580,9 @@ async def evaluate_with_fod_update(  # noqa: PLR0913 -- tracked complexity/arg-c
     """
     source_path = Path(source_file)
     updates = 0
-    async with (
-        _session() as session,
-        session.store() as store,
-        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
-    ):
+    async with _evaluator() as eval_:
         while True:
-            async with session.capture_logs() as logs:
+            async with eval_.capture() as logs:
                 try:
                     proxy = await _resolve_proxy(eval_, file, flake_uri, customer, attr_path)
                     return await proxy.to_python()
@@ -675,11 +593,9 @@ async def evaluate_with_fod_update(  # noqa: PLR0913 -- tracked complexity/arg-c
             # happened on a dependency FOD rather than the top-level target
             # -- the real two-line diagnostic instead arrives as a captured
             # log event, same as nanopynix_helpers.build.build_with_fod_update.
-            mismatch = extract_fod_hash_mismatch(error.msg_without_ansi)
+            mismatch = extract_fod_hash_mismatch(str(error))
             if mismatch is None:
-                mismatch = extract_unique_fod_hash_mismatch(
-                    event.message_without_ansi for event in logs.events if event.message_without_ansi is not None
-                )
+                mismatch = extract_unique_fod_hash_mismatch(nix.captured_messages(logs))
             if mismatch is None:
                 raise error
             if updates >= max_updates:
@@ -693,30 +609,22 @@ async def evaluate_with_fod_update(  # noqa: PLR0913 -- tracked complexity/arg-c
             updated = replace_fod_hash(source, literal, mismatch.got)
             await source_path.write_text(updated)
             updates += 1
-            await eval_.reset_file_cache()
+            await eval_.forget_files()
 
 
 async def evaluate_flake(flake_uri: str, attr_path: str | None) -> object:
-    async with (
-        _session() as session,
-        session.store() as store,
-        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
-    ):
-        root = await eval_.eval_flake(flake_uri)
+    async with _evaluator() as eval_:
+        root = await eval_.flake(flake_uri)
 
         proxy = root
         if attr_path:
-            proxy = await select_attr(proxy, attr_path)
+            proxy = await proxy.select(attr_path)
 
         return await proxy.to_python()
 
 
 async def evaluate_flake_ekn(flake_uri: str, customer: str) -> FlakeEknResult:
-    async with (
-        _session() as session,
-        session.store() as store,
-        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
-    ):
+    async with _evaluator() as eval_:
         proxy = await _resolve_proxy(eval_, None, flake_uri, customer, None)
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
@@ -775,11 +683,7 @@ async def evaluate_generated_manifests(
     GitOps routing) build the lookup themselves in Python instead.
     """
     t_start = time.monotonic()
-    async with (
-        _session() as session,
-        session.store() as store,
-        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
-    ):
+    async with _evaluator() as eval_:
         t_session_ready = time.monotonic()
         _log_timing("session/store/eval-session setup", t_session_ready - t_start)
 
@@ -811,11 +715,7 @@ async def evaluate_gitops_manifests(
     every module, not just these fields) before `_dig()`-ing them out --
     forcing everything else was pure waste.
     """
-    async with (
-        _session() as session,
-        session.store() as store,
-        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
-    ):
+    async with _evaluator() as eval_:
         proxy = await _resolve_proxy(eval_, file, flake_uri, customer, attr_path)
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
@@ -878,11 +778,7 @@ async def evaluate_tofu_units(
     reports `configFile` and `tofu` as store paths without building either, so
     without this every caller would get two paths that are not on disk.
     """
-    async with (
-        _session() as session,
-        session.store() as store,
-        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
-    ):
+    async with _evaluator() as eval_:
         proxy = await _resolve_proxy(eval_, file, flake_uri, customer, attr_path)
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
@@ -1075,11 +971,7 @@ async def evaluate_kubeapply_config(
     easykubenix renders onto a unit's objects, which the caller turns into a
     prune selector -- see `apply.prune_selector`.
     """
-    async with (
-        _session() as session,
-        session.store() as store,
-        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
-    ):
+    async with _evaluator() as eval_:
         proxy = await _resolve_proxy(eval_, file, flake_uri, customer, attr_path)
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
@@ -1215,11 +1107,7 @@ async def evaluate_cache_config(
     `kubernetes.generated` is a superset of a `--target` slice, so this can
     push more than one apply needs. That is the safe direction.
     """
-    async with (
-        _session() as session,
-        session.store() as store,
-        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
-    ):
+    async with _evaluator() as eval_:
         proxy = await _resolve_proxy(eval_, file, flake_uri, customer, attr_path)
         if await proxy.has_attr("config"):
             proxy = proxy.attr("config")
@@ -1235,9 +1123,7 @@ async def evaluate_cache_config(
         accept_new = await proxy.attr("ekn").attr("cacheAcceptNewHostKeys").to_python()
 
         with timed_stage("cache-push: build the manifest and realise its closure"):
-            manifest_out = (await proxy.attr("internal").attr("manifestJSONFile").build()).get("out")
-        if manifest_out is None:
-            raise ValueError("internal.manifestJSONFile's build produced no 'out' output")
+            manifest_out = await proxy.attr("internal").attr("manifestJSONFile").realise_string()
         manifest_text = await Path(manifest_out).read_text()
         cache_paths = sorted(f"{STORE_DIR}/{name}" for name in store_paths_in_text(manifest_text))
         return CacheConfigResult.model_validate(
@@ -1262,19 +1148,15 @@ async def realise_attr(
     references) and realises that context -- i.e. actually builds the full
     closure -- so `push_closure_to_store` has a real path to copy.
     """
-    async with (
-        _session() as session,
-        session.store() as store,
-        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
-    ):
+    async with _evaluator() as eval_:
         if flake_uri is not None:
-            proxy = await eval_.eval_flake(flake_uri)
+            proxy = await eval_.flake(flake_uri)
         elif file is not None:
-            proxy = await (await eval_.file(str(file))).auto_call()
+            proxy = await eval_.file(str(file))
         else:
             raise ValueError("specify --file or --flake")
 
-        proxy = await select_attr(proxy, attr_path)
+        proxy = await proxy.select(attr_path)
 
         return await proxy.realise_string()
 
@@ -1414,26 +1296,21 @@ def _pushing_ssh_opts(uri: str, *, accept_new_host_keys: bool) -> Generator[None
             os.environ["NIX_SSHOPTS"] = previous
 
 
-async def _closure_size(source: Any, paths: list[str]) -> tuple[int, int]:
+async def _closure_size(source: AsyncStore, paths: list[str]) -> tuple[int, int]:
     """How many paths the copy covers, and their NAR size, read from *source*.
 
     **The whole closure, and not the part the destination lacks.** The count
-    a reader wants is "3 of 19", and nanopynix's `Store` has no batch
-    valid-path query: asking the destination would be one round trip for each
-    path of the closure, over the same link the copy is about to use. A report
-    that costs a round trip per path can be slower than the silence it
-    replaces, so this reads the source alone. easykubenix issue #26 holds the
-    missing half, and it needs `query_valid_paths` on the `Store` protocol.
+    a reader wants is "3 of 19". huggorm's `query_valid_paths` asks the
+    destination for the whole set at once, and easykubenix issue #26 is
+    using it; until then this reads the source alone.
 
     `compute_fs_closure` and `query_path_info` both read the local store, so
     the whole function is SQLite reads and no network.
     """
-    closure: set[str] = set()
-    for path in paths:
-        closure.update(str(member) for member in await source.compute_fs_closure(path))
+    closure = await source.compute_fs_closure([nix.store_path(path) for path in paths])
     nar_bytes = 0
     for member in closure:
-        nar_bytes += (await source.query_path_info(member)).nar_size
+        nar_bytes += (await source.query_path_info(member)).nar_size()
     return len(closure), nar_bytes
 
 
@@ -1441,7 +1318,7 @@ class UnrealisedPathsError(RuntimeError):
     """The push was refused because this machine does not hold every path."""
 
 
-async def _refuse_unrealised(source: Any, paths: list[str]) -> None:
+async def _refuse_unrealised(source: AsyncStore, paths: list[str]) -> None:
     """Stop before a copy that would silently move a smaller set.
 
     A path the manifest names as text is not necessarily on this machine.
@@ -1454,7 +1331,7 @@ async def _refuse_unrealised(source: Any, paths: list[str]) -> None:
     have these paths in its set at all, so it reported success having moved
     nothing a node needs.
     """
-    missing = [path for path in paths if not await source.is_valid_path(path)]
+    missing = [path for path in paths if not await source.is_valid_path(nix.store_path(path))]
     if not missing:
         return
     listed = "\n".join(f"  {path}" for path in missing)
@@ -1480,12 +1357,9 @@ async def push_closure_to_store(  # noqa: PLR0913 -- tracked complexity/arg-coun
     Pure store-to-store copy, no evaluation involved -- backs both
     `ekn pushcache` (paths from `realise_attr`) and `Deploy`'s automatic
     pre-git-push cache push (paths from `evaluate_cache_config`). Opens a
-    fresh source + destination store pair in one session (a copy_closure
-    destination must share the session/worker of the store it's called
-    against -- see nanopynix's Store.copy_closure), rather than reusing
-    whatever session/store originally realised the paths -- the physical
-    Nix store on disk is what actually matters, not which in-process Store
-    handle built it.
+    fresh source + destination store pair in one session, rather than reusing
+    whatever store originally realised the paths -- the physical Nix store on
+    disk is what actually matters, not which Store handle built it.
 
     `timeout_sec` bounds the whole copy and raises `TimeoutError` when it
     runs out. There is a bound because a store URI naming a host that drops
@@ -1494,8 +1368,7 @@ async def push_closure_to_store(  # noqa: PLR0913 -- tracked complexity/arg-coun
     that looks hung rather than failed. See easykubenix issue #20.
 
     The deadline is outside the `async with`, so expiry unwinds the session
-    as well: the worker holding the stuck connection goes with it, rather
-    than being left to finish a copy nobody is waiting for.
+    as well, and the stores it opened close with it.
 
     `accept_new_host_keys` covers an ssh destination whose key this machine
     has never seen -- see `ssh_opts_for_push`.
@@ -1506,11 +1379,9 @@ async def push_closure_to_store(  # noqa: PLR0913 -- tracked complexity/arg-coun
     and the paths that matter here are the ones a cluster already publishes.
     """
     with _pushing_ssh_opts(to, accept_new_host_keys=accept_new_host_keys), anyio.fail_after(timeout_sec):
-        async with (
-            _session() as session,
-            session.store() as source,
-            session.store(uri=to) as dest,
-        ):
+        async with nix.session(verbosity=_VERBOSITY.get()) as session:
+            source = session.store()
+            dest = session.store(to)
             await _refuse_unrealised(source, paths)
             count, nar_bytes = await _closure_size(source, paths)
             # **`closure_` on both, because neither is the size of the
@@ -1530,10 +1401,10 @@ async def push_closure_to_store(  # noqa: PLR0913 -- tracked complexity/arg-coun
             )
             started = time.monotonic()
             await source.copy_closure(
-                paths,
                 dest,
-                substitute=substitute_on_destination,
+                [nix.store_path(path) for path in paths],
                 check_sigs=check_sigs,
+                substitute=substitute_on_destination,
             )
             _log.info(
                 "closure present",
@@ -1576,13 +1447,13 @@ async def _validation_config(proxy: Any) -> ValidationResult:
         novalidate_keys = await proxy.attr("kubernetes").attr("novalidateKeys").to_python()
 
     with timed_stage("validate: build etcdPackage"):
-        etcd_out = (await v.attr("etcdPackage").build()).get("out")
+        etcd_out = await v.attr("etcdPackage").realise_string()
     with timed_stage("validate: build kubeconformPackage"):
-        kubeconform_out = (await v.attr("kubeconformPackage").build()).get("out")
+        kubeconform_out = await v.attr("kubeconformPackage").realise_string()
     with timed_stage("validate: build kubernetes.package"):
-        k8s_out = (await proxy.attr("kubernetes").attr("package").build()).get("out")
+        k8s_out = await proxy.attr("kubernetes").attr("package").realise_string()
     with timed_stage("validate: build internal.manifestJSONFile (forces kubernetes.generated)"):
-        manifest_out = (await proxy.attr("internal").attr("manifestJSONFile").build()).get("out")
+        manifest_out = await proxy.attr("internal").attr("manifestJSONFile").realise_string()
 
     return ValidationResult.model_validate(
         {
@@ -1613,23 +1484,15 @@ async def evaluate_validation_file(
     file: str | PathLike[str],
     attr_path: str | None,
 ) -> ValidationResult:
-    async with (
-        _session() as session,
-        session.store() as store,
-        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
-    ):
-        proxy = await (await eval_.file(str(file))).auto_call()
+    async with _evaluator() as eval_:
+        proxy = await eval_.file(str(file))
         if attr_path:
-            proxy = await select_attr(proxy, attr_path)
+            proxy = await proxy.select(attr_path)
         return await _validation_config(proxy)
 
 
 async def evaluate_validation_config(flake_uri: str, customer: str) -> ValidationResult:
-    async with (
-        _session() as session,
-        session.store() as store,
-        session.eval(store, eval_settings=_profiler_eval_settings()) as eval_,
-    ):
+    async with _evaluator() as eval_:
         proxy = await _resolve_proxy(eval_, None, flake_uri, customer, None)
         return await _validation_config(proxy)
 

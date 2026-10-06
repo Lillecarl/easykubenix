@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import nanopynix
 import pytest
+from huggorm.errors import NixError
 
 from ekn.eval import evaluate_file
 
@@ -60,24 +60,24 @@ class TestConditionalAttrsOf:
         assert await evaluate_file(NIX_TEST_FILE, "pathDoesNotCreateMissingLevels") is True
 
     async def test_an_empty_path_is_rejected(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="non-empty attribute path"):
+        with pytest.raises(NixError, match="non-empty attribute path"):
             await evaluate_file(NIX_TEST_FILE, "emptyPathThrows")
 
     async def test_an_empty_path_component_is_rejected(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="non-empty attribute path"):
+        with pytest.raises(NixError, match="non-empty attribute path"):
             await evaluate_file(NIX_TEST_FILE, "emptyStringComponentThrows")
 
     async def test_a_quoted_string_path_is_rejected(self) -> None:
         # A string path is split on ".", not parsed. Refuse a quoted key
         # rather than give the quote a meaning; the list form takes it.
-        with pytest.raises(nanopynix.NixError, match="do not support quoting"):
+        with pytest.raises(NixError, match="do not support quoting"):
             await evaluate_file(NIX_TEST_FILE, "quotedStringPathThrows")
 
     async def test_a_marker_at_the_option_root_is_rejected(self) -> None:
         # Nothing above the option can decide whether the option exists, so a
         # bare marker there has no meaning. It must not merge as an ordinary
         # attribute set and leave `_type` in the output.
-        with pytest.raises(nanopynix.NixError, match="is not of type"):
+        with pytest.raises(NixError, match="is not of type"):
             await evaluate_file(NIX_TEST_FILE, "markerAtOptionRootThrows")
 
 
@@ -171,12 +171,12 @@ class TestTypeComposition:
         instead of recursing. If nixpkgs ever makes `typeMerge` handle a
         recursive type, this test is what notices.
         """
-        with pytest.raises(nanopynix.NixError, match="stack overflow"):
+        with pytest.raises(NixError, match="stack overflow"):
             await evaluate_file(NIX_TEST_FILE, "twoDeclarationsOfOneOption")
 
     async def test_the_same_limit_applies_to_a_plain_attrs_of_type(self) -> None:
         # The control. Same failure, no `conditionalAttrsOf` anywhere in it.
-        with pytest.raises(nanopynix.NixError, match="stack overflow"):
+        with pytest.raises(NixError, match="stack overflow"):
             await evaluate_file(NIX_TEST_FILE, "twoDeclarationsOfAPlainRecursiveOption")
 
 
@@ -195,27 +195,27 @@ class TestAPriorityAroundAMarkerIsRejected:
     """
 
     async def test_a_forced_marker_is_rejected(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="puts a priority around an"):
+        with pytest.raises(NixError, match="puts a priority around an"):
             await evaluate_file(NIX_TEST_FILE, "forcedMarkerThrows")
 
     async def test_the_error_names_the_option_and_the_fix(self) -> None:
-        with pytest.raises(nanopynix.NixError, match=r"value\.present"):
+        with pytest.raises(NixError, match=r"value\.present"):
             await evaluate_file(NIX_TEST_FILE, "forcedMarkerThrows")
-        with pytest.raises(nanopynix.NixError, match=r"lib\.mkForce 3"):
+        with pytest.raises(NixError, match=r"lib\.mkForce 3"):
             await evaluate_file(NIX_TEST_FILE, "forcedMarkerThrows")
 
     async def test_a_defaulted_marker_is_rejected_too(self) -> None:
         # The direction that merely does nothing. Refused by the same rule,
         # rather than left as a definition that silently never applies.
-        with pytest.raises(nanopynix.NixError, match="puts a priority around an"):
+        with pytest.raises(NixError, match="puts a priority around an"):
             await evaluate_file(NIX_TEST_FILE, "defaultedMarkerThrows")
 
     async def test_an_override_nested_under_an_mk_if_is_rejected(self) -> None:
         # The wrappers nest, so the check follows them. `mkIf` is not itself an
         # offence, and an override under one still is.
-        with pytest.raises(nanopynix.NixError, match="puts a priority around an"):
+        with pytest.raises(NixError, match="puts a priority around an"):
             await evaluate_file(NIX_TEST_FILE, "markerForcedUnderAnMkIfThrows")
 
     async def test_an_override_inside_an_mk_merge_is_rejected(self) -> None:
-        with pytest.raises(nanopynix.NixError, match="puts a priority around an"):
+        with pytest.raises(NixError, match="puts a priority around an"):
             await evaluate_file(NIX_TEST_FILE, "markerForcedInsideAnMkMergeThrows")

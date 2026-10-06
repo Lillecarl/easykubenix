@@ -12,7 +12,7 @@ Issue Lillecarl/easykubenix#19, and #37 for why the walk is in `ekn`.
 The probe is injected, so these exercise the walk itself -- the union across
 substituters, the closure, and the three-way answer -- rather than a store.
 The probe's own contract is checked against real stores; see
-`storecheck.nanopynix_probe`'s docstring for the measurement.
+`storecheck.huggorm_probe`'s docstring for the measurement.
 """
 
 from __future__ import annotations

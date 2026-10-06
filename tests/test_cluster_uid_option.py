@@ -12,7 +12,7 @@ from __future__ import annotations
 import pathlib
 
 import pytest
-from nanopynix.exceptions import NixError
+from huggorm.errors import NixError
 from test_pre_apply import PROJECT_ROOT
 
 from ekn.eval import evaluate_kubeapply_config

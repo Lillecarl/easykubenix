@@ -28,7 +28,7 @@ import pytest
 
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-#: Long enough for a nanopynix session to start and fail.
+#: Long enough for an evaluator to start and fail.
 _TIMEOUT_SECONDS = 180
 
 

@@ -16,8 +16,8 @@ import yaml
 from ekn.apply import apply_one, build_object
 
 if TYPE_CHECKING:
+    from huggorm.jsonprimop import JsonValue
     from kr8s.asyncio import Api  # kr8s.asyncio.api() returns this, not kr8s.Api
-    from nanopynix.models import JsonValue
 
     from ekn.apply import Manifest
     from ekn.eval import SopsAgeIdentity

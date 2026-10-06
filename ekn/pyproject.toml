@@ -6,16 +6,17 @@ build-backend = "hatchling.build"
 name = "ekn"
 version = "0.1.0"
 description = "easykubenix CLI"
-# `3.13`, which is what this program really needs. `nanopynix` below asks for
-# the same, and `ruff.toml` targets it. The floor said `3.10` while the source
+# `3.13`, which is what this program really needs, and `ruff.toml` targets it. The floor said `3.10` while the source
 # already used `typing.override` and `type X = ...`, both of which are 3.12.
 requires-python = ">=3.13"
 authors = [{ name = "easykubenix contributors" }]
 dependencies = [
-  # `storecheck` runs on huggorm, the library nanopynix is moving onto.
+  # Nix, in-process (easykubenix#52).
   "huggorm",
-  "nanopynix",
-  "nanopynix-helpers",
+  "pydantic",
+  # `ekn.fod` finds a fixed-output hash in Nix source by its syntax tree.
+  "tree-sitter",
+  "tree-sitter-nix",
   "pygit2",
   "pyyaml",
   # `argcomplete`, and not `clypi`. The parser is `argparse`, from the standard
@@ -42,6 +43,9 @@ dependencies = [
 [project.optional-dependencies]
 profile = [
   "pyinstrument",
+]
+test = [
+  "pytest",
 ]
 
 [project.scripts]
