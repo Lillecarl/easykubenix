@@ -34,6 +34,8 @@ dependencies = [
   # easykubenix/pkgs overlays jsonschema-rs to a newer release than nixpkgs.
   "jsonschema-rs",
   "httpx",
+  # `ekn schema-check` evaluates CRDs' x-kubernetes-validations with it.
+  "cel-python",
   "anyio",
   "structlog",
   "rich",

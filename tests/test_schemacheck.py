@@ -285,3 +285,65 @@ def test_a_property_named_like_a_keyword_is_a_property() -> None:
 )
 def test_yannh_name(gvk: GroupVersionKind, name: str) -> None:
     assert yannh_name(gvk) == name
+
+
+def _cel_crd(rules: list[dict[str, Any]]) -> dict[str, Any]:
+    crd = _crd({"min": {"type": "integer"}, "max": {"type": "integer"}})
+    crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["x-kubernetes-validations"] = rules
+    return crd
+
+
+def test_a_false_cel_rule_is_a_violation(catalog: Catalog) -> None:
+    add_rendered_crds(catalog, [_cel_crd([{"rule": "self.min <= self.max", "message": "min above max"}])])
+    assert check([_widget({"min": 1, "max": 2})], catalog).ok
+    report = check([_widget({"min": 3, "max": 2})], catalog)
+    assert [(v.path, v.message) for v in report.violations] == [("/spec", "CEL: min above max")]
+    assert report.cel.evaluated == 1
+
+
+def test_a_cel_keyword_property_is_escaped(catalog: Catalog) -> None:
+    crd = _crd(
+        {"namespace": {"type": "string"}, "labels": {"type": "object", "additionalProperties": {"type": "string"}}}
+    )
+    crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["x-kubernetes-validations"] = [
+        {"rule": "has(self.__namespace__)", "message": "needs namespace"},
+        {"rule": "!has(self.labels) || 'a-b' in self.labels", "message": "needs a-b"},
+    ]
+    add_rendered_crds(catalog, [crd])
+    assert check([_widget({"namespace": "x", "labels": {"a-b": "1"}})], catalog).ok
+    report = check([_widget({"labels": {"c": "1"}})], catalog)
+    assert sorted(v.message for v in report.violations) == ["CEL: needs a-b", "CEL: needs namespace"]
+
+
+def test_a_cel_rule_that_errors_is_a_violation(catalog: Catalog) -> None:
+    """The API server rejects an object whose rule fails to evaluate."""
+    add_rendered_crds(catalog, [_cel_crd([{"rule": "self.absent > 0"}])])
+    report = check([_widget({"min": 1})], catalog)
+    assert [v.path for v in report.violations] == ["/spec"]
+    assert "failed to evaluate" in report.violations[0].message
+
+
+def test_a_cel_rule_sees_schema_defaults(catalog: Catalog) -> None:
+    crd = _crd({"kind": {"type": "string", "default": "Service"}, "port": {"type": "integer"}})
+    crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["x-kubernetes-validations"] = [
+        {"rule": "self.kind == 'Service' ? has(self.port) : true", "message": "a Service needs a port"},
+    ]
+    add_rendered_crds(catalog, [crd])
+    assert check([_widget({"port": 80})], catalog).ok
+    report = check([_widget({})], catalog)
+    assert [v.message for v in report.violations] == ["CEL: a Service needs a port"]
+    assert report.cel.skipped == {}
+
+
+@pytest.mark.parametrize(
+    ("rule", "reason"),
+    [
+        ("self.min == oldSelf.min", "oldSelf"),
+        ("quantity(self.min) > 0", "unsupported: quantity"),
+    ],
+)
+def test_a_cel_rule_it_cannot_judge_is_skipped(catalog: Catalog, rule: str, reason: str) -> None:
+    add_rendered_crds(catalog, [_cel_crd([{"rule": rule}])])
+    report = check([_widget({"min": 3, "max": 2})], catalog)
+    assert report.ok
+    assert report.cel.skipped == {reason: 1}

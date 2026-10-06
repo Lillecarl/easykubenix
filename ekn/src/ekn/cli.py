@@ -756,6 +756,8 @@ def _report_schemas(
         _log.warning("no schema for this kind; not checked", object=str(ref))
     stream.writelines(f"{violation}\n" for violation in report.violations)
     checked = {origin.value: count for origin, count in report.checked.items()}
+    if report.cel.evaluated or report.cel.skipped:
+        _log.info("CEL rules", evaluated=report.cel.evaluated, skipped=dict(report.cel.skipped.most_common()))
     if not report.ok:
         _log.error("schema check failed", violations=len(report.violations), checked=checked, seconds=seconds)
         raise SystemExit(1)

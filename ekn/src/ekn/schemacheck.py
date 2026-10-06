@@ -17,11 +17,14 @@ validation fails it.
 from __future__ import annotations
 
 import enum
+import json
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 import jsonschema_rs
+
+from ekn.schemacel import VALIDATIONS, CelChecker, CelResult
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping
@@ -212,6 +215,8 @@ class Report:
     #: Objects whose kind no source describes.
     unknown: list[ObjectRef] = field(default_factory=list)
     violations: list[Violation] = field(default_factory=list)
+    #: The rendered CRDs' CEL rules. Their failures are also in `violations`.
+    cel: CelResult = field(default_factory=CelResult)
 
     @property
     def ok(self) -> bool:
@@ -251,6 +256,8 @@ class _Entry:
     #: The schema types `metadata` as a bare object, as a CRD's root does.
     #: The API server still decodes it as ObjectMeta, so `check` does too.
     bare_metadata: bool = False
+    #: The CRD's own schema, before conversion, when it declares CEL rules.
+    cel_schema: Mapping[str, Any] | None = None
 
 
 def _crd_versions(crd: Mapping[str, Any]) -> Iterator[tuple[GroupVersionKind, dict[str, Any]]]:
@@ -293,6 +300,7 @@ class Catalog:
     overridden: dict[GroupVersionKind, Origin] = field(default_factory=dict)
     #: The first OpenAPI document that defines ObjectMeta.
     _object_meta: _Document | None = None
+    cel: CelChecker = field(default_factory=CelChecker)
 
     def _put(self, gvk: GroupVersionKind, entry: _Entry) -> None:
         held = self._entries.get(gvk)
@@ -336,7 +344,8 @@ class Catalog:
     def add_crd(self, crd: Mapping[str, Any], origin: Origin = Origin.RENDERED_CRD) -> None:
         for gvk, schema in _crd_versions(crd):
             document = _Document({"definitions": {"root": to_json_schema(_with_object_fields(schema))}})
-            self._put(gvk, _Entry(origin, document, "root", bare_metadata=True))
+            cel_schema = schema if VALIDATIONS in json.dumps(schema) else None
+            self._put(gvk, _Entry(origin, document, "root", bare_metadata=True, cel_schema=cel_schema))
 
     def add_schema(self, gvk: GroupVersionKind, schema: dict[str, Any], origin: Origin) -> None:
         """A self-contained JSON schema for one kind, used as it stands."""
@@ -356,6 +365,10 @@ class Catalog:
         if entry is None or not entry.bare_metadata or self._object_meta is None:
             return None
         return self._object_meta.validator(OBJECT_META)
+
+    def cel_schema(self, gvk: GroupVersionKind) -> Mapping[str, Any] | None:
+        entry = self._entries.get(gvk)
+        return entry.cel_schema if entry else None
 
 
 def strip_for_check(obj: Mapping[str, Any]) -> dict[str, Any]:
@@ -387,6 +400,13 @@ def check(objects: Iterable[Mapping[str, Any]], catalog: Catalog) -> Report:
             report.violations.extend(
                 Violation(ref, "/metadata" + "".join(f"/{part}" for part in error.instance_path), error.message)
                 for error in meta_validator.iter_errors(metadata)
+            )
+        cel_schema = catalog.cel_schema(ref.gvk)
+        if cel_schema is not None:
+            failures = len(report.cel.failures)
+            catalog.cel.walk(cel_schema, strip_for_check(obj), "", report.cel)
+            report.violations.extend(
+                Violation(ref, failure.path, f"CEL: {failure.message}") for failure in report.cel.failures[failures:]
             )
     return report
 
