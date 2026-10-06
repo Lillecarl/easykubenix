@@ -270,7 +270,8 @@ class _ValidationInfo(BaseModel):
     service_subnet: str = Field(alias="serviceSubnet")
     debug: bool
     etcd_package: _OutPathInfo = Field(alias="etcdPackage")
-    kubeconform_package: _OutPathInfo = Field(alias="kubeconformPackage")
+    #: `validation.openapiSpec`, realised.
+    openapi_spec: str = Field(alias="openapiSpec")
 
 
 class _ApplyInfo(BaseModel):
@@ -1453,8 +1454,8 @@ async def _validation_config(proxy: Any) -> ValidationResult:
 
     with timed_stage("validate: build etcdPackage"):
         etcd_out = await v.attr("etcdPackage").realise_string()
-    with timed_stage("validate: build kubeconformPackage"):
-        kubeconform_out = await v.attr("kubeconformPackage").realise_string()
+    with timed_stage("validate: build openapiSpec"):
+        openapi_spec = await v.attr("openapiSpec").realise_string()
     with timed_stage("validate: build kubernetes.package"):
         k8s_out = await proxy.attr("kubernetes").attr("package").realise_string()
     with timed_stage("validate: build internal.manifestJSONFile (forces kubernetes.generated)"):
@@ -1472,7 +1473,7 @@ async def _validation_config(proxy: Any) -> ValidationResult:
                     "serviceSubnet": service_subnet,
                     "debug": debug,
                     "etcdPackage": {"outPath": etcd_out},
-                    "kubeconformPackage": {"outPath": kubeconform_out},
+                    "openapiSpec": openapi_spec,
                 },
                 "ekn": {
                     "resourcePriority": resource_priority,

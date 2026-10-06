@@ -220,8 +220,8 @@ demonstrates a resource in an existing namespace.
 
 ## Validation with Real kube-apiserver
 
-Spins up etcd + kube-apiserver, applies all manifests with `ekn`, dumps the
-live OpenAPI v2 schema, and runs kubeconform against every resource — including
+Spins up etcd + kube-apiserver, applies all manifests with `ekn`, then checks
+every resource against its JSON schema with `ekn _schemaCheck` — including
 CRDs from a Helm chart and custom resources that depend on them.
 
 The apply goes through the same `apply_and_prune` that `ekn kubeapply` uses to

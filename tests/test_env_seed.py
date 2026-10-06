@@ -20,9 +20,9 @@ class TestEnvSeed:
     async def test_a_reference_is_a_plain_string(self) -> None:
         # Not a marked attrset. A Secret's `stringData` is
         # `map[string]string`, so an attrset there makes the rendered
-        # manifest fail schema validation -- and validation.nix pipes the
-        # manifest straight into kubeconform, outside the CLI, where nothing
-        # can substitute first.
+        # manifest fail schema validation -- and validation.nix hands the
+        # manifest straight to the schema check, where nothing substitutes
+        # first.
         assert await evaluate_file(NIX_TEST_FILE, "referenceIsAString") is True
         assert await evaluate_file(NIX_TEST_FILE, "reference") == "$ekn:env:ARGOCD_REPO_PASSWORD"
 

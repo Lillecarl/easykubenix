@@ -203,7 +203,7 @@ class EphemeralControlPlane:
     No controllers run against this apiserver (aggregated APIServices,
     reconciling controllers, etc. never actually work here -- see
     kubernetes.nix's `ekn.novalidate`); it exists purely so
-    `apply_and_prune`+kubeconform can see manifests land on a real API
+    `apply_and_prune` can see manifests land on a real API
     server's admission/validation pipeline.
 
     Mutates process-global `os.environ` (CERT_DIR/KUBECONFIG/BIND_ADDRESS/
@@ -222,13 +222,11 @@ class EphemeralControlPlane:
         *,
         k8s_bin: str,
         etcd_bin: str,
-        kubeconform_bin: str,
         service_subnet: str,
         kubeadm_config: dict[str, Any],
     ) -> None:
         self._k8s_bin = k8s_bin
         self._etcd_bin = etcd_bin
-        self._kubeconform_bin = kubeconform_bin
         self._service_subnet = service_subnet
         self._kubeadm_config = kubeadm_config
         self._tmp: Path | None = None
@@ -238,7 +236,6 @@ class EphemeralControlPlane:
         self._etcd_proc: anyio.abc.Process | None = None
         self._apiserver_proc: anyio.abc.Process | None = None
         self.kubeconfig: str = ""
-        self.schema_file: str = ""
         self.env: dict[str, str] = {}
         self._cert_dir: str = ""
         self._bind: str = ""
@@ -277,7 +274,6 @@ class EphemeralControlPlane:
         self._cert_dir = str(tmp / "pki")
         self.kubeconfig = str(tmp / "admin.conf")
         kubeadm_cfg = str(tmp / "kubeadm-config.json")
-        self.schema_file = str(tmp / "k8s-schema.json")
 
         # Mirrors `bindAddress`/`bindHost` in validation.nix, by name as well
         # as by value: this harness exists twice, and the names lining up is
@@ -305,7 +301,7 @@ class EphemeralControlPlane:
         await Path(kubeadm_cfg).write_text(kubeadm_config_text)
 
         self.env = os.environ | {
-            "PATH": f"{self._k8s_bin}:{self._etcd_bin}:{self._kubeconform_bin}:" + os.environ.get("PATH", ""),
+            "PATH": f"{self._k8s_bin}:{self._etcd_bin}:" + os.environ.get("PATH", ""),
         }
 
         rc, _, err = await exec_capture(

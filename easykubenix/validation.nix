@@ -23,10 +23,15 @@ in
 {
   _class = "kubernetes";
 
+  imports = [
+    (lib.mkRemovedOptionModule [ "validation" "kubeconformPackage" ]
+      "kubeconform is gone: the harness checks schemas with `ekn _schemaCheck`, the same check as validation.schemaCheck."
+    )
+  ];
+
   options.validation = {
     debug = lib.mkEnableOption "validation debugging";
     etcdPackage = lib.mkPackageOption pkgs "etcd" { };
-    kubeconformPackage = lib.mkPackageOption pkgs "kubeconform" { };
     kubeadmConfig = lib.mkOption {
       type = ekn.lib.kubeValueType;
     };
@@ -308,11 +313,10 @@ in
               echo "ekn apply failed"
               exit 1
             end
-            echo "dumping openapiv2 schema from apiserver"
-            kubectl get --raw /openapi/v2 > $TMPDIR/k8s-schema.json
-            echo "running kubeconform"
-            ${lib.getExe cfg.kubeconformPackage} -schema-location $TMPDIR/k8s-schema.json -summary < ${config.internal.manifestJSONFile} || begin
-              echo "kubeconform verification failed"
+            echo "checking schemas"
+            ${lib.getExe' eknPackage "ekn"} _schemaCheck ${config.internal.manifestJSONFile} \
+              --spec-dir ${cfg.openapiSpec} || begin
+              echo "schema check failed"
               exit 1
             end
             echo "Your manifests are as valid as they can be against Kubernetes ${config.kubernetes.package.version}"

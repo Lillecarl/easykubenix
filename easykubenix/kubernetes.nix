@@ -894,8 +894,8 @@ in
         literal value and overwrite a live credential with it.
 
         `ekn validate` deliberately stays on `generated`: a reference is a
-        plain string, so the manifest is schema-valid and `kubeconform` has
-        nothing to object to.
+        plain string, so the manifest is schema-valid and the schema check
+        has nothing to object to.
       '';
       readOnly = true;
     };

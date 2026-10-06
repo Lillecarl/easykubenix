@@ -75,7 +75,6 @@ async def cluster() -> AsyncIterator[tuple[Any, list[dict[str, Any]], str]]:
     async with EphemeralControlPlane(
         k8s_bin=c.kubernetes.package.out_path + "/bin",
         etcd_bin=c.validation.etcd_package.out_path + "/bin",
-        kubeconform_bin=c.validation.kubeconform_package.out_path + "/bin",
         service_subnet=c.validation.service_subnet,
         kubeadm_config=c.validation.kubeadm_config,
     ) as plane:
@@ -111,7 +110,7 @@ async def test_the_rendered_manifest_carries_a_reference_not_a_value(
     assert secret["stringData"]["password"] == f"$ekn:env:{VARIABLE}"
     assert secret["metadata"]["annotations"]["ekn.dev/env-0"] == VARIABLE
     # The manifest is schema-valid Kubernetes: a plain string, not an object.
-    # This is what lets `ekn validate` and kubeconform work untouched.
+    # This is what lets `ekn validate` and the schema check work untouched.
     assert isinstance(secret["stringData"]["password"], str)
 
 

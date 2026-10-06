@@ -224,7 +224,7 @@ let
 
   # The full validation harness -- real etcd and kube-apiserver on 127.0.0.1,
   # applying the whole manifest set through `ekn _applyManifest`, then
-  # kubeconform over it -- as a sandboxed derivation rather than a `nix run`.
+  # the schema check over it -- as a sandboxed derivation rather than a `nix run`.
   # Issue #16 holds the evidence that a sandbox permits everything this needs:
   # every tool is already a store-path input of the script, nothing re-enters
   # Nix, all writes land in `$TMPDIR`, and a sandboxed build binds loopback

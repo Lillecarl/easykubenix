@@ -89,7 +89,7 @@ from ekn.tofu import (
     output as tofu_output,
     run_chain,
 )
-from ekn.validation import EphemeralControlPlane, exec_capture, load_manifest_objects, prepare_validation_objects
+from ekn.validation import EphemeralControlPlane, load_manifest_objects, prepare_validation_objects
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
@@ -698,7 +698,7 @@ async def _push_one_cache(
 
 
 class Validate(AttrCommand):
-    """Boot real etcd+kube-apiserver, apply manifests, and run kubeconform."""
+    """Boot real etcd+kube-apiserver, apply manifests, and check their schemas."""
 
     async def run(self) -> None:
         if self.file is not None:
@@ -717,7 +717,6 @@ class Validate(AttrCommand):
         async with EphemeralControlPlane(
             k8s_bin=c.kubernetes.package.out_path + "/bin",
             etcd_bin=c.validation.etcd_package.out_path + "/bin",
-            kubeconform_bin=c.validation.kubeconform_package.out_path + "/bin",
             service_subnet=c.validation.service_subnet,
             kubeadm_config=c.validation.kubeadm_config,
         ) as plane:
@@ -737,26 +736,10 @@ class Validate(AttrCommand):
                 _log.error("apply failed\n%s", exc)
                 raise SystemExit(1) from exc
 
-            _log.info("dumping OpenAPI schema")
-            rc, out, err = await exec_capture("kubectl", "get", "--raw", "/openapi/v2", env=plane.env)
-            if rc != 0:
-                _log.error("OpenAPI schema dump failed\n%s", err)
-                raise SystemExit(1)
-            await Path(plane.schema_file).write_text(out)
-
-            _log.info("running kubeconform")
-            manifest_data = await Path(manifest_path).read_text()
-            rc, out, err = await exec_capture(
-                "kubeconform",
-                f"-schema-location={plane.schema_file}",
-                "-summary",
-                stdin=manifest_data,
-                env=plane.env,
+            spec_dir = c.validation.openapi_spec
+            await _check_schemas(
+                await load_manifest_objects(manifest_path), lambda catalog: _load_spec(catalog, spec_dir)
             )
-            sys.stdout.write(out)
-            if rc != 0:
-                _log.error("%s\nkubeconform verification failed", err)
-                raise SystemExit(1)
 
             _log.info("Your manifests are as valid as they can be against Kubernetes %s", c.kubernetes.package.version)
 
@@ -916,7 +899,7 @@ class Deploy(CachePushCommand, Commit):
     # what the class body itself declared, so all six stood here as well.
     no_verify: bool = opt(
         False,
-        help="Skip temporary API-server and kubeconform verification.",
+        help="Skip the temporary API server and the schema check.",
     )
     verbosity: LogLevel = opt(
         "error",
@@ -2189,7 +2172,7 @@ class ApplyManifest(Command):
 
     Internal: the apply step of easykubenix's `validation.script`, which
     boots a throwaway etcd+kube-apiserver in Nix and needs manifests on it
-    before it can dump an OpenAPI schema for kubeconform. That step used to
+    before it can check their schemas. That step used to
     shell out to `kluctl deploy`, which meant the gate proved a deploy path
     nothing else in the project uses; this runs the same `apply_and_prune`
     that `ekn kubeapply` (bootstrap) and `ekn validate` do.

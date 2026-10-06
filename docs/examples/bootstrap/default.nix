@@ -52,7 +52,7 @@ in
   # Boots etcd + kube-apiserver, applies the bootstrap objects through the
   # same `apply_and_prune` that `ekn kubeapply --target bootstrap` uses --
   # ArgoCD's CRDs first, then the `Application` that needs them -- and
-  # kubeconforms the result against the live schema. Not part of `checks`,
+  # checks the result's schemas. Not part of `checks`,
   # same as `validation`'s: run it with
   # `nix run --file ./nix packages.bootstrapValidationScript`.
   validationScript = bootstrap.config.validation.script;

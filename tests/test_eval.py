@@ -273,7 +273,7 @@ class TestEknModule:
 
     async def test_a_seed_reference_renders_as_a_plain_string(self) -> None:
         # The reference reaches the manifest untouched, and as a string, so
-        # `stringData` stays `map[string]string` and kubeconform passes.
+        # `stringData` stays `map[string]string` and the schema check passes.
         # Nothing in Nix reads the variable.
         result = await evaluate_file(NIX_TEST_FILE, "seededGenerated")
         assert isinstance(result, list)
@@ -329,7 +329,7 @@ class TestEknModule:
     async def test_the_internal_manifest_keeps_the_seeded_object(self) -> None:
         # `ekn validate`, `ekn _applyManifest` and the cache push read
         # this one, and all three go through the CLI, which substitutes
-        # first. A reference is a plain string, so kubeconform is content.
+        # first. A reference is a plain string, so the schema check passes.
         internal = await evaluate_file(NIX_TEST_FILE, "seededInternalManifest")
         assert isinstance(internal, dict)
         kinds = [o["kind"] for o in internal["items"]]
@@ -1280,7 +1280,7 @@ class TestValidationConfig:
         assert c.kubernetes.package.version
         assert c.kubernetes.package.out_path.startswith("/nix/store/")
         assert c.validation.etcd_package.out_path.startswith("/nix/store/")
-        assert c.validation.kubeconform_package.out_path.startswith("/nix/store/")
+        assert c.validation.openapi_spec.startswith("/nix/store/")
         assert isinstance(c.ekn.resource_priority, dict)
         # Helm's InstallOrder in tens, so PriorityClass leads at 10 and CRDs
         # sort before the custom resources they establish.

@@ -13,9 +13,9 @@ let
   # The reference is a plain string, not a marked attribute set. That is not
   # a style choice. A Kubernetes `Secret`'s `stringData` is
   # `map[string]string`, so an attribute set there makes the rendered
-  # manifest fail schema validation -- and `ekn validate` pipes
-  # `internal.manifestJSONFile` straight into `kubeconform` in shell (see
-  # validation.nix), outside the CLI, where nothing can substitute first.
+  # manifest fail schema validation -- and validation.nix hands
+  # `internal.manifestJSONFile` straight to the schema check, where nothing
+  # substitutes first.
   # A string sentinel keeps every manifest valid, so validation needs no stub
   # and no skip list.
   prefix = "$ekn:env:";

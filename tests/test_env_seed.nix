@@ -57,7 +57,7 @@ let
 in
 {
   # The reference is a plain string. This is what keeps a rendered manifest
-  # schema-valid, so `kubeconform` and `ekn validate` need no special case.
+  # schema-valid, so the schema check and `ekn validate` need no special case.
   referenceIsAString = lib.isString (lib.envSeed "ARGOCD_REPO_PASSWORD");
   reference = lib.envSeed "ARGOCD_REPO_PASSWORD";
   prefix = lib.envSeedPrefix;
