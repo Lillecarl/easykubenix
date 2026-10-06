@@ -501,7 +501,7 @@ async def _resolve_proxy(
 ) -> nix.Value:
     """Resolve --file/--flake[+--customer] into a proxy, then narrow by
     attr_path if given -- the branching prelude duplicated verbatim across
-    evaluate_with_fod_update/evaluate_flake_ekn/evaluate_generated_manifests/
+    evaluate_with_fod_update/evaluate_flake_ekn/evaluate_generated_with_spec/
     evaluate_gitops_manifests/evaluate_kubeapply_config/evaluate_cache_config/
     evaluate_validation_config. Deliberately does not descend into `.config`
     -- callers that need that (all but evaluate_with_fod_update) do it
@@ -666,12 +666,14 @@ def timed_stage(label: str) -> Generator[None]:
         _log_timing(label, time.monotonic() - start)
 
 
-async def evaluate_generated_manifests(
+async def evaluate_generated_with_spec(
     file: str | PathLike[str] | None,
     flake_uri: str | None,
     customer: str | None,
     attr_path: str | None,
-) -> JsonValue:
+    *,
+    with_spec: bool,
+) -> tuple[JsonValue, str | None]:
     """Resolve a file or flake target down to `kubernetes.generated`.
 
     Unlike `evaluate_file`/`evaluate_flake`, this never to_python's the whole
@@ -695,8 +697,11 @@ async def evaluate_generated_manifests(
         result = await proxy.attr("kubernetes").attr("generated").to_python()
         t_after_force = time.monotonic()
         _log_timing("to_python(kubernetes.generated)", t_after_force - t_before_force)
-        _log_timing("total evaluate_generated_manifests", t_after_force - t_start)
-        return result
+        # In this session: a second one costs ~4.6s of evaluator start-up on
+        # nixlab3, against 0.4s for the whole schema check.
+        spec = await proxy.attr("validation").attr("openapiSpec").realise_string() if with_spec else None
+        _log_timing("total evaluate_generated_with_spec", time.monotonic() - t_start)
+        return result, spec
 
 
 async def evaluate_gitops_manifests(
@@ -1547,7 +1552,7 @@ __all__ = [
     "evaluate_file_multi",
     "evaluate_flake",
     "evaluate_flake_ekn",
-    "evaluate_generated_manifests",
+    "evaluate_generated_with_spec",
     "evaluate_gitops_manifests",
     "evaluate_kubeapply_config",
     "evaluate_schemacheck_config",

@@ -44,7 +44,7 @@ from ekn.eval import (
     evaluate_file,
     evaluate_flake,
     evaluate_flake_ekn,
-    evaluate_generated_manifests,
+    evaluate_generated_with_spec,
     evaluate_gitops_manifests,
     evaluate_kubeapply_config,
     evaluate_schemacheck_config,
@@ -267,15 +267,31 @@ class Eval(AttrCommand):
 class Render(AttrCommand):
     """Render Kubernetes manifests as YAML on stdout."""
 
+    validate: bool = opt(
+        False,
+        help="Check every object against its JSON schema before writing any: built-in kinds from "
+        "validation.openapiSpec, custom resources from the rendered CRDs. No cluster and no network; "
+        "the same check as validation.schemaCheck. A violation writes nothing and exits 1.",
+    )
+
     async def run(self) -> None:
         uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
         try:
-            manifests = await evaluate_generated_manifests(self.file, uri, customer, self.attr)
+            manifests, spec_dir = await evaluate_generated_with_spec(
+                self.file, uri, customer, self.attr, with_spec=self.validate
+            )
         except NixError as exc:
             _report_nix_error(exc)
         if not isinstance(manifests, list):
             _log.error("expected a list result, got %s", type(manifests).__name__)
             raise SystemExit(1)
+        if spec_dir is not None:
+            # stderr: stdout is the YAML.
+            await _check_schemas(
+                cast("list[dict[str, Any]]", manifests),
+                lambda catalog: _load_spec(catalog, spec_dir),
+                stream=sys.stderr,
+            )
         for _, content in flatten_manifests(manifests):
             sys.stdout.write("---\n")
             sys.stdout.write(content)
