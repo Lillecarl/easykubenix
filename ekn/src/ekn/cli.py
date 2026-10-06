@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, cast
 
 import anyio
 import anyio.to_thread
+import httpx
 import kr8s.asyncio
 import pygit2
 import rich.traceback
@@ -45,6 +46,7 @@ from ekn.eval import (
     evaluate_generated_manifests,
     evaluate_gitops_manifests,
     evaluate_kubeapply_config,
+    evaluate_schemacheck_config,
     evaluate_tofu_units,
     evaluate_validation_config,
     evaluate_validation_file,
@@ -74,6 +76,8 @@ from ekn.gitops import (
 )
 from ekn.nixyaml import from_go_like_yaml_stream, from_yaml11_stream, from_yaml_stream, to_yaml
 from ekn.reclaim import reclaim
+from ekn.schemacheck import Catalog, GroupVersionKind, Report, add_rendered_crds, check
+from ekn.schemasource import load_server, load_spec_dir, load_yannh
 from ekn.sops import ensure_age_identities, maybe_decrypt
 from ekn.tofu import (
     TofuError,
@@ -738,6 +742,106 @@ class Validate(AttrCommand):
                 raise SystemExit(1)
 
             _log.info("Your manifests are as valid as they can be against Kubernetes %s", c.kubernetes.package.version)
+
+
+def _report_schemas(report: Report, catalog: Catalog) -> None:
+    """Print *report*, then exit 1 if it holds a violation."""
+    for gvk, origin in sorted(catalog.overridden.items()):
+        _log.debug("a rendered CRD replaces the schema", kind=str(gvk), replaced=origin.value)
+    if catalog.overridden:
+        _log.info("rendered CRDs replace other sources' schemas", kinds=len(catalog.overridden))
+    for ref in sorted(set(report.unknown)):
+        _log.warning("no schema for this kind; not checked", object=str(ref))
+    for violation in report.violations:
+        sys.stdout.write(f"{violation}\n")
+    checked = {origin.value: count for origin, count in report.checked.items()}
+    if not report.ok:
+        _log.error("schema check failed", violations=len(report.violations), checked=checked)
+        raise SystemExit(1)
+    _log.info("schema check passed", checked=checked, unchecked=len(report.unknown))
+
+
+class SchemaCheck(FencedCommand):
+    """Check every rendered object against its JSON schema, with no API server.
+
+    Built-in kinds come from the cluster's own OpenAPI v3, and from
+    yannh/kubernetes-json-schema when the cluster cannot be reached. Both are
+    cached per cluster under $XDG_CACHE_HOME/ekn/schemas. A CRD in the render
+    replaces the cluster's schema for its kinds: it is what the apply installs.
+    """
+
+    offline: bool = opt(
+        False,
+        help="Read the built-in kinds from validation.openapiSpec, the pinned Kubernetes source tree, "
+        "and reach no cluster and no network. The same check as validation.schemaCheck.",
+    )
+
+    async def run(self) -> None:
+        uri, customer = _parse_flake(str(self.flake)) if self.flake is not None else (None, None)
+        try:
+            cfg = await evaluate_schemacheck_config(self.file, uri, customer, self.attr, live=not self.offline)
+        except NixError as exc:
+            _report_nix_error(exc)
+        objects = await load_manifest_objects(cfg.manifest_json_file)
+        catalog = Catalog()
+        add_rendered_crds(catalog, objects)
+        if self.offline:
+            files = await load_spec_dir(catalog, cfg.openapi_spec)
+            _log.info("read the pinned OpenAPI spec", group_versions=files, kubernetes=cfg.kubernetes_version)
+        elif cfg.environment is not None:
+            await self._load_live(catalog, objects, cfg.cluster_uid, cfg.environment, cfg.kubernetes_version)
+        _report_schemas(check(objects, catalog), catalog)
+
+    async def _load_live(
+        self,
+        catalog: Catalog,
+        objects: list[dict[str, Any]],
+        declared: str | None,
+        environment: str,
+        kubernetes_version: str,
+    ) -> None:
+        try:
+            api = await kr8s.asyncio.api()
+            uid = await clusterfence.require(
+                api, declared, environment=environment, override=self.i_dont_know_which_cluster_this_is
+            )
+            cluster = uid or declared
+            if cluster is None:
+                _log.error("cannot name the cache for a cluster with no uid")
+                raise SystemExit(1)
+            files = await load_server(catalog, api, cluster)
+            _log.info("read the cluster's OpenAPI v3", group_versions=files, cluster=cluster)
+        except (httpx.TransportError, OSError, ValueError) as exc:
+            # A cluster that cannot be reached is the case yannh exists for.
+            # One that answers with the wrong uid already raised SystemExit.
+            _log.warning("cannot reach the cluster; using yannh/kubernetes-json-schema", error=str(exc))
+            found = await load_yannh(
+                catalog,
+                {GroupVersionKind.of(obj) for obj in objects},
+                kubernetes_version,
+                declared or "unidentified",
+            )
+            _log.info("read yannh's schemas", kinds=found, kubernetes=kubernetes_version)
+
+
+class SchemaCheckManifest(Command):
+    """Check an already-rendered manifest against the schemas in a spec directory.
+
+    Internal: the body of easykubenix's `validation.schemaCheck` build. Use
+    `ekn schemacheck --offline` for the same check from a source tree.
+    """
+
+    cli_name = "_schemaCheck"
+
+    manifest_file: _Path = pos(help="JSON file holding the already-evaluated manifest list.")
+    spec_dir: _Path = opt(required=True, help="Directory of Kubernetes OpenAPI v3 group-version documents.")
+
+    async def run(self) -> None:
+        objects = await load_manifest_objects(str(self.manifest_file))
+        catalog = Catalog()
+        add_rendered_crds(catalog, objects)
+        await load_spec_dir(catalog, str(self.spec_dir))
+        _report_schemas(check(objects, catalog), catalog)
 
 
 class Deploy(CachePushCommand, Commit):
@@ -2191,6 +2295,7 @@ class Ekn(AttrCommand):
         Commit,
         Rollback,
         Validate,
+        SchemaCheck,
         KubeApply,
         Tofu,
         Secrets,
@@ -2200,6 +2305,7 @@ class Ekn(AttrCommand):
         AssertCached,
         SplitManifest,
         ApplyManifest,
+        SchemaCheckManifest,
         YamlToJson,
         JsonToYaml,
     )

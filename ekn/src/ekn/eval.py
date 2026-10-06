@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from os import PathLike
 from pathlib import Path as _SyncPath
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, cast
 from urllib.parse import SplitResult, urlsplit
 
 import anyio
@@ -1497,10 +1497,51 @@ async def evaluate_validation_config(flake_uri: str, customer: str) -> Validatio
         return await _validation_config(proxy)
 
 
+class SchemaCheckConfig(BaseModel):
+    """What `ekn schemacheck` reads. See `ekn.schemacheck`."""
+
+    manifest_json_file: str
+    kubernetes_version: str
+    #: `validation.openapiSpec`, realised.
+    openapi_spec: str
+    cluster_uid: str | None
+    #: `ekn.environment`, read only for a check against a live cluster: the
+    #: fence names it, and an offline check has no fence.
+    environment: str | None
+
+
+async def evaluate_schemacheck_config(
+    file: str | PathLike[str] | None,
+    flake_uri: str | None,
+    customer: str | None,
+    attr_path: str | None,
+    *,
+    live: bool,
+) -> SchemaCheckConfig:
+    async with _evaluator() as eval_:
+        proxy = await _resolve_proxy(eval_, file, flake_uri, customer, attr_path)
+        if await proxy.has_attr("config"):
+            proxy = proxy.attr("config")
+        ekn_opts = proxy.attr("ekn")
+        cluster_uid = await ekn_opts.attr("clusterUid").to_python() if await ekn_opts.has_attr("clusterUid") else None
+        with timed_stage("schemacheck: build internal.manifestJSONFile (forces kubernetes.generated)"):
+            manifest_out = await proxy.attr("internal").attr("manifestJSONFile").realise_string()
+        with timed_stage("schemacheck: build validation.openapiSpec"):
+            spec_out = await proxy.attr("validation").attr("openapiSpec").realise_string()
+        return SchemaCheckConfig(
+            manifest_json_file=manifest_out,
+            kubernetes_version=str(await proxy.attr("kubernetes").attr("package").attr("version").to_python()),
+            openapi_spec=spec_out,
+            cluster_uid=cast("str | None", cluster_uid),
+            environment=str(await ekn_opts.attr("environment").to_python()) if live else None,
+        )
+
+
 __all__ = [
     "GitOpsManifestsResult",
     "GitOpsTargetEntry",
     "NixError",
+    "SchemaCheckConfig",
     "SopsAgeIdentity",
     "evaluate_file",
     "evaluate_file_multi",
@@ -1509,6 +1550,7 @@ __all__ = [
     "evaluate_generated_manifests",
     "evaluate_gitops_manifests",
     "evaluate_kubeapply_config",
+    "evaluate_schemacheck_config",
     "evaluate_validation_config",
     "evaluate_validation_file",
     "evaluate_with_fod_update",

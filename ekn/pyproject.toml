@@ -30,6 +30,10 @@ dependencies = [
   # all, and resolved the shell through `$SHELL`.
   "argcomplete",
   "kr8s",
+  # `ekn schemacheck`: jsonschema-rs validates, httpx fetches yannh's schemas.
+  # easykubenix/pkgs overlays jsonschema-rs to a newer release than nixpkgs.
+  "jsonschema-rs",
+  "httpx",
   "anyio",
   "structlog",
   "rich",

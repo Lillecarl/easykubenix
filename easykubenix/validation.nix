@@ -73,6 +73,28 @@ in
       type = lib.types.package;
       internal = true;
     };
+    openapiSpec = lib.mkOption {
+      type = lib.types.str;
+      default = "${config.kubernetes.package.src}/api/openapi-spec/v3";
+      defaultText = lib.literalExpression ''"''${config.kubernetes.package.src}/api/openapi-spec/v3"'';
+      description = ''
+        A directory of Kubernetes OpenAPI v3 group-version documents, in the
+        layout of the Kubernetes source tree's `api/openapi-spec/v3`.
+        `validation.schemaCheck` and `ekn schemacheck --offline` read the
+        built-in kinds' schemas from it.
+      '';
+    };
+    schemaCheck = lib.mkOption {
+      type = lib.types.package;
+      readOnly = true;
+      description = ''
+        A build that checks every rendered object against its JSON schema:
+        built-in kinds from `validation.openapiSpec`, custom resources from
+        the CRDs in the same render. No network and no API server, so it runs
+        in the build sandbox. It fails on any violation, and lists the
+        objects whose kind it has no schema for.
+      '';
+    };
   };
   config.validation =
     let
@@ -143,6 +165,15 @@ in
           serviceSubnet = cfg.serviceSubnet;
         };
       };
+
+      schemaCheck =
+        pkgs.runCommand "ekn-schemacheck" { }
+          # bash
+          ''
+            ${lib.getExe' eknPackage "ekn"} _schemaCheck ${config.internal.manifestJSONFile} \
+              --spec-dir ${cfg.openapiSpec}
+            touch $out
+          '';
 
       script =
         pkgs.writeScriptBin "kubeval" # fish
