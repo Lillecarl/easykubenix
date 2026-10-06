@@ -94,7 +94,7 @@ from ekn.validation import EphemeralControlPlane, load_manifest_objects, prepare
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 
-    from ekn.eval import TofuUnit
+    from ekn.eval import SchemaCheckConfig, TofuUnit
 
 _log = structlog.get_logger()
 
@@ -826,7 +826,7 @@ class SchemaCheck(FencedCommand):
             if self.offline:
                 await _load_spec(catalog, cfg.openapi_spec)
             elif cfg.environment is not None:
-                await self._load_live(catalog, objects, cfg.cluster_uid, cfg.environment, cfg.kubernetes_version)
+                await self._load_live(catalog, objects, cfg, cfg.environment)
 
         await _check_schemas(objects, load)
 
@@ -834,10 +834,10 @@ class SchemaCheck(FencedCommand):
         self,
         catalog: Catalog,
         objects: list[dict[str, Any]],
-        declared: str | None,
+        cfg: SchemaCheckConfig,
         environment: str,
-        kubernetes_version: str,
     ) -> None:
+        declared, kubernetes_version = cfg.cluster_uid, cfg.kubernetes_version
         try:
             api = await kr8s.asyncio.api()
             uid = await clusterfence.require(
@@ -857,6 +857,10 @@ class SchemaCheck(FencedCommand):
                 declared or "unidentified",
             )
             _log.info("read yannh's schemas", kinds=found, kubernetes=kubernetes_version)
+            # After yannh, which outranks it: the pinned spec fills only what
+            # yannh lacks -- CustomResourceDefinition itself, and the ObjectMeta
+            # a custom resource's metadata is checked against.
+            await _load_spec(catalog, cfg.openapi_spec)
 
 
 class SchemaCheckManifest(Command):
