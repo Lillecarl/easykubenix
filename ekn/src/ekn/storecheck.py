@@ -22,14 +22,14 @@ machine's own Nix settings would pass a path that no node can fetch -- the
 exact failure this guards. Empty means off.
 
 The work is here, rather than in a separate program, because `ekn` already
-opens a store by URI through nanopynix -- see `push_closure_to_store`. An
-exit code carries three states and no detail. See issue #37.
+opens stores by URI -- see `push_closure_to_store`. An exit code carries
+three states and no detail. See issue #37.
 
-The three answers a substituter can give stay three, because nanopynix
+The three answers a substituter can give stay three, because huggorm
 keeps them apart:
 
     present       is_valid_path -> True
-    absent        is_valid_path -> False   (InvalidPathError from the query)
+    absent        is_valid_path -> False   (InvalidPath from the query)
     cannot ask    NixError
 
 Measured 2026-09-17 against cache.nixos.org and an unroutable ssh-ng host.
@@ -47,8 +47,8 @@ from typing import TYPE_CHECKING
 
 import anyio
 import structlog
-from nanopynix import InvalidPathError, NixError
-from nanopynix.rpc import Session
+from huggorm import AsyncSession, StorePath
+from huggorm.errors import InvalidPath, NixError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -153,27 +153,28 @@ async def walk(
 
 
 @asynccontextmanager
-async def nanopynix_probe(substituters: Sequence[str]) -> AsyncIterator[Probe]:
+async def huggorm_probe(substituters: Sequence[str]) -> AsyncIterator[Probe]:
     """A `Probe` backed by the given stores, each opened once.
 
     Once, and not per level: a store per level reconnects an `ssh-ng`
-    substituter every time.
+    substituter every time. A store opens on its first query, so a
+    substituter that cannot be reached answers `NixError` there.
     """
-    async with Session() as session, AsyncExitStack() as stack:
-        stores = {uri: await stack.enter_async_context(session.store(uri=uri)) for uri in substituters}
+    async with AsyncSession() as session:
+        stores = {uri: session.store(uri) for uri in substituters}
 
         async def probe(uri: str, base_name: str) -> tuple[set[str] | None, str | None]:
             store = stores[uri]
-            path = f"/nix/store/{base_name}"
+            path = StorePath(base_name)
             try:
                 if not await store.is_valid_path(path):
                     return None, None
                 info = await store.query_path_info(path)
-            except InvalidPathError:
+            except InvalidPath:
                 return None, None
             except NixError as exc:
                 return None, f"{uri}: {exc}"
-            return {reference.removeprefix("/nix/store/") for reference in info.references}, None
+            return {reference.to_string() for reference in info.references()}, None
 
         yield probe
 
@@ -214,7 +215,7 @@ async def assert_fetchable(
 
     async with AsyncExitStack() as stack:
         if probe is None:
-            probe = await stack.enter_async_context(nanopynix_probe(substituters))
+            probe = await stack.enter_async_context(huggorm_probe(substituters))
         verdict = await walk(roots, substituters, probe, jobs=jobs)
 
     if verdict.unclear:
@@ -244,7 +245,7 @@ __all__ = [
     "StorePathsUnavailableError",
     "Verdict",
     "assert_fetchable",
-    "nanopynix_probe",
+    "huggorm_probe",
     "store_paths_in",
     "walk",
 ]

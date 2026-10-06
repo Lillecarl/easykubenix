@@ -12,6 +12,8 @@ description = "easykubenix CLI"
 requires-python = ">=3.13"
 authors = [{ name = "easykubenix contributors" }]
 dependencies = [
+  # `storecheck` runs on huggorm, the library nanopynix is moving onto.
+  "huggorm",
   "nanopynix",
   "nanopynix-helpers",
   "pygit2",
