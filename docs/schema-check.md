@@ -92,12 +92,28 @@ a value that does not convert to its type, a read-only attribute, a resource
 or data type that no required provider declares, and a provider that
 `required_providers` does not name.
 
-It runs in three places:
+It runs in four places:
 
 - `ekn tofu plan|apply|destroy`: before the first `tofu init`, for every
   unit in the chain. `--skip-schema-check` turns it off.
+- `ekn kubeapply`: before the cache push and the first write, for every unit
+  that an applied object names in its `ekn.dev/tofu-units` annotation.
+  `--skip-schema-check` turns it off.
 - `ekn deploy`: in the verify stage, for every `tf` unit.
 - `tofu.schemaCheck`: a Nix build of the same check.
+
+An object that hands a unit to something in the cluster carries the
+annotation. An operator's custom resource that names the unit's `configFile`
+is an example. The value is a comma-separated list of unit names, and
+`ekn.lib.tf.unitsAnnotation` holds the key:
+
+```nix
+metadata.annotations.${ekn.lib.tf.unitsAnnotation} = "day2";
+```
+
+kubeapply reads only the annotation, never the rest of the object. An
+evaluation that names a unit which is not of class `tf` fails, so a typo
+cannot skip the check.
 
 `nix build --file ./checks.nix tofu-schema` holds the check to
 `tofu validate`, case by case. No deploy path runs `tofu validate`.
