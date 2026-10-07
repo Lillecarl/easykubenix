@@ -2,10 +2,23 @@
   config,
   pkgs,
   lib,
+  eknPackage,
   ...
 }:
 let
   cfg = config.tofu;
+
+  # OpenTofu's core schema, keyed on its version alone. opentofu-schema holds
+  # it only as Go code, so a Go program exports it; ekn does the rest.
+  coreSchema = pkgs.runCommand "tofu-core-schema-${cfg.package.version}" { } ''
+    ${lib.getExe (pkgs.callPackage ../tools/tofuschema/package.nix { })} ${cfg.package.version} > "$out"
+  '';
+
+  # All that `providerSchemas` and `jsonSchema` read, so neither rebuilds
+  # when a resource changes.
+  requiredProviders = dropNulls {
+    terraform.required_providers = cfg.terraform.required_providers or { };
+  };
 
   # Same guard the Kubernetes side puts on every fully-rendered output: force
   # `config.assertions` and `config.warnings` before handing anything back, so
@@ -310,6 +323,38 @@ in
         config path.
       '';
     };
+
+    providerSchemas = lib.mkOption {
+      type = lib.types.package;
+      readOnly = true;
+      description = ''
+        `tofu providers schema -json` for the providers `tofu.providers`
+        selected, run in the build sandbox. It reads only
+        `required_providers`, so a change to a resource does not rebuild it.
+      '';
+    };
+
+    jsonSchema = lib.mkOption {
+      type = lib.types.package;
+      readOnly = true;
+      description = ''
+        A JSON Schema for this unit's `config.tf.json`: opentofu-schema's
+        core schema for `tofu.package`'s version, the one the OpenTofu
+        language server reads, with `providerSchemas` merged over it.
+        `ekn.tofuschema` writes it for HCL's JSON syntax, so a `''${...}`
+        template is accepted wherever an expression is.
+      '';
+    };
+
+    schemaCheck = lib.mkOption {
+      type = lib.types.package;
+      readOnly = true;
+      description = ''
+        A build that checks `config.tf.json` against `jsonSchema`. No
+        network, no backend and no credentials, so it runs in the build
+        sandbox. It fails on any violation.
+      '';
+    };
   };
 
   config.assertions = [
@@ -397,5 +442,42 @@ in
           jq --sort-keys .value "$NIX_ATTRS_JSON_FILE" > "$out/config.tf.json"
           jq --sort-keys .providers "$NIX_ATTRS_JSON_FILE" > "$out/providers.json"
         '';
+
+    providerSchemas =
+      pkgs.runCommand "tofu-provider-schemas"
+        {
+          nativeBuildInputs = [ pkgs.jq ];
+          value = requiredProviders;
+          __structuredAttrs = true;
+        }
+        ''
+          export HOME="$TMPDIR/home" CHECKPOINT_DISABLE=1 TF_IN_AUTOMATION=1
+          mkdir -p "$HOME" work
+          cd work
+          jq .value "$NIX_ATTRS_JSON_FILE" > config.tf.json
+          ${cfg.wrappedPackage}/bin/tofu init -backend=false -input=false >&2
+          ${cfg.wrappedPackage}/bin/tofu providers schema -json > "$out"
+        '';
+
+    jsonSchema =
+      pkgs.runCommand "tofu-json-schema"
+        {
+          nativeBuildInputs = [ pkgs.jq ];
+          value = requiredProviders;
+          __structuredAttrs = true;
+        }
+        ''
+          jq .value "$NIX_ATTRS_JSON_FILE" > config.tf.json
+          ${lib.getExe' eknPackage "ekn"} _tofuJsonSchema \
+            --core ${coreSchema} \
+            --providers ${cfg.providerSchemas} \
+            --config-file config.tf.json > "$out"
+        '';
+
+    schemaCheck = pkgs.runCommand "tofu-schemacheck" { } ''
+      ${lib.getExe' eknPackage "ekn"} _tofuSchemaCheck ${cfg.configFile}/config.tf.json \
+        --schema ${cfg.jsonSchema}
+      touch "$out"
+    '';
   };
 }

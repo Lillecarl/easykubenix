@@ -90,6 +90,7 @@ from ekn.tofu import (
     output as tofu_output,
     run_chain,
 )
+from ekn.tofuschema import build_schema as build_tofu_schema, check as tofu_schema_check
 from ekn.validation import EphemeralControlPlane, load_manifest_objects, prepare_validation_objects
 
 if TYPE_CHECKING:
@@ -913,6 +914,70 @@ class SchemaCheckManifest(Command):
         await _check_schemas(objects, lambda catalog: _load_spec(catalog, spec_dir))
 
 
+async def _check_tofu_schema(name: str, config_file: str, schema_file: str, *, stream: TextIO = sys.stdout) -> bool:
+    """Check one `config.tf.json` against its unit's JSON Schema, and report."""
+    started = time.monotonic()
+    config = json.loads(await Path(config_file).read_text())
+    schema = json.loads(await Path(schema_file).read_text())
+    violations = tofu_schema_check(config, schema)
+    seconds = round(time.monotonic() - started, 3)
+    stream.writelines(f"{name}: {violation}\n" for violation in violations)
+    if violations:
+        _log.error("tofu schema check failed", unit=name, violations=len(violations), seconds=seconds)
+        return False
+    _log.info("tofu schema check passed", unit=name, seconds=seconds)
+    return True
+
+
+async def _check_tofu_units(units: list[TofuUnit]) -> None:
+    results = [
+        await _check_tofu_schema(unit.name, f"{unit.config_file}/config.tf.json", unit.json_schema) for unit in units
+    ]
+    if not all(results):
+        raise SystemExit(1)
+
+
+class TofuJsonSchema(Command):
+    """Write a unit's JSON Schema from the core and provider schemas.
+
+    Internal: the body of easykubenix's `tofu.jsonSchema` build.
+    """
+
+    cli_name = "_tofuJsonSchema"
+
+    core: _Path = opt(required=True, help="`ekn-tofuschema`'s export of OpenTofu's core schema.")
+    providers: _Path = opt(required=True, help="`tofu providers schema -json`.")
+    config_file: _Path = opt(required=True, help="A config.tf.json, read for `terraform.required_providers`.")
+
+    async def run(self) -> None:
+        core, dump, config = [
+            json.loads(await Path(path).read_text()) for path in (self.core, self.providers, self.config_file)
+        ]
+        required = config.get("terraform", {}).get("required_providers", {})
+        try:
+            schema = build_tofu_schema(core, dump, required)
+        except ValueError as exc:
+            _log.error("cannot build the tofu schema", error=str(exc))
+            raise SystemExit(1) from exc
+        json.dump(schema, sys.stdout)
+
+
+class TofuSchemaCheckFile(Command):
+    """Check a rendered config.tf.json against a unit's JSON Schema.
+
+    Internal: the body of easykubenix's `tofu.schemaCheck` build.
+    """
+
+    cli_name = "_tofuSchemaCheck"
+
+    config_file: _Path = pos(help="The rendered config.tf.json.")
+    schema: _Path = opt(required=True, help="The unit's `tofu.jsonSchema`.")
+
+    async def run(self) -> None:
+        if not await _check_tofu_schema("config.tf.json", str(self.config_file), str(self.schema)):
+            raise SystemExit(1)
+
+
 class Deploy(CachePushCommand, Commit):
     """Verify, push the pre-deploy cache, commit, and push -- the whole
     release in one command.
@@ -951,6 +1016,17 @@ class Deploy(CachePushCommand, Commit):
         "happen, for visibility into what's taking long during Validate/cache-push/Commit.",
     )
 
+    async def _check_tofu_units(self) -> None:
+        """Check every tf unit's config.tf.json, as `ekn tofu` does before it runs."""
+        uri, customer = _parse_flake(self.flake) if self.flake is not None else (None, None)
+        try:
+            units = await evaluate_tofu_units(self.file, uri, customer, self.attr)
+        except NixError as exc:
+            _report_nix_error(exc)
+        except ValidationError as exc:
+            _report_validation_error("tofu units", exc)
+        await _check_tofu_units(units)
+
     async def run(self) -> None:
         with verbose_session(self.verbosity, print_build_logs=self.print_build_logs):
             deploy_branch, source_branch, files, assert_cached = await _resolve_gitops(self.file, self.flake, self.attr)
@@ -974,6 +1050,8 @@ class Deploy(CachePushCommand, Commit):
             if not self.no_verify:
                 with timed_stage("deploy: validate (total)"):
                     await Validate.run(cast("Validate", self))
+                with timed_stage("deploy: tofu schema check"):
+                    await self._check_tofu_units()
             await self.push_cache()
             # After the push, so a path this run just published counts, and
             # before the branch moves, because an engine may sync the instant
@@ -1738,6 +1816,11 @@ class _TofuCommand(AttrCommand):
         help='The `class = "tf"` deployment unit to act on. Its dependencies run first, deepest first.',
     )
 
+    skip_schema_check: bool = opt(
+        False,
+        help="Do not check each unit's config.tf.json against its tofu.jsonSchema before running tofu.",
+    )
+
     #: What `tofu` is asked to do, and the flags that go with it. A subclass
     #: sets this and nothing else.
     tofu_args: ClassVar[tuple[str, ...]] = ()
@@ -1754,6 +1837,11 @@ class _TofuCommand(AttrCommand):
         except ValueError as exc:
             _log.error(str(exc))
             raise SystemExit(1) from exc
+        if not self.skip_schema_check:
+            # Every unit before the first `tofu init`: a backend such as
+            # `kubernetes` needs its cluster to answer before init succeeds,
+            # and this needs nothing.
+            await _check_tofu_units(units)
         return units
 
     async def _warn_orphans(self, uri: str | None, customer: str | None) -> None:
@@ -2383,6 +2471,8 @@ class Ekn(AttrCommand):
         SplitManifest,
         ApplyManifest,
         SchemaCheckManifest,
+        TofuJsonSchema,
+        TofuSchemaCheckFile,
         YamlToJson,
         JsonToYaml,
     )

@@ -74,7 +74,7 @@ class TofuUnit(BaseModel):
     """Validated `deployment.tofuUnits` entry -- one `class = "tf"` deployment
     unit, as `ekn.tofu` needs it.
 
-    `config_file` and `tofu` are store paths. Nix produces them without
+    `config_file`, `json_schema` and `tofu` are store paths. Nix produces them without
     building them, so `evaluate_tofu_units` realises both before anything here
     is used; a path that has not been realised does not exist on disk.
 
@@ -86,6 +86,7 @@ class TofuUnit(BaseModel):
 
     name: _NonEmptyStr
     config_file: _NonEmptyStr = Field(alias="configFile")
+    json_schema: _NonEmptyStr = Field(alias="jsonSchema")
     tofu: _NonEmptyStr
     #: The transitive closure, deepest first, this unit excluded. Every entry
     #: is itself a `tf` unit; easykubenix asserts that a dependency does not
@@ -781,8 +782,9 @@ async def evaluate_tofu_units(
     the instance declares, which is what `ekn commit` writes.
 
     The realisation is the reason this cannot be a plain `to_python`. Nix
-    reports `configFile` and `tofu` as store paths without building either, so
-    without this every caller would get two paths that are not on disk.
+    reports `configFile`, `jsonSchema` and `tofu` as store paths without
+    building them, so without this every caller would get paths that are not
+    on disk.
     """
     async with _evaluator() as eval_:
         proxy = await _resolve_proxy(eval_, file, flake_uri, customer, attr_path)
@@ -813,10 +815,11 @@ async def evaluate_tofu_units(
         # first subprocess. A failure to build is a Nix error with a Nix
         # message; a missing store path at `tofu init` time is a confusing
         # one.
-        with timed_stage("tofu: realise(configFile, tofu)"):
+        with timed_stage("tofu: realise(configFile, jsonSchema, tofu)"):
             for name in wanted:
                 unit_proxy = units_proxy.attr(name)
                 await unit_proxy.attr("configFile").realise_string()
+                await unit_proxy.attr("jsonSchema").realise_string()
                 await unit_proxy.attr("tofu").realise_string()
 
         return [TofuUnit.model_validate(declared[name]) for name in wanted]

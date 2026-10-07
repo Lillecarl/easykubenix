@@ -668,6 +668,8 @@ in
     # been built at evaluation time; `ekn tofu` realises both before it runs
     # anything. See `outPath` handling in ekn/src/ekn/eval.py.
     configFile = "${unit.instance.config.tofu.configFile}";
+    # What `ekn tofu` checks `configFile` against before it runs `tofu`.
+    jsonSchema = "${unit.instance.config.tofu.jsonSchema}";
     tofu = "${unit.instance.config.tofu.wrappedPackage}/bin/tofu";
     inherit name;
   }) (lib.filterAttrs (_name: unit: unit.class == "tf") config.deployment.units);

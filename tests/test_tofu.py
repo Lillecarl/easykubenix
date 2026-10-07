@@ -7,7 +7,7 @@ import pytest
 import structlog.testing
 from anyio import Path
 
-from ekn.cli import Tofu, parse
+from ekn.cli import Tofu, _check_tofu_units, parse
 from ekn.eval import TofuUnit
 from ekn.tofu import (
     TofuError,
@@ -92,6 +92,7 @@ def _unit(tmp_path: pathlib.Path, name: str, tofu: str, config: dict[str, object
         {
             "name": name,
             "configFile": str(store),
+            "jsonSchema": str(store / "schema.json"),
             "tofu": tofu,
             "dependencies": [],
             "target": {"path": name},
@@ -527,3 +528,24 @@ async def test_output_returns_the_value_verbatim(tmp_path: pathlib.Path, monkeyp
     unit = _unit(tmp_path, "infra", _fake_tofu(tmp_path, "tofu", _OUTPUTS), {})
 
     assert await output(unit, "kubeconfig", Path(tmp_path / "work")) == "apiVersion: v1\n"
+
+
+_SCHEMA = {
+    "type": "object",
+    "properties": {"resource": {"type": "object", "properties": {"random_pet": {}}, "additionalProperties": False}},
+}
+
+
+async def test_the_schema_check_passes_a_valid_unit(tmp_path: pathlib.Path) -> None:
+    unit = _unit(tmp_path, "infra", "tofu", {"resource": {"random_pet": {"a": {}}}})
+    await Path(unit.json_schema).write_text(json.dumps(_SCHEMA))
+
+    await _check_tofu_units([unit])
+
+
+async def test_the_schema_check_refuses_a_violating_unit(tmp_path: pathlib.Path) -> None:
+    unit = _unit(tmp_path, "infra", "tofu", {"resource": {"random_bogus": {"a": {}}}})
+    await Path(unit.json_schema).write_text(json.dumps(_SCHEMA))
+
+    with pytest.raises(SystemExit):
+        await _check_tofu_units([unit])

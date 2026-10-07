@@ -279,6 +279,9 @@ def _stub_deploy(monkeypatch: pytest.MonkeyPatch, *, no_verify: bool) -> tuple[D
     async def push_cache(*_args: object, **_kwargs: object) -> None:
         calls.append("push_cache")
 
+    async def check_tofu_units(_: object) -> None:
+        calls.append("tofu_schema")
+
     async def resolve_gitops(*_args: object) -> tuple[str, None, list[tuple[str, str]], list[str]]:
         return "deploy", None, [("default/ConfigMap/my-config.yaml", "kind: ConfigMap\n")], []
 
@@ -292,6 +295,7 @@ def _stub_deploy(monkeypatch: pytest.MonkeyPatch, *, no_verify: bool) -> tuple[D
         return None
 
     monkeypatch.setattr(Validate, "run", verify)
+    monkeypatch.setattr(Deploy, "_check_tofu_units", check_tofu_units)
     monkeypatch.setattr("ekn.cli._push_ekn_cache", push_cache)
     monkeypatch.setattr("ekn.cli._resolve_gitops", resolve_gitops)
     monkeypatch.setattr("ekn.cli._assert_committed_fetchable", assert_fetchable)
@@ -320,8 +324,9 @@ class TestCommit:
 
         # `assert_fetchable` sits after `push_cache` on purpose: a path this
         # run publishes must count as fetchable, so asking first reports a
-        # failure that is about to stop being true.
-        assert calls == ["verify", "push_cache", "assert_fetchable", "commit"]
+        # failure that is about to stop being true. The tofu schema check is
+        # part of verifying, so `--no-verify` skips it too.
+        assert calls == ["verify", "tofu_schema", "push_cache", "assert_fetchable", "commit"]
 
     async def test_deploy_no_verify_skips_validation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         deploy, calls = _stub_deploy(monkeypatch, no_verify=True)
