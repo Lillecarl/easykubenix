@@ -5,11 +5,9 @@ let
   /**
     The object as it is hashed: itself, without the hash annotation.
 
-    **This has to match `ekn.livestate.strip_hash_annotation` exactly**, down
-    to leaving an object that carries no such annotation completely alone --
-    an empty `annotations = { }` is not the same JSON as no `annotations` key,
-    and the two implementations have to produce the same bytes or every object
-    looks changed on every run.
+    An object that carries no such annotation is left completely alone. An
+    empty `annotations = { }` is not the same JSON as no `annotations` key,
+    so removing the key only when it is there keeps restamping idempotent.
 
     Only that one key. `ekn.dev/environment` deliberately stays in whatever it
     was, because the render never writes it: `ekn` stamps it at apply time. So
@@ -41,17 +39,12 @@ rec {
   /**
     The `sha256:<hex>` an object should carry.
 
-    `builtins.toJSON` is the canonicalisation, and `ekn.livestate.canonical_json`
-    is the same one written in Python: sorted keys, no spaces, no trailing
-    newline, UTF-8 rather than escapes. Nix sorts attribute names by byte and
-    Python sorts by code point, which agree for UTF-8.
+    `builtins.toJSON` is the canonicalisation: sorted keys, no spaces, no
+    trailing newline.
 
-    Two producers exist because the two sets of objects are disjoint -- Nix
-    renders `kubernetes.generated`, and `kubernetes.rawFiles` are never parsed
-    here, so Python hashes those. A `tests/test_eval.py` gate asserts the two
-    agree on the whole rendered set, because the day somebody makes one of
-    them recompute what the other wrote is the day a silent disagreement
-    starts costing a full apply every run.
+    This is the only producer. `ekn` reads the value and never recomputes it.
+    A `kubernetes.rawFiles` entry is never parsed here, so it carries no hash,
+    and `ekn kubeapply` applies it on every run.
   */
   manifestHash =
     object: "sha256:" + builtins.hashString "sha256" (builtins.toJSON (stripHash object));

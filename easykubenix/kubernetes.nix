@@ -289,11 +289,24 @@ let
   # writes to the GitOps tree, permanently OutOfSync because nothing produces
   # it on the live-cluster side.
   #
-  # The hash is then of the object exactly as it is applied. **Every output
-  # carrying the same object has to run this**, or `kubernetes.generated` and
-  # `kubernetes.deploymentUnits` disagree about an object's hash and whichever
-  # applied last decides what the cluster carries. See lib/manifestHash.nix.
+  # The hash is then of the object exactly as it is applied, so nothing may
+  # change an object after this. See lib/manifestHash.nix.
   finalise = object: lib.stampManifestHash (removeAttrs object [ "ekn" ]);
+
+  # `generated` and `deploymentUnits` share these thunks, so a routed object
+  # is finalised once, and both outputs carry the same hash by construction.
+  finalised = map finalise allGenerated;
+  finalisedByUnit =
+    lib.pipe
+      (lib.zipListsWith (source: object: {
+        unit = source.ekn.deploymentUnit or null;
+        inherit object;
+      }) allGenerated finalised)
+      [
+        (lib.filter (entry: entry.unit != null))
+        (lib.groupBy (entry: entry.unit))
+        (lib.mapAttrs (_name: map (entry: entry.object)))
+      ];
 
   # `assertions`/`warnings` (assertions.nix) are collected from every module,
   # but a plain `lib.evalModules` has nothing playing the part NixOS'
@@ -1248,7 +1261,7 @@ in
       in
       lib.listToAttrs (map objectToAttr data.resources);
 
-    generated = checked (lib.pipe allGenerated [ (map finalise) ]);
+    generated = checked finalised;
 
     generatedExportable = lib.filter (object: !(lib.isSeededObject object)) config.kubernetes.generated;
 
@@ -1269,11 +1282,7 @@ in
 
     deploymentUnits =
       let
-        objectsByTarget = lib.pipe allGenerated [
-          (lib.filter (object: (object.ekn.deploymentUnit or null) != null))
-          (lib.groupBy (object: object.ekn.deploymentUnit))
-          (lib.mapAttrs (_name: objects: map finalise objects))
-        ];
+        objectsByTarget = finalisedByUnit;
         rawFilesByTarget = lib.pipe config.kubernetes.rawFiles [
           (lib.filter (f: f.deploymentUnit != null))
           (lib.groupBy (f: f.deploymentUnit))
@@ -1347,19 +1356,17 @@ in
                 # `objectsByTarget` comes from `allGenerated`, where
                 # `stampRouted` already stamped every routed object -- see
                 # its comment for why that has to happen there.
-                # The nested instance stamped its own objects, and the
-                # parent's labels change them -- so the hash is recomputed
-                # here, after the label lands. `stampManifestHash` strips the
-                # annotation before hashing, so this is the hash of the object
-                # as this unit applies it rather than of what the nested
-                # instance rendered.
+                # The nested instance's objects before it finalised them,
+                # because this unit's metadata changes them: `finalise` runs
+                # after the metadata lands, so the hash is of the object as
+                # this unit applies it.
                 objects =
                   (objectsByTarget.${name} or [ ])
                   ++ (
                     if submodule == null then
                       [ ]
                     else
-                      map (object: lib.stampManifestHash (stampTargetMetadata declared object)) submodule.generated
+                      map (object: finalise (stampTargetMetadata declared object)) submodule.generatedWithEkn
                   );
                 # Paths only, deliberately not read/parsed here -- reading them
                 # would mean round-tripping their content through Nix's
