@@ -78,6 +78,7 @@ from ekn.gitops import (
 from ekn.nixyaml import from_go_like_yaml_stream, from_yaml11_stream, from_yaml_stream, to_yaml
 from ekn.reclaim import reclaim
 from ekn.schemacheck import Catalog, GroupVersionKind, Report, add_rendered_crds, check
+from ekn.schemapolicy import PolicyResult, check_policies
 from ekn.schemasource import load_server, load_spec_dir, load_yannh
 from ekn.sops import ensure_age_identities, maybe_decrypt
 from ekn.tofu import (
@@ -745,9 +746,15 @@ class Validate(AttrCommand):
 
 
 def _report_schemas(
-    report: Report, catalog: Catalog, *, seconds: dict[str, float], stream: TextIO = sys.stdout
+    report: Report,
+    policies: PolicyResult,
+    catalog: Catalog,
+    *,
+    seconds: dict[str, float],
+    stream: TextIO = sys.stdout,
 ) -> None:
-    """Print *report*, violations to *stream*, then exit 1 if it holds one."""
+    """Print *report* and *policies*, violations to *stream*, then exit 1 if
+    either holds one."""
     for gvk, origin in sorted(catalog.overridden.items()):
         _log.debug("a rendered CRD replaces the schema", kind=str(gvk), replaced=origin.value)
     if catalog.overridden:
@@ -755,11 +762,23 @@ def _report_schemas(
     for ref in sorted(set(report.unknown)):
         _log.warning("no schema for this kind; not checked", object=str(ref))
     stream.writelines(f"{violation}\n" for violation in report.violations)
+    stream.writelines(f"{violation}\n" for violation in policies.violations)
+    for violation in policies.warnings:
+        _log.warning("admission policy warns", violation=str(violation))
     checked = {origin.value: count for origin, count in report.checked.items()}
     if report.cel.evaluated or report.cel.skipped:
         _log.info("CEL rules", evaluated=report.cel.evaluated, skipped=dict(report.cel.skipped.most_common()))
-    if not report.ok:
-        _log.error("schema check failed", violations=len(report.violations), checked=checked, seconds=seconds)
+    if policies.admitted or policies.skipped or policies.undecided:
+        _log.info(
+            "admission policies",
+            objects=policies.admitted,
+            evaluated=policies.evaluated,
+            skipped=dict(policies.skipped.most_common()),
+            undecided=dict(policies.undecided.most_common()),
+        )
+    violations = len(report.violations) + len(policies.violations)
+    if violations:
+        _log.error("schema check failed", violations=violations, checked=checked, seconds=seconds)
         raise SystemExit(1)
     _log.info("schema check passed", checked=checked, unchecked=len(report.unknown), seconds=seconds)
 
@@ -782,8 +801,14 @@ async def _check_schemas(
     await load(catalog)
     loaded = time.monotonic()
     report = check(objects, catalog)
-    seconds = {"load": round(loaded - started, 3), "check": round(time.monotonic() - loaded, 3)}
-    _report_schemas(report, catalog, seconds=seconds, stream=stream)
+    checked = time.monotonic()
+    policies = check_policies(objects, catalog)
+    seconds = {
+        "load": round(loaded - started, 3),
+        "check": round(checked - loaded, 3),
+        "policies": round(time.monotonic() - checked, 3),
+    }
+    _report_schemas(report, policies, catalog, seconds=seconds, stream=stream)
 
 
 async def _load_spec(catalog: Catalog, spec_dir: str) -> None:
@@ -808,6 +833,7 @@ class SchemaCheck(FencedCommand):
     yannh/kubernetes-json-schema when the cluster cannot be reached. Both are
     cached per cluster under $XDG_CACHE_HOME/ekn/schemas. A CRD in the render
     replaces the cluster's schema for its kinds: it is what the apply installs.
+    CRDs' CEL rules and rendered ValidatingAdmissionPolicies are evaluated too.
     """
 
     offline: bool = opt(

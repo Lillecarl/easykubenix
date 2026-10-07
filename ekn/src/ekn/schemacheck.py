@@ -265,8 +265,10 @@ class _Entry:
     #: The schema types `metadata` as a bare object, as a CRD's root does.
     #: The API server still decodes it as ObjectMeta, so `check` does too.
     bare_metadata: bool = False
-    #: The CRD's own schema, before conversion, when it declares CEL rules.
-    cel_schema: Mapping[str, Any] | None = None
+    #: A CRD's own schema, before conversion.
+    crd_schema: Mapping[str, Any] | None = None
+    #: The CRD's schema declares CEL rules.
+    has_cel: bool = False
 
 
 def _crd_versions(crd: Mapping[str, Any]) -> Iterator[tuple[GroupVersionKind, dict[str, Any]]]:
@@ -378,8 +380,8 @@ class Catalog:
             if plural:
                 self.resources[gvk] = Resource(plural, spec.get("scope") != "Cluster")
             document = _Document({"definitions": {"root": to_json_schema(_with_object_fields(schema))}})
-            cel_schema = schema if VALIDATIONS in json.dumps(schema) else None
-            self._put(gvk, _Entry(origin, document, "root", bare_metadata=True, cel_schema=cel_schema))
+            has_cel = VALIDATIONS in json.dumps(schema)
+            self._put(gvk, _Entry(origin, document, "root", bare_metadata=True, crd_schema=schema, has_cel=has_cel))
 
     def add_schema(self, gvk: GroupVersionKind, schema: dict[str, Any], origin: Origin) -> None:
         """A self-contained JSON schema for one kind, used as it stands."""
@@ -400,9 +402,14 @@ class Catalog:
             return None
         return self._object_meta.validator(OBJECT_META)
 
-    def cel_schema(self, gvk: GroupVersionKind) -> Mapping[str, Any] | None:
+    def crd_schema(self, gvk: GroupVersionKind) -> Mapping[str, Any] | None:
         entry = self._entries.get(gvk)
-        return entry.cel_schema if entry else None
+        return entry.crd_schema if entry else None
+
+    def cel_schema(self, gvk: GroupVersionKind) -> Mapping[str, Any] | None:
+        """The CRD's schema, when it declares CEL rules."""
+        entry = self._entries.get(gvk)
+        return entry.crd_schema if entry and entry.has_cel else None
 
 
 def strip_for_check(obj: Mapping[str, Any]) -> dict[str, Any]:

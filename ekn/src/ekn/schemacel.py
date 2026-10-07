@@ -30,10 +30,12 @@ from celpy.evaluation import CELEvalError
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from celpy.evaluation import Result
+
 VALIDATIONS = "x-kubernetes-validations"
 
 #: CEL keywords. A property with one of these names is `__name__` in a rule.
-_RESERVED = frozenset(
+RESERVED = frozenset(
     {
         "true",
         "false",
@@ -68,7 +70,7 @@ def escape(name: str) -> str:
 
     `namespace` is a CEL keyword, so a rule reads `self.__namespace__`.
     """
-    if name in _RESERVED:
+    if name in RESERVED:
         return f"__{name}__"
     return (
         name.replace("__", "__underscores__").replace(".", "__dot__").replace("-", "__dash__").replace("/", "__slash__")
@@ -110,6 +112,49 @@ def cel_view(schema: Mapping[str, Any], value: Any) -> Any:
     return value
 
 
+class _LazyMap(celtypes.MapType):
+    """A CEL map that converts a value when an expression first reads it.
+
+    `json_to_cel` of nixlab3's 201 CRDs took 0.62s, for policies that read
+    three fields of each. celpy reads a map through `__getitem__` and `get`;
+    the keys are real from the start, so `in`, `size` and the macros see them.
+
+    A key named like a CEL keyword is also offered escaped, `__namespace__`
+    beside `namespace`. Kubernetes escapes a declared property so, and with
+    no schema for a built-in kind, which keys are properties is unknown.
+    """
+
+    __slots__ = ("_raw",)
+
+    def __init__(self, raw: Mapping[str, Any]) -> None:
+        super().__init__()
+        self._raw = dict(raw)
+        for key in RESERVED.intersection(raw):
+            self._raw.setdefault(f"__{key}__", raw[key])
+        dict.update(self, dict.fromkeys(map(celtypes.StringType, self._raw)))
+
+    def __getitem__(self, key: Any) -> Any:
+        value = super().__getitem__(key)
+        if value is None and key in self._raw:
+            value = lazy_cel(self._raw.pop(key))
+            dict.__setitem__(self, key, value)
+        return value
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        if key in self:
+            return self[key]
+        return super().get(key, default)
+
+
+def lazy_cel(value: Any) -> Any:
+    """`json_to_cel`, with each map a `_LazyMap`."""
+    if isinstance(value, dict):
+        return _LazyMap(cast("dict[str, Any]", value))
+    if isinstance(value, list):
+        return celtypes.ListType([lazy_cel(child) for child in cast("list[Any]", value)])
+    return json_to_cel(value)
+
+
 @dataclass(frozen=True, slots=True)
 class CelFailure:
     #: JSON pointer into the object, `""` for the object itself.
@@ -123,6 +168,14 @@ class CelResult:
     #: Rules not evaluated, by reason: "oldSelf" or "unsupported: <what>".
     skipped: Counter[str] = field(default_factory=Counter)
     failures: list[CelFailure] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class Unsupported:
+    """An expression with nothing to judge it by."""
+
+    #: "unsupported: syntax", or "unsupported: <the undeclared name>".
+    reason: str
 
 
 @dataclass(slots=True)
@@ -142,6 +195,22 @@ class CelChecker:
             self._programs[rule] = found
         return found
 
+    def run(self, text: str, activation: Mapping[str, Any]) -> Result | CELEvalError | Unsupported:
+        """*text* over *activation*, whose values are CEL values: the result,
+        the error it failed with, or why it cannot be judged."""
+        program = self._program(text)
+        if isinstance(program, str):
+            return Unsupported(program)
+        try:
+            outcome = program.evaluate(dict(activation))
+        except CELEvalError as exc:
+            outcome = exc
+        if isinstance(outcome, CELEvalError):
+            undeclared = _UNDECLARED.search(str(outcome))
+            if undeclared:
+                return Unsupported(f"unsupported: {undeclared[1]}")
+        return outcome
+
     def _evaluate(
         self, rule: Mapping[str, Any], schema: Mapping[str, Any], value: Any, path: str, result: CelResult
     ) -> None:
@@ -149,20 +218,12 @@ class CelChecker:
         if _OLD_SELF.search(text):
             result.skipped["oldSelf"] += 1
             return
-        program = self._program(text)
-        if isinstance(program, str):
-            result.skipped[program] += 1
-            return
-        try:
-            outcome = program.evaluate({"self": json_to_cel(cel_view(schema, value))})
-        except CELEvalError as exc:
-            outcome = exc
+        outcome = self.run(text, {"self": json_to_cel(cel_view(schema, value))})
         field_path = str(rule.get("fieldPath", "")).replace(".", "/")
+        if isinstance(outcome, Unsupported):
+            result.skipped[outcome.reason] += 1
+            return
         if isinstance(outcome, CELEvalError):
-            undeclared = _UNDECLARED.search(str(outcome))
-            if undeclared:
-                result.skipped[f"unsupported: {undeclared[1]}"] += 1
-                return
             result.evaluated += 1
             result.failures.append(
                 CelFailure(path + field_path, f"rule {text!r} failed to evaluate: {outcome.args[0]}")

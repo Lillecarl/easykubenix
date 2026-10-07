@@ -95,9 +95,11 @@ in
       description = ''
         A build that checks every rendered object against its JSON schema:
         built-in kinds from `validation.openapiSpec`, custom resources from
-        the CRDs in the same render. No network and no API server, so it runs
-        in the build sandbox. It fails on any violation, and lists the
-        objects whose kind it has no schema for.
+        the CRDs in the same render, with the CRDs' CEL rules. Rendered
+        ValidatingAdmissionPolicies and their bindings are evaluated against
+        the objects they match. No network and no API server, so it runs in
+        the build sandbox. It fails on any violation, and lists the objects
+        whose kind it has no schema for.
       '';
     };
   };
