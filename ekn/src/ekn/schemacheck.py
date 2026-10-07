@@ -60,6 +60,15 @@ class Origin(enum.Enum):
     RENDERED_CRD = "rendered CRD"
 
 
+@dataclass(frozen=True, slots=True)
+class Resource:
+    """How the API names a kind in a URL, and so in an admission rule."""
+
+    #: The plural, `deployments`.
+    name: str
+    namespaced: bool
+
+
 @dataclass(frozen=True, slots=True, order=True)
 class GroupVersionKind:
     group: str
@@ -283,6 +292,22 @@ def _with_object_fields(schema: dict[str, Any]) -> dict[str, Any]:
     return {**schema, "properties": implicit | properties}
 
 
+def _path_resources(paths: Mapping[str, Any]) -> Iterator[tuple[GroupVersionKind, Resource]]:
+    """Each kind's resource, from the collection path a create is posted to:
+    `/apis/apps/v1/namespaces/{namespace}/deployments`."""
+    for path, item in paths.items():
+        if path.endswith("}") or not isinstance(item, dict):
+            continue
+        post = cast("Mapping[str, Any]", cast("Mapping[str, Any]", item).get("post") or {})
+        gvk = cast("Mapping[str, Any]", post.get("x-kubernetes-group-version-kind") or {})
+        if post.get("x-kubernetes-action") != "post" or "kind" not in gvk:
+            continue
+        yield (
+            GroupVersionKind(str(gvk.get("group", "")), str(gvk["version"]), str(gvk["kind"])),
+            Resource(path.rpartition("/")[2], "/namespaces/{namespace}/" in path),
+        )
+
+
 def is_crd(obj: Mapping[str, Any]) -> bool:
     return obj.get("kind") == "CustomResourceDefinition" and str(obj.get("apiVersion", "")).startswith(
         "apiextensions.k8s.io/"
@@ -300,6 +325,9 @@ class Catalog:
     overridden: dict[GroupVersionKind, Origin] = field(default_factory=dict)
     #: The first OpenAPI document that defines ObjectMeta.
     _object_meta: _Document | None = None
+    #: Each kind's resource, from OpenAPI paths and rendered CRDs. A rendered
+    #: CRD's wins, as its schema does.
+    resources: dict[GroupVersionKind, Resource] = field(default_factory=dict)
     cel: CelChecker = field(default_factory=CelChecker)
 
     def _put(self, gvk: GroupVersionKind, entry: _Entry) -> None:
@@ -340,9 +368,15 @@ class Catalog:
                     GroupVersionKind(str(gvk.get("group", "")), str(gvk["version"]), str(gvk["kind"])),
                     _Entry(origin, compiled, name),
                 )
+        for gvk, resource in _path_resources(cast("Mapping[str, Any]", document.get("paths") or {})):
+            self.resources.setdefault(gvk, resource)
 
     def add_crd(self, crd: Mapping[str, Any], origin: Origin = Origin.RENDERED_CRD) -> None:
+        spec = cast("Mapping[str, Any]", crd.get("spec") or {})
+        plural = str(cast("Mapping[str, Any]", spec.get("names") or {}).get("plural", ""))
         for gvk, schema in _crd_versions(crd):
+            if plural:
+                self.resources[gvk] = Resource(plural, spec.get("scope") != "Cluster")
             document = _Document({"definitions": {"root": to_json_schema(_with_object_fields(schema))}})
             cel_schema = schema if VALIDATIONS in json.dumps(schema) else None
             self._put(gvk, _Entry(origin, document, "root", bare_metadata=True, cel_schema=cel_schema))

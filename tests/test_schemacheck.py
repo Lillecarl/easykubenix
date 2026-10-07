@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from ekn.schemacheck import Catalog, GroupVersionKind, Origin, add_rendered_crds, check, to_json_schema
+from ekn.schemacheck import Catalog, GroupVersionKind, Origin, Resource, add_rendered_crds, check, to_json_schema
 from ekn.schemasource import yannh_name
 
 # The shapes Kubernetes' own `api/openapi-spec/v3` uses: refs wrapped in
@@ -347,3 +347,26 @@ def test_a_cel_rule_it_cannot_judge_is_skipped(catalog: Catalog, rule: str, reas
     report = check([_widget({"min": 3, "max": 2})], catalog)
     assert report.ok
     assert report.cel.skipped == {reason: 1}
+
+
+def test_resources_come_from_post_paths_and_crds() -> None:
+    catalog = Catalog()
+    post = {
+        "x-kubernetes-action": "post",
+        "x-kubernetes-group-version-kind": {"group": "", "version": "v1", "kind": "Service"},
+    }
+    catalog.add_openapi_v3(
+        {
+            "paths": {
+                "/api/v1/namespaces/{namespace}/services": {"post": post},
+                "/api/v1/namespaces/{namespace}/services/{name}": {"get": {}},
+                "/api/v1/services": {"get": {"x-kubernetes-action": "list"}},
+            }
+        },
+        Origin.SPEC,
+    )
+    add_rendered_crds(catalog, [_crd({})])
+    assert catalog.resources == {
+        GroupVersionKind("", "v1", "Service"): Resource("services", namespaced=True),
+        GroupVersionKind("example.com", "v1", "Widget"): Resource("widgets", namespaced=True),
+    }
