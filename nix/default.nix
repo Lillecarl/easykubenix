@@ -299,6 +299,10 @@ let
   # provider, both of which the nixpkgs pin already carries. See ./tofu.
   tofu-render = pkgs.callPackage ./tofu { inherit sources; };
 
+  # `tofu.schemaCheck` held to `tofu validate`, case by case. In `all`: the
+  # same configuration and provider as `tofu-render`. See ./tofu/schema.nix.
+  tofu-schema = pkgs.callPackage ./tofu/schema.nix { inherit sources; };
+
   # Providers from the OpenTofu registry rather than nixpkgs. Outside `all`:
   # it fetches a ~424M index plus a provider zip each. See ./tofu/registry.nix.
   tofu-registry = pkgs.callPackage ./tofu/registry.nix { inherit sources; };
@@ -318,6 +322,7 @@ in
     nixfmt
     tofu-render
     tofu-registry
+    tofu-schema
     validation-e2e
     bootstrap-validation-e2e
     schema-check
@@ -337,6 +342,7 @@ in
       nixfmt
       tofu-render
       tofu-registry
+      tofu-schema
       validation-e2e
       bootstrap-validation-e2e
       schema-check
@@ -352,6 +358,7 @@ in
         yaml2json
         nixfmt
         tofu-render
+        tofu-schema
         validation-e2e
         bootstrap-validation-e2e
         schema-check
