@@ -379,6 +379,34 @@ let
     ) cfg.objects
   );
 
+  # `ekn.dev/tofu-units` names the `tf` units an object ships, and `ekn
+  # kubeapply` checks exactly those before it applies the object. A name that
+  # is not a `tf` unit here would be skipped there without a word, so it is
+  # refused here instead. Same `cfg.objects` walk as above, for the same
+  # reason.
+  unknownTofuUnits = lib.concatLists (
+    lib.mapAttrsToList (
+      namespace: kinds:
+      lib.concatLists (
+        lib.mapAttrsToList (
+          kind: objects:
+          lib.concatLists (
+            lib.mapAttrsToList (
+              name: object:
+              let
+                value = object.metadata.annotations.${ekn.lib.tf.unitsAnnotation} or null;
+                named = if lib.isString value then lib.filter (n: n != "") (lib.splitString "," value) else [ ];
+              in
+              map (unit: "${namespace}/${kind}/${name} -> ${unit}") (
+                lib.filter (unit: (config.deployment.units.${unit}.class or null) != "tf") named
+              )
+            ) objects
+          )
+        ) kinds
+      )
+    ) cfg.objects
+  );
+
   # What the declared cluster stack cannot serve, per Service.
   #
   # The API server admits a Service's `spec.ipFamilies`/`spec.ipFamilyPolicy`
@@ -1135,6 +1163,19 @@ in
 
         Route the object to a "kubernetes" unit, or set
         `ekn.deploymentUnit = null' to leave it in `kubernetes.generated'.
+      '';
+    }
+    {
+      assertion = unknownTofuUnits == [ ];
+      message = ''
+        These objects name, in their `${ekn.lib.tf.unitsAnnotation}' annotation, a
+        deployment unit that is not of class "tf":
+
+        ${lib.concatMapStringsSep "\n" (entry: "  ${entry}") unknownTofuUnits}
+
+        The annotation lists the `tf' units an object ships, comma-separated,
+        and `ekn kubeapply' checks each one's config.tf.json before applying the
+        object. A name that is not a `tf' unit would be checked nowhere.
       '';
     }
     {

@@ -7,7 +7,7 @@ import pytest
 import structlog.testing
 from anyio import Path
 
-from ekn.cli import Tofu, _check_tofu_units, parse
+from ekn.cli import KubeApply, Tofu, _check_tofu_units, parse
 from ekn.eval import TofuUnit
 from ekn.tofu import (
     TofuError,
@@ -21,6 +21,7 @@ from ekn.tofu import (
     run_chain,
     state_location,
 )
+from ekn.tofuschema import UNITS_ANNOTATION, shipped_units
 
 if TYPE_CHECKING:
     import pathlib
@@ -549,3 +550,45 @@ async def test_the_schema_check_refuses_a_violating_unit(tmp_path: pathlib.Path)
 
     with pytest.raises(SystemExit):
         await _check_tofu_units([unit])
+
+
+def test_shipped_units_reads_the_annotation_only() -> None:
+    objects = [
+        {"kind": "TofuUnit", "metadata": {"annotations": {UNITS_ANNOTATION: "day2,infra"}}},
+        {"kind": "ConfigMap", "metadata": {"annotations": {UNITS_ANNOTATION: "infra,"}}},
+        # A store path deep in a spec is not a claim; only the annotation is.
+        {"kind": "Deployment", "metadata": {}, "spec": {"configFile": "/nix/store/x-tofu-config"}},
+        {"kind": "Secret"},
+    ]
+    assert shipped_units(objects) == {"day2", "infra"}
+
+
+class TestKubeApplyTofuCheck:
+    async def test_checks_exactly_the_named_units(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        asked: list[object] = []
+        unit = _unit(tmp_path, "day2", "tofu", {"resource": {"random_bogus": {"a": {}}}})
+        await Path(unit.json_schema).write_text(json.dumps(_SCHEMA))
+
+        async def evaluate(*args: object, **_kwargs: object) -> list[TofuUnit]:
+            asked.append(args[-1])
+            return [unit]
+
+        monkeypatch.setattr("ekn.cli.evaluate_tofu_units", evaluate)
+        apply = object.__new__(KubeApply)
+        apply.file = None
+        apply.attr = None
+        objects = [{"kind": "TofuUnit", "metadata": {"annotations": {UNITS_ANNOTATION: "day2"}}}]
+
+        with pytest.raises(SystemExit):
+            await apply._check_shipped_tofu_units(objects, None, None)
+        assert asked == [frozenset({"day2"})]
+
+    async def test_an_apply_shipping_no_unit_evaluates_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def evaluate(*_args: object, **_kwargs: object) -> list[TofuUnit]:
+            raise AssertionError("evaluated tf units for an apply that ships none")
+
+        monkeypatch.setattr("ekn.cli.evaluate_tofu_units", evaluate)
+        apply = object.__new__(KubeApply)
+        await apply._check_shipped_tofu_units([{"kind": "ConfigMap", "metadata": {}}], None, None)

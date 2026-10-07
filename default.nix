@@ -319,6 +319,11 @@ let
         tf = {
           ref = expression: "\${${expression}}";
           escape = lib.replaceStrings [ "\${" ] [ "$\${" ];
+          # The annotation that says an object ships `tf` units, by name and
+          # comma-separated: an object that hands a unit's `configFile` to
+          # something that runs it. `ekn kubeapply` checks each named unit's
+          # config.tf.json before applying the object.
+          unitsAnnotation = "ekn.dev/tofu-units";
         };
         # ArgoCD's per-object `argocd.argoproj.io/tracking-id` value, for a
         # `gitOps.targets.<name>.annotations` entry -- the one piece of

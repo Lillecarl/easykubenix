@@ -90,7 +90,7 @@ from ekn.tofu import (
     output as tofu_output,
     run_chain,
 )
-from ekn.tofuschema import build_schema as build_tofu_schema, check as tofu_schema_check
+from ekn.tofuschema import build_schema as build_tofu_schema, check as tofu_schema_check, shipped_units
 from ekn.validation import EphemeralControlPlane, load_manifest_objects, prepare_validation_objects
 
 if TYPE_CHECKING:
@@ -1660,7 +1660,8 @@ class KubeApply(CachePushCommand, FencedCommand):
     skip_schema_check: bool = opt(
         False,
         help="Apply without first checking every object against the cluster's OpenAPI schemas and the "
-        "rendered CRDs. See ekn schema-check.",
+        "rendered CRDs, and the config.tf.json of every tf unit an object names in its "
+        "ekn.dev/tofu-units annotation. See ekn schema-check.",
     )
     kubeconfig_from_tofu: str | None = opt(
         None,
@@ -1669,6 +1670,28 @@ class KubeApply(CachePushCommand, FencedCommand):
         "apply depend on infra-state credentials and backend reachability, so a shared "
         "environment should use an ordinary kubeconfig instead.",
     )
+
+    async def _check_shipped_tofu_units(
+        self, objects: list[dict[str, Any]], uri: str | None, customer: str | None
+    ) -> None:
+        """Check each tf unit an object being applied names in `ekn.dev/tofu-units`.
+
+        Something in the cluster runs those units, so this apply is the last
+        point where a broken config.tf.json can be refused before it does.
+        """
+        names = shipped_units(objects)
+        if not names:
+            return
+        try:
+            units = await evaluate_tofu_units(self.file, uri, customer, self.attr, frozenset(names))
+        except NixError as exc:
+            _report_nix_error(exc)
+        except ValidationError as exc:
+            _report_validation_error("tofu units", exc)
+        except ValueError as exc:
+            _log.error(str(exc))
+            raise SystemExit(1) from exc
+        await _check_tofu_units(units)
 
     async def _kubeconfig(
         self,
@@ -1745,6 +1768,12 @@ class KubeApply(CachePushCommand, FencedCommand):
             _report_nix_error(exc)
         except ValidationError as exc:
             _report_validation_error("kubeapply config", exc)
+
+        if not self.skip_schema_check:
+            # Before the push and the fence: it needs no cluster, so a unit
+            # that would fail inside the cluster stops the apply before
+            # anything is touched.
+            await self._check_shipped_tofu_units(cfg.objects, uri, customer)
 
         # Before the push, not only before the apply. The hook exists for a
         # path `ekn.cacheTo` cannot place, so it has to be able to repair

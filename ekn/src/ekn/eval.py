@@ -773,13 +773,14 @@ async def evaluate_tofu_units(
     flake_uri: str | None,
     customer: str | None,
     attr_path: str | None,
-    target: str | None = None,
+    target: str | frozenset[str] | None = None,
 ) -> list[TofuUnit]:
     """`deployment.tofuUnits`, built and ready to run.
 
-    With *target*, the chain one `ekn tofu` run covers: that unit's dependency
-    closure deepest first, then the unit itself. Without it, every `tf` unit
-    the instance declares, which is what `ekn commit` writes.
+    With *target* a name, the chain one `ekn tofu` run covers: that unit's
+    dependency closure deepest first, then the unit itself. With a set of
+    names, exactly those units, without their dependencies. With none, every
+    `tf` unit the instance declares, which is what `ekn commit` writes.
 
     The realisation is the reason this cannot be a plain `to_python`. Nix
     reports `configFile`, `jsonSchema` and `tofu` as store paths without
@@ -797,7 +798,13 @@ async def evaluate_tofu_units(
         if not isinstance(declared, dict):
             raise TypeError("deployment.tofuUnits did not evaluate to an object")
 
-        if target is None:
+        if isinstance(target, frozenset):
+            unknown = sorted(target - set(declared))
+            if unknown:
+                known = ", ".join(sorted(declared)) or "none"
+                raise ValueError(f'no deployment unit with class "tf" named {", ".join(unknown)}. Declared: {known}')
+            wanted = sorted(target)
+        elif target is None:
             wanted = list(declared)
         else:
             entry = declared.get(target)

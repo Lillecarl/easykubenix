@@ -351,6 +351,22 @@ class TestEknModule:
         with pytest.raises(NixError, match=r"holds no ekn\.envSeed reference"):
             await evaluate_file(NIX_TEST_FILE, "envSeededWithoutReferenceThrows")
 
+    async def test_an_object_may_name_the_tf_units_it_ships(self) -> None:
+        result = await evaluate_file(NIX_TEST_FILE, "tofuUnitsAnnotationRenders")
+        assert isinstance(result, list)
+        named = [o["metadata"]["annotations"]["ekn.dev/tofu-units"] for o in result if o["kind"] == "ConfigMap"]
+        assert named == ["infra"]
+
+    @pytest.mark.parametrize(
+        ("attr", "named"),
+        [("tofuUnitsAnnotationUnknownThrows", "nope"), ("tofuUnitsAnnotationKubernetesUnitThrows", "apps")],
+    )
+    async def test_naming_a_unit_that_is_not_tf_is_refused(self, attr: str, named: str) -> None:
+        # `ekn kubeapply` checks the units this names, so a typo would be a
+        # unit checked nowhere.
+        with pytest.raises(NixError, match=rf"default/ConfigMap/runner -> {named}\n"):
+            await evaluate_file(NIX_TEST_FILE, attr)
+
     async def test_the_seed_annotations_name_each_variable(self) -> None:
         # The annotations are what every consumer reads, so they are the
         # contract: one numbered key per variable, greppable against a live

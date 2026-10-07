@@ -860,6 +860,31 @@ let
     ];
   };
 
+  # `ekn.lib.tf.unitsAnnotation` names the `tf` units an object ships. A name
+  # that is not one is refused at evaluation, where `ekn kubeapply` would
+  # otherwise skip it in silence.
+  tofuUnitsAnnotated =
+    names:
+    (import ../. {
+      inherit pkgs;
+      modules = [
+        (
+          { ekn, ... }:
+          {
+            ekn.environment = "easykubenix";
+            deployment.deployBranch = "deploy";
+            deployment.units.apps.path = "clusters/home/apps";
+            deployment.units.infra = {
+              class = "tf";
+              path = "infra";
+            };
+            kubernetes.objects.default.ConfigMap.runner.metadata.annotations.${ekn.lib.tf.unitsAnnotation} =
+              names;
+          }
+        )
+      ];
+    }).config.kubernetes.generated;
+
   easyNoEnvironment = import ../. {
     inherit pkgs;
     modules = [
@@ -952,6 +977,9 @@ in
   # Forcing these must throw -- thunks, so the test can assert on the error.
   seededGitOpsThrows = easySeededGitOpsThrows;
   envSeededWithoutReferenceThrows = easyEnvSeededWithoutReferenceThrows;
+  tofuUnitsAnnotationRenders = tofuUnitsAnnotated "infra";
+  tofuUnitsAnnotationUnknownThrows = tofuUnitsAnnotated "infra,nope";
+  tofuUnitsAnnotationKubernetesUnitThrows = tofuUnitsAnnotated "apps";
 
   importTransformerMarker = easyImportTransformerMarker.config.kubernetes.generated;
   importTransformers = easyImportTransformers.config.kubernetes.generated;

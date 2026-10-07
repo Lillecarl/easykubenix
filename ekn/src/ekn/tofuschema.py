@@ -22,10 +22,13 @@ from typing import TYPE_CHECKING, Any, cast
 import jsonschema_rs
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
 MESSAGE = "x-ekn-message"
 DEFAULT_REGISTRY = "registry.opentofu.org"
+#: Names the `tf` units an object ships, comma-separated. easykubenix's
+#: `ekn.lib.tf.unitsAnnotation`; an assertion there refuses an unknown name.
+UNITS_ANNOTATION = "ekn.dev/tofu-units"
 
 # `$${` and `%%{` are escapes and stay literal.
 _TEMPLATE = r"(^|[^$])\$\{|(^|[^%])%\{"
@@ -448,6 +451,17 @@ def _with_declared_inputs(blocks: Mapping[str, Mapping[str, Any]]) -> dict[str, 
     module = out["module"]
     out["module"] = {**module, "body": {**module["body"], "any_attribute": _ANY_OPTIONAL}}
     return out
+
+
+def shipped_units(objects: Iterable[Mapping[str, Any]]) -> set[str]:
+    """The `tf` units *objects* name in their `UNITS_ANNOTATION`."""
+    found: set[str] = set()
+    for obj in objects:
+        annotations = obj.get("metadata", {}).get("annotations") or {}
+        value = annotations.get(UNITS_ANNOTATION) if isinstance(annotations, dict) else None
+        if isinstance(value, str):
+            found.update(name for name in value.split(",") if name)
+    return found
 
 
 # --- the check ----------------------------------------------------------------
