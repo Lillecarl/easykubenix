@@ -5,4 +5,5 @@
 :caption: Contents
 
 examples
+schema-check
 ```
