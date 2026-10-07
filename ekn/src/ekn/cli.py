@@ -79,7 +79,7 @@ from ekn.nixyaml import from_go_like_yaml_stream, from_yaml11_stream, from_yaml_
 from ekn.reclaim import reclaim
 from ekn.schemacheck import Catalog, GroupVersionKind, Report, add_rendered_crds, check
 from ekn.schemapolicy import PolicyResult, check_policies
-from ekn.schemasource import load_server, load_spec_dir, load_yannh
+from ekn.schemasource import load_installed, load_server, load_spec_dir, load_yannh
 from ekn.sops import ensure_age_identities, maybe_decrypt
 from ekn.tofu import (
     TofuError,
@@ -820,10 +820,16 @@ async def _check_schemas_live(api: kr8s.asyncio.Api, cluster: str, objects: list
     """Check *objects* against the cluster's own OpenAPI v3 and the rendered CRDs."""
 
     async def load(catalog: Catalog) -> None:
-        files = await load_server(catalog, api, cluster)
-        _log.info("read the cluster's OpenAPI v3", group_versions=files, cluster=cluster)
+        await _load_server(catalog, api, cluster)
 
     await _check_schemas(objects, load)
+
+
+async def _load_server(catalog: Catalog, api: kr8s.asyncio.Api, cluster: str) -> None:
+    files = await load_server(catalog, api, cluster)
+    _log.info("read the cluster's OpenAPI v3", group_versions=files, cluster=cluster)
+    installed = await load_installed(catalog, api)
+    _log.info("read the cluster's admission policies and namespaces", objects=installed)
 
 
 class SchemaCheck(FencedCommand):
@@ -871,9 +877,7 @@ class SchemaCheck(FencedCommand):
             uid = await clusterfence.require(
                 api, declared, environment=environment, override=self.i_dont_know_which_cluster_this_is
             )
-            cluster = uid or declared or "unidentified"
-            files = await load_server(catalog, api, cluster)
-            _log.info("read the cluster's OpenAPI v3", group_versions=files, cluster=cluster)
+            await _load_server(catalog, api, uid or declared or "unidentified")
         except (httpx.TransportError, OSError, ValueError) as exc:
             # A cluster that cannot be reached is the case yannh exists for.
             # One that answers with the wrong uid already raised SystemExit.

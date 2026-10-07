@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import celpy
+import httpx
+import kr8s
 import pytest
 from celpy.adapter import json_to_cel
+from kr8s.asyncio import Api
+from kr8s.asyncio.objects import APIObject
 
 from ekn.schemacel import lazy_cel
 from ekn.schemacheck import Catalog, Origin
 from ekn.schemapolicy import check_policies
+from ekn.schemasource import load_installed
 
 
 def _post(group: str, kind: str) -> dict[str, Any]:
@@ -319,3 +325,68 @@ def test_lazy_cel_leaves_its_source_alone() -> None:
     environment = celpy.Environment()
     environment.program(environment.compile("object.a.b == 1")).evaluate({"object": lazy_cel(document)})
     assert document == {"a": {"b": 1}}
+
+
+def test_an_installed_policy_checks_the_render(catalog: Catalog) -> None:
+    catalog.installed = [_policy([NAMED_WEB]), _binding(), _service("installed")]
+    result = check_policies([_service("api")], catalog)
+    assert [v.obj.name for v in result.violations] == ["api"]
+
+
+def test_a_rendered_policy_replaces_the_installed_one(catalog: Catalog) -> None:
+    catalog.installed = [_policy([NAMED_WEB]), _binding()]
+    permissive = _policy([{"expression": "true"}])
+    assert not check_policies([permissive, _service("api")], catalog).violations
+
+
+def test_an_installed_namespace_answers_the_selector(catalog: Catalog) -> None:
+    catalog.installed = [_namespace("strict", strict="yes")]
+    binding = _binding(matchResources={"namespaceSelector": {"matchLabels": {"strict": "yes"}}})
+    result = check_policies([_policy([NAMED_WEB]), binding, _service("api", "strict")], catalog)
+    assert [v.obj.namespace for v in result.violations] == ["strict"]
+    assert not result.undecided
+
+
+class _ListingApi(Api):
+    """Answers `async_get` for a kind class from *served*; any other is a 404,
+    as for a cluster older than admissionregistration.k8s.io/v1's policies."""
+
+    def __init__(self, served: dict[str, list[dict[str, Any]]], status: int = 404) -> None:
+        self.served = served
+        self.status = status
+
+    async def async_get(
+        self,
+        kind: str | type,
+        *names: str,
+        namespace: str | None = None,
+        label_selector: str | dict[str, str] | None = None,
+        field_selector: str | dict[str, str] | None = None,
+        as_object: type[APIObject] | None = None,
+        allow_unknown_type: bool = True,
+        raw: bool = False,
+        **kwargs: object,
+    ) -> AsyncGenerator[APIObject | dict[Any, Any]]:
+        if not isinstance(kind, type) or not issubclass(kind, APIObject):
+            raise TypeError(kind)
+        if kind.kind not in self.served:
+            raise kr8s.ServerError("refused", response=httpx.Response(self.status))
+        for item in self.served[kind.kind]:
+            yield kind(item)
+
+
+async def test_load_installed_reads_policies_and_namespaces() -> None:
+    catalog = Catalog()
+    api = _ListingApi(
+        {"ValidatingAdmissionPolicy": [{"metadata": {"name": "p"}}], "Namespace": [{"metadata": {"name": "a"}}]}
+    )
+    assert await load_installed(catalog, api) == 2
+    assert [(obj["apiVersion"], obj["kind"]) for obj in catalog.installed] == [
+        ("admissionregistration.k8s.io/v1", "ValidatingAdmissionPolicy"),
+        ("v1", "Namespace"),
+    ]
+
+
+async def test_load_installed_raises_what_is_not_a_404() -> None:
+    with pytest.raises(kr8s.ServerError):
+        await load_installed(Catalog(), _ListingApi({}, status=403))

@@ -6,6 +6,9 @@
 - `load_server`: the API server's own `/openapi/v3`, through kr8s. It also
   carries the schema of every CRD the cluster holds.
 - `load_yannh`: yannh/kubernetes-json-schema, for when no server answers.
+- `load_installed`: the API server's own ValidatingAdmissionPolicies, their
+  bindings and its Namespaces, which `schemapolicy` evaluates beside the
+  render's.
 
 The last two are cached under `cache_root() / <cluster>`, where `<cluster>` is
 the `kube-system` uid (`ekn.clusterUid`).
@@ -22,6 +25,8 @@ import anyio
 import httpx
 import structlog
 from anyio import Path
+from kr8s import ServerError
+from kr8s.asyncio.objects import APIObject, Namespace, new_class
 
 from ekn.schemacheck import Origin
 
@@ -46,6 +51,23 @@ YANNH_BASE = "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/mas
 
 #: The API server serves every group-version at once; this bounds how many.
 _FETCH_CONCURRENCY = 8
+
+#: What `load_installed` lists, as classes: a kind name goes through kr8s'
+#: discovery lookup, which is not needed here. A policy's namespaceSelector
+#: and `namespaceObject` read a Namespace the render may not hold.
+_INSTALLED: tuple[type[APIObject], ...] = (
+    new_class(
+        "ValidatingAdmissionPolicy.admissionregistration.k8s.io/v1",
+        namespaced=False,
+        plural="validatingadmissionpolicies",
+    ),
+    new_class(
+        "ValidatingAdmissionPolicyBinding.admissionregistration.k8s.io/v1",
+        namespaced=False,
+        plural="validatingadmissionpolicybindings",
+    ),
+    Namespace,
+)
 
 
 async def cache_root() -> Path:
@@ -120,6 +142,26 @@ async def load_server(catalog: Catalog, api: kr8s.asyncio.Api, cluster: str) -> 
     for path in sorted(documents):
         catalog.add_openapi_v3(documents[path], Origin.SERVER)
     return len(documents)
+
+
+async def load_installed(catalog: Catalog, api: kr8s.asyncio.Api) -> int:
+    """Add the cluster's admission policies, bindings and Namespaces to
+    `catalog.installed`. Returns how many objects."""
+    for kind in _INSTALLED:
+        try:
+            catalog.installed.extend(
+                [
+                    obj.raw
+                    async for obj in api.async_get(kind)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType] -- kr8s Api.async_get's yield type is unannotated upstream
+                    if isinstance(obj, APIObject)
+                ]
+            )
+        except ServerError as exc:
+            # admissionregistration.k8s.io/v1 serves policies from Kubernetes 1.30.
+            if exc.response is None or exc.response.status_code != httpx.codes.NOT_FOUND:
+                raise
+            _log.info("the cluster serves no such kind", kind=kind.kind, version=kind.version)
+    return len(catalog.installed)
 
 
 def yannh_name(gvk: GroupVersionKind) -> str:

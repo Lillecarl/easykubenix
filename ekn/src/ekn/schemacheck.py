@@ -330,6 +330,9 @@ class Catalog:
     #: Each kind's resource, from OpenAPI paths and rendered CRDs. A rendered
     #: CRD's wins, as its schema does.
     resources: dict[GroupVersionKind, Resource] = field(default_factory=dict)
+    #: Objects the cluster holds that admission reads: policies, bindings and
+    #: Namespaces. A rendered one of the same kind and name replaces it.
+    installed: list[dict[str, Any]] = field(default_factory=list)
     cel: CelChecker = field(default_factory=CelChecker)
 
     def _put(self, gvk: GroupVersionKind, entry: _Entry) -> None:

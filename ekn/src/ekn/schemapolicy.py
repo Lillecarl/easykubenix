@@ -390,16 +390,25 @@ def _target(obj: Mapping[str, Any], catalog: Catalog, namespaces: Mapping[str, d
     return _Target(strip_for_check(obj), ref, catalog.resources.get(ref.gvk), catalog.crd_schema(ref.gvk), namespace)
 
 
+def _kind_and_name(obj: Mapping[str, Any]) -> tuple[str, str]:
+    return str(obj.get("kind", "")), str(_metadata(obj).get("name", ""))
+
+
 def check_policies(objects: Iterable[Mapping[str, Any]], catalog: Catalog) -> PolicyResult:
-    """Every rendered binding against every rendered object it matches."""
+    """Every binding against every rendered object it matches. Bindings,
+    policies and Namespaces come from the render, then from
+    `catalog.installed` where the render holds none of that name: the apply
+    replaces those."""
     listed = list(objects)
+    rendered = {_kind_and_name(obj) for obj in listed}
+    known = listed + [obj for obj in catalog.installed if _kind_and_name(obj) not in rendered]
     result = PolicyResult()
-    bindings = _bindings(listed, result)
+    bindings = _bindings(known, result)
     if not bindings:
         return result
     namespaces = {
         str(_metadata(obj).get("name", "")): strip_for_check(obj)
-        for obj in listed
+        for obj in known
         if GroupVersionKind.of(obj) == GroupVersionKind("", "v1", "Namespace")
     }
     targets = [_target(obj, catalog, namespaces) for obj in listed]
