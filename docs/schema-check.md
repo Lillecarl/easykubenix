@@ -2,7 +2,8 @@
 
 `ekn schema-check` validates every rendered object the way the API server
 would. It finds a typo, a wrong type or a failed policy before anything is
-applied.
+applied. The same validator checks each OpenTofu unit's `config.tf.json`; see
+OpenTofu units below.
 
 ## What it checks
 
@@ -69,3 +70,62 @@ violation, as it is on the API server, unless the policy says
 The API server also fills defaults on built-in kinds before admission, in Go
 code that no schema describes. A policy expression that reads such a field
 without `has()` can fail here and pass on the server.
+
+## OpenTofu units
+
+A `tf` unit's `config.tf.json` is checked against a JSON Schema, by the same
+validator as the manifests. The schema has two sources:
+
+| source | build |
+| --- | --- |
+| OpenTofu's core schema: `terraform`, `variable`, `output`, the meta-arguments | opentofu-schema, the library the OpenTofu language server reads, exported by `tools/tofuschema` for `tofu.package`'s version |
+| each provider's resources, data sources and configuration | `tofu providers schema -json` in the build sandbox, as `tofu.providerSchemas` |
+
+`tofu.providerSchemas` reads only `required_providers`, so a change to a
+resource does not rebuild it. `ekn.tofuschema` merges the two into
+`tofu.jsonSchema` and writes the rules of HCL's JSON syntax into it: a
+`${...}` template is accepted for any value, `"2"` is a number, `"1"` is a
+bool, and a block is one object or an array of them.
+
+The check refuses an unknown argument or block, a missing required argument,
+a value that does not convert to its type, a read-only attribute, a resource
+or data type that no required provider declares, and a provider that
+`required_providers` does not name.
+
+It runs in three places:
+
+- `ekn tofu plan|apply|destroy`: before the first `tofu init`, for every
+  unit in the chain. `--skip-schema-check` turns it off.
+- `ekn deploy`: in the verify stage, for every `tf` unit.
+- `tofu.schemaCheck`: a Nix build of the same check.
+
+`nix build --file ./checks.nix tofu-schema` holds the check to
+`tofu validate`, case by case. No deploy path runs `tofu validate`.
+
+### Where it differs from `tofu validate`
+
+It is stricter in three places:
+
+- An unknown argument in a `provider` block. `tofu validate` does not read the
+  block, and `tofu plan` refuses it.
+- An unknown argument in the backend. `tofu validate` does not read it, and
+  `tofu init` refuses it.
+- An unknown key in a nested attribute's object. OpenTofu drops the key
+  silently, so it does nothing.
+
+It cannot know:
+
+- A limit that a provider enforces in its own code and not in its schema.
+  The `tls` provider's `subject` block, at most one, is an example.
+- A module call's inputs. They come from the called module, so a `module`
+  block takes any argument.
+- The type of a variable's `default`.
+- What a `${...}` template evaluates to.
+
+A backend argument the schema requires must be in `config.tf.json`. `ekn
+tofu` runs `tofu init` with no `-backend-config`, so nothing else can give
+it, and an argument that the backend reads from the environment is refused
+as missing.
+
+opentofu-schema 0.4.3 describes OpenTofu up to 1.12. A newer `tofu.package`
+gets the 1.12 core schema.
