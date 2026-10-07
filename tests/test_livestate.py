@@ -21,9 +21,7 @@ from ekn.livestate import (
     canonical_json,
     desired_hash,
     foreign_owners,
-    manifest_hash,
     skippable,
-    strip_hash_annotation,
     sweep,
 )
 
@@ -63,25 +61,6 @@ ENGINE: frozenset[str] = frozenset({"argocd-controller", "kube-controller-manage
 
 
 class TestTheHash:
-    def test_it_ignores_its_own_annotation(self) -> None:
-        """The annotation is part of the object, so hashing it in would make
-        the value depend on itself."""
-        without = manifest()
-        with_hash = manifest(hash_value="sha256:whatever")
-
-        assert manifest_hash(without) == manifest_hash(with_hash)
-
-    def test_it_keeps_every_other_annotation(self) -> None:
-        assert manifest_hash(manifest()) != manifest_hash(manifest(other="value"))
-
-    def test_stripping_leaves_no_empty_annotations_key(self) -> None:
-        """An empty `annotations: {}` is not the same JSON as no annotations
-        at all, and the two producers have to agree byte for byte."""
-        stripped = strip_hash_annotation(manifest(hash_value="sha256:x"))
-        metadata = stripped["metadata"]
-        assert isinstance(metadata, dict)
-        assert "annotations" not in metadata
-
     def test_canonical_json_is_stable_under_key_order(self) -> None:
         a: Manifest = {"b": 1, "a": 2}
         b: Manifest = {"a": 2, "b": 1}

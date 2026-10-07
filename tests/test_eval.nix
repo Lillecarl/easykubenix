@@ -1171,14 +1171,8 @@ in
         )
       ];
     }).config.kubernetes.generated;
-  # Every shape the two hash producers could disagree on, in one render.
-  # `tests/test_eval.py` hashes each object again in Python and compares.
-  #
-  # The values are chosen for the canonicalisation rather than for realism:
-  # non-ASCII (UTF-8 rather than escapes), an integer, a bool coerced to a
-  # string by `coerceLabelsAndAnnotations`, a nested list, and keys that are
-  # not in source order. A seeded object and a SOPS-encrypted one are here to
-  # be *absent* from the stamped set.
+  # The render's `ekn.dev/manifest-hash`. A seeded object and a SOPS-encrypted
+  # one are here to be *absent* from the stamped set.
   manifestHashShapes =
     let
       rendered =
@@ -1223,5 +1217,23 @@ in
       # built from a second `removeAttrs` -- so a stamp applied in only one of
       # them shows up here as two hashes for one object.
       unit = rendered.deploymentUnits.apps.objects;
+      properties =
+        let
+          inherit (easy.passthru.pkgs.lib) manifestHash stampManifestHash;
+          plain = {
+            apiVersion = "v1";
+            kind = "ConfigMap";
+            metadata.name = "a";
+          };
+          annotated = pkgs.lib.recursiveUpdate plain { metadata.annotations.other = "value"; };
+          stamped = stampManifestHash plain;
+        in
+        {
+          plainHash = manifestHash plain;
+          # Equal only if stripping drops the emptied `annotations` key too.
+          ignoresItsOwnAnnotation = manifestHash stamped == manifestHash plain;
+          keepsOtherAnnotations = manifestHash annotated != manifestHash plain;
+          restampIsIdempotent = stampManifestHash stamped == stamped;
+        };
     };
 }

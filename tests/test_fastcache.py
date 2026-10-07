@@ -13,6 +13,7 @@ up as an apply that quietly did nothing.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import stat
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -27,7 +28,7 @@ from test_apply import FakeApi
 from ekn.apply import apply_and_prune
 from ekn.directapply import converge_direct
 from ekn.fastcache import FORMAT_VERSION, ApplyCache, Entry, cache_root, cluster_id, digest, open_cache
-from ekn.livestate import HASH_ANNOTATION, LiveObject, manifest_hash
+from ekn.livestate import HASH_ANNOTATION, LiveObject, canonical_json
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -549,8 +550,13 @@ class TestTheCredentialRuleOnEveryPath:
         assert _uncacheable_objects([decrypted]) == set()
 
 
+def render_hash(spec: Manifest) -> str:
+    """A stand-in for the hash the render stamps: distinct per object."""
+    return f"sha256:{hashlib.sha256(canonical_json(spec).encode()).hexdigest()}"
+
+
 #: What the render stamps, and what the cold route compares against.
-STAMPED = manifest_hash(manifest())
+STAMPED = render_hash(manifest())
 
 
 def stamped(**data: Any) -> Manifest:
@@ -558,7 +564,7 @@ def stamped(**data: Any) -> Manifest:
     spec = manifest(**data)
     metadata = spec["metadata"]
     assert isinstance(metadata, dict)
-    metadata["annotations"] = {HASH_ANNOTATION: manifest_hash(spec)}
+    metadata["annotations"] = {HASH_ANNOTATION: render_hash(spec)}
     return spec
 
 

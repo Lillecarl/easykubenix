@@ -25,7 +25,6 @@ what it returns.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -236,55 +235,12 @@ async def sweep(
 
 
 def canonical_json(spec: Manifest) -> str:
-    """The exact bytes both hash implementations must agree on.
+    """Sorted keys, no spaces, and no trailing newline.
 
-    **Two producers compute this hash and they have to match exactly.** The
-    render computes it in Nix for every generated object; `kubernetes.rawFiles`
-    are parsed in Python, because `builtins.toJSON` reorders their keys, so
-    those hash here instead. A difference of one separator makes every raw
-    file look changed on every run, for ever, and the symptom is a fast mode
-    that is not fast rather than an error.
-
-    Sorted keys, no spaces, and no trailing newline.
+    `ekn.dev/manifest-hash` is not computed here: the render stamps it in Nix,
+    and `ekn` only reads it (`desired_hash`).
     """
     return json.dumps(spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
-def strip_hash_annotation(spec: Manifest) -> Manifest:
-    """The object as hashed: itself, without the hash annotation.
-
-    Only that key. `ekn.dev/environment` deliberately stays out of the
-    stripping, because it is never in the rendered object either -- `ekn`
-    stamps it at apply time. So the same object applied by ArgoCD and by
-    `ekn` hashes the same, which is what lets a fast run skip work an engine
-    did.
-    """
-    metadata_value = spec.get("metadata") or {}
-    if not isinstance(metadata_value, dict):
-        return spec
-    annotations_value = metadata_value.get("annotations") or {}
-    if not isinstance(annotations_value, dict) or HASH_ANNOTATION not in annotations_value:
-        return spec
-    annotations = {k: v for k, v in annotations_value.items() if k != HASH_ANNOTATION}
-    metadata = dict(metadata_value)
-    if annotations:
-        metadata["annotations"] = annotations
-    else:
-        del metadata["annotations"]
-    stripped = dict(spec)
-    stripped["metadata"] = metadata
-    return stripped
-
-
-def manifest_hash(spec: Manifest) -> str:
-    """The `sha256:<hex>` this object should carry.
-
-    For `kubernetes.rawFiles`, which are parsed here rather than rendered by
-    Nix. Every generated object gets the same value computed in Nix, and the
-    two must agree exactly -- see `canonical_json`.
-    """
-    body = canonical_json(strip_hash_annotation(spec))
-    return f"sha256:{hashlib.sha256(body.encode()).hexdigest()}"
 
 
 def desired_hash(spec: Manifest) -> str | None:
@@ -416,8 +372,6 @@ __all__ = [
     "canonical_json",
     "desired_hash",
     "foreign_owners",
-    "manifest_hash",
     "skippable",
-    "strip_hash_annotation",
     "sweep",
 ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,7 +16,7 @@ from ekn.eval import (
     evaluate_kubeapply_config,
     realise_attr,
 )
-from ekn.livestate import strip_hash_annotation
+from ekn.livestate import HASH_ANNOTATION
 from ekn.nix import evaluator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -27,12 +28,17 @@ def without_hash(obj: Any) -> Any:
     """One rendered object without its `ekn.dev/manifest-hash`.
 
     Every object the render produces carries one, so an assertion about an
-    object's exact shape is an assertion about this. `strip_hash_annotation`
-    is the render's own inverse, including dropping an `annotations` that held
-    nothing else -- which is what lets a test still say "this object carries
-    no annotations".
+    object's exact shape is an assertion about this. An `annotations` that
+    held nothing else goes too, which lets a test still say "this object
+    carries no annotations".
     """
-    return strip_hash_annotation(obj)
+    metadata = dict(obj["metadata"])
+    annotations = {k: v for k, v in metadata.get("annotations", {}).items() if k != HASH_ANNOTATION}
+    if annotations:
+        metadata["annotations"] = annotations
+    else:
+        metadata.pop("annotations", None)
+    return {**obj, "metadata": metadata}
 
 
 @pytest.fixture(scope="module")
@@ -1383,30 +1389,23 @@ class TestModuleSystemShape:
         assert result["pkgsIsPackageSet"]
 
 
-class TestTheManifestHashHasTwoProducers:
-    """The render stamps `ekn.dev/manifest-hash` in Nix; `ekn` reads it in
-    Python. The two canonicalisations are written twice, in two languages, and
-    a difference of one separator makes every object look changed on every
-    run, for ever -- with no error, just a fast mode that is not fast.
+class TestTheManifestHash:
+    """The render stamps `ekn.dev/manifest-hash` in Nix, and `ekn` only reads it."""
 
-    The sets they hash are disjoint today (`kubernetes.rawFiles` are the only
-    objects Python hashes, and Nix never parses those), so this gate is what
-    makes the agreement established rather than assumed. It stops being
-    merely that on the day anything recomputes what the other wrote.
-    """
-
-    async def test_nix_and_python_agree_on_every_rendered_object(self) -> None:
-        from ekn.livestate import desired_hash, manifest_hash
-
+    async def test_the_canonical_bytes_do_not_move(self) -> None:
+        """A change to the canonicalisation changes every hash, and every
+        cluster then takes a full apply once. The digest of these exact bytes
+        pins it."""
         rendered = cast("dict[str, Any]", await evaluate_file(NIX_TEST_FILE, "manifestHashShapes"))
-        stamped = [obj for obj in rendered["generated"] if desired_hash(obj) is not None]
+        body = b'{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"a"}}'
 
-        assert stamped, "the fixture rendered nothing carrying a hash"
-        for obj in stamped:
-            assert desired_hash(obj) == manifest_hash(obj), (
-                f"{obj['kind']}/{obj['metadata']['name']}: the render stamped "
-                f"{desired_hash(obj)} and Python computes {manifest_hash(obj)}"
-            )
+        assert rendered["properties"]["plainHash"] == f"sha256:{hashlib.sha256(body).hexdigest()}"
+
+    @pytest.mark.parametrize("prop", ["ignoresItsOwnAnnotation", "keepsOtherAnnotations", "restampIsIdempotent"])
+    async def test_a_property_of_the_hash(self, prop: str) -> None:
+        rendered = cast("dict[str, Any]", await evaluate_file(NIX_TEST_FILE, "manifestHashShapes"))
+
+        assert rendered["properties"][prop] is True
 
     async def test_a_credential_is_never_stamped(self) -> None:
         """A digest published in the manifest is a brute-force oracle for the
