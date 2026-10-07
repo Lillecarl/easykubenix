@@ -1081,6 +1081,10 @@ in
                 Nix input (so it's pinned/reproducible like everything
                 else), but never parsed into `resources`/`generated` --
                 `ekn kubeapply`/`ekn commit` read it directly instead.
+
+                For the same reason it carries no `ekn.dev/manifest-hash`
+                unless the file holds one, so `ekn kubeapply` applies it on
+                every run.
               '';
             };
             deploymentUnit = lib.mkOption {
